@@ -22,8 +22,9 @@ The current version provides a dependency-light local workflow that can run with
 - Run validation commands through an allowlist.
 - Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
 - Generate suggested commit messages and pull request drafts from local Git changes.
+- Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
 - Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, patch proposal, Git workflow, and workflow behavior.
+- Provide unit tests for scanner, search, patch proposal, Git workflow, GitHub workflow, and workflow behavior.
 
 This MVP intentionally uses deterministic local logic first. LLM providers, patch application, persistent storage, and web UI features will be added after the core workflow is stable.
 
@@ -36,6 +37,7 @@ This MVP intentionally uses deterministic local logic first. LLM providers, patc
 - **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
 - **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
+- **GitHub Workflow Awareness**: Read open issues, open pull requests, PR reviews, and CI/check status from the GitHub REST API.
 - **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
 - **PR Summary Generation**: Generate concise pull request descriptions, risk notes, and test evidence.
 - **Safety Controls**: Use command allowlists, sensitive file protection, and clear approval boundaries.
@@ -61,7 +63,8 @@ The first version focuses on a complete local workflow:
 5. Propose file-level changes for user review.
 6. Run allowlisted validation commands.
 7. Inspect Git state and generate commit or PR draft text.
-8. Generate a final engineering summary.
+8. Inspect GitHub issue, pull request, review, and CI state when a GitHub remote is configured.
+9. Generate a final engineering summary.
 
 Diff generation and human-approved patch application are planned next.
 
@@ -105,6 +108,20 @@ Generate a pull request draft:
 python repopilot.py git pr-draft --repo . --validation "python -m unittest discover -s tests"
 ```
 
+Inspect GitHub issue, pull request, review, and CI state:
+
+```bash
+python repopilot.py github status --repo .
+```
+
+Print GitHub state as JSON:
+
+```bash
+python repopilot.py github status --repo . --limit 10 --json
+```
+
+The GitHub command resolves the repository from the local `origin` remote. It can read public repositories without a token, but `GITHUB_TOKEN` or `GH_TOKEN` is recommended for private repositories and higher rate limits.
+
 Run tests:
 
 ```bash
@@ -135,7 +152,8 @@ This project combines modern AI engineering with real software development workf
 - LLM-backed planning, review, and patch generation
 - Diff proposal generation
 - Human-approved patch application
-- GitHub API integration for issue import and pull request creation
+- GitHub issue import into RepoPilot tasks
+- GitHub pull request creation after user approval
 - FastAPI service for workflow execution
 - React or Next.js dashboard for execution traces, diffs, approvals, and results
 - Multi-agent collaboration between planner, implementer, tester, and reviewer
@@ -146,4 +164,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, patch proposal module, validation runner, Git workflow awareness commands, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, patch proposal module, validation runner, Git workflow awareness commands, GitHub workflow awareness command, root launcher, and unit tests are implemented.

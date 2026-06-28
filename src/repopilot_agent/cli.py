@@ -8,6 +8,7 @@ from dataclasses import asdict
 
 from .git_summary import build_git_workflow_summary
 from .git_tools import inspect_repository
+from .github_tools import inspect_github_repository
 from .workflow import run_workflow
 
 
@@ -53,6 +54,14 @@ def main() -> int:
     )
     git_pr_parser.add_argument("--json", action="store_true", help="Print PR draft as JSON.")
 
+    github_parser = subparsers.add_parser("github", help="Inspect GitHub issue, PR, review, and CI state.")
+    github_subparsers = github_parser.add_subparsers(dest="github_command", required=True)
+
+    github_status_parser = github_subparsers.add_parser("status", help="Show GitHub repository collaboration state.")
+    github_status_parser.add_argument("--repo", default=".", help="Path to the local Git repository.")
+    github_status_parser.add_argument("--limit", type=int, default=5, help="Maximum number of issues and PRs to read.")
+    github_status_parser.add_argument("--json", action="store_true", help="Print GitHub state as JSON.")
+
     args = parser.parse_args()
     if args.command == "run":
         report = run_workflow(args.repo, args.task, args.validate)
@@ -63,6 +72,8 @@ def main() -> int:
         return 0
     if args.command == "git":
         return _handle_git_command(args)
+    if args.command == "github":
+        return _handle_github_command(args)
     return 1
 
 
@@ -89,6 +100,17 @@ def _handle_git_command(args) -> int:
             print(summary.pull_request.title)
             print()
             print(summary.pull_request.body)
+        return 0
+    return 1
+
+
+def _handle_github_command(args) -> int:
+    if args.github_command == "status":
+        snapshot = inspect_github_repository(args.repo, limit=args.limit)
+        if args.json:
+            print(json.dumps(snapshot.to_dict(), indent=2))
+        else:
+            _print_github_status(snapshot)
         return 0
     return 1
 
@@ -197,6 +219,57 @@ def _print_git_summary(summary) -> None:
     print("PR draft")
     print(f"Title: {summary.pull_request.title}")
     print(summary.pull_request.body)
+
+
+def _print_github_status(snapshot) -> None:
+    print("RepoPilot GitHub Status")
+    print("=======================")
+    if snapshot.repository:
+        repo = snapshot.repository
+        print(f"Repository: {repo.owner}/{repo.repo}")
+        print(f"URL: {repo.html_url}")
+    else:
+        print("Repository: unavailable")
+    if snapshot.unavailable_reason:
+        print(f"Unavailable: {snapshot.unavailable_reason}")
+        return
+    print()
+
+    print("Open issues")
+    if snapshot.issues:
+        for issue in snapshot.issues:
+            labels = f" [{', '.join(issue.labels)}]" if issue.labels else ""
+            print(f"- #{issue.number} {issue.title}{labels}")
+            print(f"  Author: {issue.author}; Updated: {issue.updated_at}")
+            print(f"  {issue.html_url}")
+    else:
+        print("- No open issues returned.")
+    print()
+
+    print("Open pull requests")
+    if snapshot.pull_requests:
+        for pull_request in snapshot.pull_requests:
+            print(f"- #{pull_request.number} {pull_request.title}")
+            print(
+                f"  {pull_request.source_branch} -> {pull_request.target_branch}; "
+                f"Author: {pull_request.author}; Updated: {pull_request.updated_at}"
+            )
+            print(f"  {pull_request.html_url}")
+            if pull_request.reviews:
+                print("  Reviews")
+                for review in pull_request.reviews:
+                    print(f"  - {review.state} by {review.reviewer} at {review.submitted_at or 'unknown time'}")
+            else:
+                print("  Reviews: none returned")
+            if pull_request.checks:
+                print("  Checks")
+                for check in pull_request.checks:
+                    conclusion = f"/{check.conclusion}" if check.conclusion else ""
+                    print(f"  - {check.name}: {check.status}{conclusion}")
+            else:
+                print("  Checks: none returned")
+    else:
+        print("- No open pull requests returned.")
 
 
 if __name__ == "__main__":

@@ -125,6 +125,67 @@ class GitWorkflowSummary:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class GitHubRepositoryRef:
+    owner: str
+    repo: str
+    html_url: str
+
+
+@dataclass(frozen=True)
+class GitHubIssue:
+    number: int
+    title: str
+    state: str
+    author: str
+    labels: list[str]
+    updated_at: str
+    html_url: str
+
+
+@dataclass(frozen=True)
+class GitHubReview:
+    reviewer: str
+    state: str
+    submitted_at: str | None
+    body_preview: str
+    html_url: str
+
+
+@dataclass(frozen=True)
+class GitHubCheck:
+    name: str
+    status: str
+    conclusion: str | None
+    html_url: str | None
+
+
+@dataclass(frozen=True)
+class GitHubPullRequest:
+    number: int
+    title: str
+    state: str
+    author: str
+    source_branch: str
+    target_branch: str
+    head_sha: str
+    updated_at: str
+    html_url: str
+    reviews: list[GitHubReview]
+    checks: list[GitHubCheck]
+
+
+@dataclass(frozen=True)
+class GitHubSnapshot:
+    repository: GitHubRepositoryRef | None
+    issues: list[GitHubIssue]
+    pull_requests: list[GitHubPullRequest]
+    unavailable_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class WorkflowReport:
     task: str
