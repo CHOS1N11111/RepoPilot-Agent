@@ -17,21 +17,21 @@ The current version provides a dependency-light local workflow that can run with
 - Scan a local repository while ignoring common build, dependency, cache, and Git directories.
 - Read supported text files such as Python, Markdown, JavaScript, TypeScript, JSON, TOML, YAML, HTML, CSS, Go, Rust, Java, and shell files.
 - Search repository files using task keywords and return ranked relevant files with match reasons and previews.
-- Generate a deterministic engineering plan from the task and retrieved context.
+- Generate an engineering plan from the task and retrieved context, with optional LLM-backed planning.
 - Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions.
 - Run validation commands through an allowlist.
 - Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
 - Generate suggested commit messages and pull request drafts from local Git changes.
 - Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
 - Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, patch proposal, Git workflow, GitHub workflow, and workflow behavior.
+- Provide unit tests for scanner, search, LLM planning fallback, patch proposal, Git workflow, GitHub workflow, and workflow behavior.
 
-This MVP intentionally uses deterministic local logic first. LLM providers, patch application, persistent storage, and web UI features will be added after the core workflow is stable.
+This MVP uses deterministic local logic by default and can use an OpenAI-compatible LLM for planning when configured. If the LLM is unavailable or returns invalid JSON, RepoPilot falls back to the deterministic planner unless fallback is disabled.
 
 ## Core Features
 
 - **Repository Understanding**: Index source code, README files, configuration files, and project documentation.
-- **Task Planning**: Convert a user request into a clear engineering plan with actionable steps.
+- **Task Planning**: Convert a user request into a clear engineering plan with actionable steps, either through deterministic rules or an optional LLM planner.
 - **Code Search and Context Retrieval**: Combine semantic search with precise keyword search to locate relevant files and functions.
 - **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, and validation suggestions before applying edits.
 - **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
@@ -40,7 +40,7 @@ This MVP intentionally uses deterministic local logic first. LLM providers, patc
 - **GitHub Workflow Awareness**: Read open issues, open pull requests, PR reviews, and CI/check status from the GitHub REST API.
 - **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
 - **PR Summary Generation**: Generate concise pull request descriptions, risk notes, and test evidence.
-- **Safety Controls**: Use command allowlists, sensitive file protection, and clear approval boundaries.
+- **Safety Controls**: Use command allowlists, LLM fallback behavior, sensitive file protection, and clear approval boundaries.
 
 ## Planned Architecture
 
@@ -50,7 +50,7 @@ This MVP intentionally uses deterministic local logic first. LLM providers, patc
 - **Retrieval Layer**: LlamaIndex or a lightweight custom index for repository search and documentation retrieval.
 - **Storage**: SQLite for task history, execution traces, repository metadata, and validation results.
 - **Sandboxing**: Docker-based execution environment for safer command execution.
-- **Model Layer**: Pluggable LLM provider interface for OpenAI-compatible APIs and local models.
+- **Model Layer**: Pluggable LLM provider interface for OpenAI-compatible APIs, with deterministic fallback.
 
 ## MVP Scope
 
@@ -58,7 +58,7 @@ The first version focuses on a complete local workflow:
 
 1. Select or register a local repository.
 2. Submit a bug report or feature request.
-3. Generate an implementation plan.
+3. Generate an implementation plan with rules or an optional LLM planner.
 4. Search and display relevant files.
 5. Propose file-level changes for user review.
 6. Run allowlisted validation commands.
@@ -83,6 +83,30 @@ python repopilot.py run --repo . --task "fix search relevance for login behavior
 ```
 
 The report includes ranked relevant files, an implementation plan, proposed file-level changes, risk notes, validation suggestions, validation results, and a final summary.
+
+Use the LLM planner:
+
+```bash
+python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm
+```
+
+Use a specific model:
+
+```bash
+python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --model gpt-4o-mini
+```
+
+Disable fallback when debugging LLM output:
+
+```bash
+python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --no-llm-fallback
+```
+
+The LLM planner reads these environment variables:
+
+- `OPENAI_API_KEY`: API key for the OpenAI-compatible provider.
+- `OPENAI_BASE_URL`: Optional API base URL. Defaults to `https://api.openai.com/v1`.
+- `REPOPILOT_MODEL`: Optional default model name.
 
 Print JSON output:
 
@@ -149,7 +173,8 @@ This project combines modern AI engineering with real software development workf
 
 ## Future Extensions
 
-- LLM-backed planning, review, and patch generation
+- LLM-backed review generation
+- LLM-backed patch proposal generation
 - Diff proposal generation
 - Human-approved patch application
 - GitHub issue import into RepoPilot tasks
@@ -164,4 +189,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, patch proposal module, validation runner, Git workflow awareness commands, GitHub workflow awareness command, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, patch proposal module, validation runner, Git workflow awareness commands, GitHub workflow awareness command, root launcher, and unit tests are implemented.

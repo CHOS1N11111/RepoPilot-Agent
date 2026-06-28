@@ -33,6 +33,14 @@ class PlanStep:
 
 
 @dataclass(frozen=True)
+class PlanMetadata:
+    source: str
+    model: str | None = None
+    fallback_used: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class ValidationResult:
     command: str
     allowed: bool
@@ -193,6 +201,7 @@ class WorkflowReport:
     files_scanned: int
     relevant_files: list[SearchHit] = field(default_factory=list)
     plan: list[PlanStep] = field(default_factory=list)
+    plan_metadata: PlanMetadata = field(default_factory=lambda: PlanMetadata(source="rules"))
     patch_proposal: PatchProposal | None = None
     validation: list[ValidationResult] = field(default_factory=list)
     summary: str = ""

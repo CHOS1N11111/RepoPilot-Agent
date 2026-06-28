@@ -25,6 +25,13 @@ def main() -> int:
         default=[],
         help="Allowlisted validation command to run. Can be provided multiple times.",
     )
+    run_parser.add_argument("--use-llm", action="store_true", help="Use an LLM for planning when configured.")
+    run_parser.add_argument("--model", help="Override the model used by the LLM planner.")
+    run_parser.add_argument(
+        "--no-llm-fallback",
+        action="store_true",
+        help="Fail instead of falling back to the rule-based planner when LLM planning fails.",
+    )
     run_parser.add_argument("--json", action="store_true", help="Print the workflow report as JSON.")
 
     git_parser = subparsers.add_parser("git", help="Inspect local Git workflow state.")
@@ -64,7 +71,14 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.command == "run":
-        report = run_workflow(args.repo, args.task, args.validate)
+        report = run_workflow(
+            args.repo,
+            args.task,
+            args.validate,
+            use_llm=args.use_llm,
+            llm_model=args.model,
+            allow_llm_fallback=not args.no_llm_fallback,
+        )
         if args.json:
             print(json.dumps(report.to_dict(), indent=2))
         else:
@@ -121,6 +135,13 @@ def _print_report(report) -> None:
     print(f"Task: {report.task}")
     print(f"Repository: {report.repo_path}")
     print(f"Files scanned: {report.files_scanned}")
+    print(f"Plan source: {report.plan_metadata.source}")
+    if report.plan_metadata.model:
+        print(f"Plan model: {report.plan_metadata.model}")
+    if report.plan_metadata.fallback_used:
+        print("Plan fallback: used")
+    if report.plan_metadata.error:
+        print(f"Plan error: {report.plan_metadata.error}")
     print()
 
     print("Relevant files")
