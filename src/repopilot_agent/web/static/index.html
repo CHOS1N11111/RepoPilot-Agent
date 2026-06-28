@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RepoPilot Agent</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>RepoPilot Agent</h1>
+        <p>Local coding workflow, LLM planning, GitHub awareness, and diff review.</p>
+      </div>
+      <button id="refreshAll" class="secondary">Refresh</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel control-panel">
+        <h2>Run Workflow</h2>
+        <label>
+          Repository path
+          <input id="repoPath" value="." />
+        </label>
+        <label>
+          Task
+          <textarea id="taskInput" rows="7">fix search relevance for login behavior</textarea>
+        </label>
+        <label>
+          Validation command
+          <input id="validationInput" value="python -m unittest discover -s tests" />
+        </label>
+
+        <div class="switch-row">
+          <label class="checkbox">
+            <input id="useLlm" type="checkbox" />
+            Use LLM
+          </label>
+          <label class="checkbox">
+            <input id="disableFallback" type="checkbox" />
+            Disable fallback
+          </label>
+        </div>
+
+        <label>
+          Model
+          <select id="modelSelect">
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+            <option value="gpt-4.1">gpt-4.1</option>
+            <option value="custom">Custom</option>
+          </select>
+        </label>
+        <label id="customModelWrap" class="hidden">
+          Custom model
+          <input id="customModel" placeholder="provider-model-name" />
+        </label>
+        <label>
+          API base URL
+          <input id="baseUrl" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>
+          API key
+          <input id="apiKey" type="password" placeholder="Only sent to this local server for this run" />
+        </label>
+
+        <button id="runWorkflow">Run RepoPilot</button>
+        <p id="statusLine" class="status-line">Ready.</p>
+      </section>
+
+      <section class="panel output-panel">
+        <div class="tabs">
+          <button class="tab active" data-tab="summary">Summary</button>
+          <button class="tab" data-tab="llm">LLM I/O</button>
+          <button class="tab" data-tab="github">GitHub</button>
+          <button class="tab" data-tab="diff">Diff</button>
+          <button class="tab" data-tab="json">JSON</button>
+        </div>
+
+        <section id="summaryTab" class="tab-content active">
+          <div class="metrics">
+            <div><span id="filesScanned">0</span><small>files scanned</small></div>
+            <div><span id="planSource">rules</span><small>plan source</small></div>
+            <div><span id="proposalSource">rules</span><small>proposal source</small></div>
+          </div>
+          <h2>Plan</h2>
+          <ol id="planList" class="stack"></ol>
+          <h2>Proposed Changes</h2>
+          <div id="proposalList" class="stack"></div>
+          <h2>Validation</h2>
+          <div id="validationList" class="stack"></div>
+        </section>
+
+        <section id="llmTab" class="tab-content">
+          <h2>LLM Input</h2>
+          <pre id="llmInput" class="code-block"></pre>
+          <h2>LLM Output</h2>
+          <pre id="llmOutput" class="code-block"></pre>
+        </section>
+
+        <section id="githubTab" class="tab-content">
+          <div class="toolbar">
+            <button id="loadGithub" class="secondary">Load GitHub Status</button>
+          </div>
+          <div id="githubContent" class="stack"></div>
+        </section>
+
+        <section id="diffTab" class="tab-content">
+          <div class="toolbar">
+            <button id="loadDiff" class="secondary">Load Working Diff</button>
+            <button id="loadStagedDiff" class="secondary">Load Staged Diff</button>
+          </div>
+          <pre id="diffOutput" class="diff-block"></pre>
+        </section>
+
+        <section id="jsonTab" class="tab-content">
+          <pre id="jsonOutput" class="code-block"></pre>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

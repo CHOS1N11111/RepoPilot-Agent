@@ -9,6 +9,7 @@ from dataclasses import asdict
 from .git_summary import build_git_workflow_summary
 from .git_tools import inspect_repository
 from .github_tools import inspect_github_repository
+from .web_server import run_web_server
 from .workflow import run_workflow
 
 
@@ -69,6 +70,10 @@ def main() -> int:
     github_status_parser.add_argument("--limit", type=int, default=5, help="Maximum number of issues and PRs to read.")
     github_status_parser.add_argument("--json", action="store_true", help="Print GitHub state as JSON.")
 
+    serve_parser = subparsers.add_parser("serve", help="Start the local RepoPilot web UI.")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host for the local web server.")
+    serve_parser.add_argument("--port", type=int, default=8765, help="Port for the local web server.")
+
     args = parser.parse_args()
     if args.command == "run":
         report = run_workflow(
@@ -88,6 +93,9 @@ def main() -> int:
         return _handle_git_command(args)
     if args.command == "github":
         return _handle_github_command(args)
+    if args.command == "serve":
+        run_web_server(args.host, args.port)
+        return 0
     return 1
 
 

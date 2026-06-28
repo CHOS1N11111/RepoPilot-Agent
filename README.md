@@ -23,8 +23,9 @@ The current version provides a dependency-light local workflow that can run with
 - Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
 - Generate suggested commit messages and pull request drafts from local Git changes.
 - Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
+- Use a local web UI for LLM settings, task input, workflow output, GitHub status, and diff review.
 - Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, LLM planning fallback, LLM patch proposal fallback, Git workflow, GitHub workflow, and workflow behavior.
+- Provide unit tests for scanner, search, LLM planning fallback, LLM patch proposal fallback, Git workflow, GitHub workflow, web server helpers, and workflow behavior.
 
 This MVP uses deterministic local logic by default and can use an OpenAI-compatible LLM for planning and patch proposal generation when configured. If the LLM is unavailable or returns invalid JSON, RepoPilot falls back to deterministic behavior unless fallback is disabled.
 
@@ -38,6 +39,7 @@ This MVP uses deterministic local logic by default and can use an OpenAI-compati
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
 - **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
 - **GitHub Workflow Awareness**: Read open issues, open pull requests, PR reviews, and CI/check status from the GitHub REST API.
+- **Local Web UI**: Run a dependency-light browser interface for LLM configuration, task execution, GitHub status, and diff inspection.
 - **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
 - **PR Summary Generation**: Generate concise pull request descriptions, risk notes, and test evidence.
 - **Safety Controls**: Use command allowlists, LLM fallback behavior, sensitive file protection, and clear approval boundaries.
@@ -64,7 +66,8 @@ The first version focuses on a complete local workflow:
 6. Run allowlisted validation commands.
 7. Inspect Git state and generate commit or PR draft text.
 8. Inspect GitHub issue, pull request, review, and CI state when a GitHub remote is configured.
-9. Generate a final engineering summary.
+9. Review workflow results, GitHub status, and diffs in a local browser UI.
+10. Generate a final engineering summary.
 
 Diff generation and human-approved patch application are planned next.
 
@@ -83,6 +86,20 @@ python repopilot.py run --repo . --task "fix search relevance for login behavior
 ```
 
 The report includes ranked relevant files, an implementation plan, proposed file-level changes, risk notes, validation suggestions, validation results, and a final summary.
+
+Start the local web UI:
+
+```bash
+python repopilot.py serve
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8765
+```
+
+The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
 
 Use the LLM planner and patch proposal generator:
 
@@ -179,7 +196,7 @@ This project combines modern AI engineering with real software development workf
 - GitHub issue import into RepoPilot tasks
 - GitHub pull request creation after user approval
 - FastAPI service for workflow execution
-- React or Next.js dashboard for execution traces, diffs, approvals, and results
+- Rich React or Next.js dashboard for execution traces, diffs, approvals, and results
 - Multi-agent collaboration between planner, implementer, tester, and reviewer
 - Persistent memory per repository
 - Automatic benchmark suite using real open-source issues
@@ -188,4 +205,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, validation runner, Git workflow awareness commands, GitHub workflow awareness command, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, validation runner, Git workflow awareness commands, GitHub workflow awareness command, local web UI, root launcher, and unit tests are implemented.

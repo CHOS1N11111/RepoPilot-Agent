@@ -41,6 +41,12 @@ def inspect_repository(repo_path: str | Path) -> GitRepositoryState:
     )
 
 
+def get_git_diff(repo_path: str | Path, staged: bool = False) -> str:
+    root = _repository_root(repo_path)
+    args = ["diff", "--cached"] if staged else ["diff"]
+    return _run_git(root, args).stdout
+
+
 def _repository_root(repo_path: str | Path) -> Path:
     candidate = Path(repo_path).expanduser().resolve()
     result = _run_raw_git(candidate, ["rev-parse", "--show-toplevel"])
