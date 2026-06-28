@@ -10,6 +10,20 @@ RepoPilot Agent will help developers move from a vague task description to a val
 
 The long-term goal is to build a safe, observable, and extensible coding agent that can work with local repositories and GitHub workflows.
 
+## Current MVP
+
+The current version provides a dependency-light local workflow that can run without installing external packages:
+
+- Scan a local repository while ignoring common build, dependency, cache, and Git directories.
+- Read supported text files such as Python, Markdown, JavaScript, TypeScript, JSON, TOML, YAML, HTML, CSS, Go, Rust, Java, and shell files.
+- Search repository files using task keywords and return ranked relevant files with match reasons and previews.
+- Generate a deterministic engineering plan from the task and retrieved context.
+- Run validation commands through an allowlist.
+- Print a human-readable report or JSON report.
+- Provide unit tests for scanner, search, and workflow behavior.
+
+This MVP intentionally uses deterministic local logic first. LLM providers, patch application, persistent storage, and web UI features will be added after the core workflow is stable.
+
 ## Core Features
 
 - **Repository Understanding**: Index source code, README files, configuration files, and project documentation.
@@ -34,16 +48,48 @@ The long-term goal is to build a safe, observable, and extensible coding agent t
 
 ## MVP Scope
 
-The first version will focus on a complete local workflow:
+The first version focuses on a complete local workflow:
 
 1. Select or register a local repository.
 2. Submit a bug report or feature request.
 3. Generate an implementation plan.
 4. Search and display relevant files.
-5. Produce a proposed patch.
-6. Apply the patch after user approval.
-7. Run validation commands.
-8. Generate a final engineering summary.
+5. Run allowlisted validation commands.
+6. Generate a final engineering summary.
+
+Patch generation and human-approved patch application are planned next.
+
+## Usage
+
+Run the local workflow from the project root:
+
+```bash
+python repopilot.py run --repo . --task "fix search relevance for login behavior"
+```
+
+Run with validation:
+
+```bash
+python repopilot.py run --repo . --task "fix search relevance for login behavior" --validate "python -m unittest discover -s tests"
+```
+
+Print JSON output:
+
+```bash
+python repopilot.py run --repo . --task "inspect validation workflow" --json
+```
+
+Run tests:
+
+```bash
+python -m unittest discover -s tests
+```
+
+Compile-check Python files:
+
+```bash
+python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.py
+```
 
 ## Engineering Value
 
@@ -60,6 +106,10 @@ This project combines modern AI engineering with real software development workf
 
 ## Future Extensions
 
+- LLM-backed planning, review, and patch generation
+- Human-approved patch application
+- FastAPI service for workflow execution
+- React or Next.js dashboard for execution traces, diffs, approvals, and results
 - GitHub issue import and pull request creation
 - Multi-agent collaboration between planner, implementer, tester, and reviewer
 - Persistent memory per repository
@@ -69,4 +119,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Project planning and repository initialization are in progress.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, validation runner, root launcher, and unit tests are implemented.
