@@ -6,8 +6,8 @@ from pathlib import Path
 
 from .llm.base import LLMClient, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
-from .models import PlanMetadata, WorkflowReport
-from .patch_proposer import propose_patch
+from .models import PatchProposalMetadata, PlanMetadata, WorkflowReport
+from .patch_proposer import propose_patch, propose_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
 from .scanner import scan_repository
 from .search import search_files
@@ -27,6 +27,7 @@ def run_workflow(
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
+    llm_creation_error: LLMError | None = None
     if use_llm:
         if llm_client is None:
             try:
@@ -34,6 +35,7 @@ def run_workflow(
             except LLMError as exc:
                 if not allow_llm_fallback:
                     raise
+                llm_creation_error = exc
                 plan = create_plan(task, hits)
                 plan_metadata = PlanMetadata(source="rules", model=llm_model, fallback_used=True, error=str(exc))
             else:
@@ -53,7 +55,28 @@ def run_workflow(
     else:
         plan = create_plan(task, hits)
         plan_metadata = PlanMetadata(source="rules")
-    patch_proposal = propose_patch(task, hits)
+
+    if use_llm:
+        if llm_client is None:
+            patch_proposal = propose_patch(task, hits)
+            patch_proposal_metadata = PatchProposalMetadata(
+                source="rules",
+                model=llm_model,
+                fallback_used=True,
+                error=str(llm_creation_error) if llm_creation_error else "LLM client is unavailable.",
+            )
+        else:
+            patch_proposal, patch_proposal_metadata = propose_patch_with_optional_llm(
+                task,
+                hits,
+                plan,
+                llm_client=llm_client,
+                allow_fallback=allow_llm_fallback,
+            )
+    else:
+        patch_proposal = propose_patch(task, hits)
+        patch_proposal_metadata = PatchProposalMetadata(source="rules")
+
     validation = run_validation(root, validation_commands or [])
     summary = _build_summary(
         task,
@@ -70,6 +93,7 @@ def run_workflow(
         plan=plan,
         plan_metadata=plan_metadata,
         patch_proposal=patch_proposal,
+        patch_proposal_metadata=patch_proposal_metadata,
         validation=validation,
         summary=summary,
     )

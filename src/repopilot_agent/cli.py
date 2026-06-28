@@ -142,6 +142,13 @@ def _print_report(report) -> None:
         print("Plan fallback: used")
     if report.plan_metadata.error:
         print(f"Plan error: {report.plan_metadata.error}")
+    print(f"Patch proposal source: {report.patch_proposal_metadata.source}")
+    if report.patch_proposal_metadata.model:
+        print(f"Patch proposal model: {report.patch_proposal_metadata.model}")
+    if report.patch_proposal_metadata.fallback_used:
+        print("Patch proposal fallback: used")
+    if report.patch_proposal_metadata.error:
+        print(f"Patch proposal error: {report.patch_proposal_metadata.error}")
     print()
 
     print("Relevant files")

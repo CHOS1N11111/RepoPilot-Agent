@@ -18,22 +18,22 @@ The current version provides a dependency-light local workflow that can run with
 - Read supported text files such as Python, Markdown, JavaScript, TypeScript, JSON, TOML, YAML, HTML, CSS, Go, Rust, Java, and shell files.
 - Search repository files using task keywords and return ranked relevant files with match reasons and previews.
 - Generate an engineering plan from the task and retrieved context, with optional LLM-backed planning.
-- Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions.
+- Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions, with optional LLM-backed proposal generation.
 - Run validation commands through an allowlist.
 - Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
 - Generate suggested commit messages and pull request drafts from local Git changes.
 - Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
 - Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, LLM planning fallback, patch proposal, Git workflow, GitHub workflow, and workflow behavior.
+- Provide unit tests for scanner, search, LLM planning fallback, LLM patch proposal fallback, Git workflow, GitHub workflow, and workflow behavior.
 
-This MVP uses deterministic local logic by default and can use an OpenAI-compatible LLM for planning when configured. If the LLM is unavailable or returns invalid JSON, RepoPilot falls back to the deterministic planner unless fallback is disabled.
+This MVP uses deterministic local logic by default and can use an OpenAI-compatible LLM for planning and patch proposal generation when configured. If the LLM is unavailable or returns invalid JSON, RepoPilot falls back to deterministic behavior unless fallback is disabled.
 
 ## Core Features
 
 - **Repository Understanding**: Index source code, README files, configuration files, and project documentation.
 - **Task Planning**: Convert a user request into a clear engineering plan with actionable steps, either through deterministic rules or an optional LLM planner.
 - **Code Search and Context Retrieval**: Combine semantic search with precise keyword search to locate relevant files and functions.
-- **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, and validation suggestions before applying edits.
+- **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, and validation suggestions before applying edits, either through deterministic rules or an optional LLM proposal module.
 - **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
 - **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
@@ -60,7 +60,7 @@ The first version focuses on a complete local workflow:
 2. Submit a bug report or feature request.
 3. Generate an implementation plan with rules or an optional LLM planner.
 4. Search and display relevant files.
-5. Propose file-level changes for user review.
+5. Propose file-level changes for user review with rules or an optional LLM proposal module.
 6. Run allowlisted validation commands.
 7. Inspect Git state and generate commit or PR draft text.
 8. Inspect GitHub issue, pull request, review, and CI state when a GitHub remote is configured.
@@ -84,7 +84,7 @@ python repopilot.py run --repo . --task "fix search relevance for login behavior
 
 The report includes ranked relevant files, an implementation plan, proposed file-level changes, risk notes, validation suggestions, validation results, and a final summary.
 
-Use the LLM planner:
+Use the LLM planner and patch proposal generator:
 
 ```bash
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm
@@ -102,7 +102,7 @@ Disable fallback when debugging LLM output:
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --no-llm-fallback
 ```
 
-The LLM planner reads these environment variables:
+The LLM planner and patch proposal generator read these environment variables:
 
 - `OPENAI_API_KEY`: API key for the OpenAI-compatible provider.
 - `OPENAI_BASE_URL`: Optional API base URL. Defaults to `https://api.openai.com/v1`.
@@ -174,7 +174,6 @@ This project combines modern AI engineering with real software development workf
 ## Future Extensions
 
 - LLM-backed review generation
-- LLM-backed patch proposal generation
 - Diff proposal generation
 - Human-approved patch application
 - GitHub issue import into RepoPilot tasks
@@ -189,4 +188,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, patch proposal module, validation runner, Git workflow awareness commands, GitHub workflow awareness command, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, validation runner, Git workflow awareness commands, GitHub workflow awareness command, root launcher, and unit tests are implemented.

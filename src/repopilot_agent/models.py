@@ -75,6 +75,14 @@ class PatchProposal:
 
 
 @dataclass(frozen=True)
+class PatchProposalMetadata:
+    source: str
+    model: str | None = None
+    fallback_used: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class GitRemote:
     name: str
     url: str
@@ -203,6 +211,9 @@ class WorkflowReport:
     plan: list[PlanStep] = field(default_factory=list)
     plan_metadata: PlanMetadata = field(default_factory=lambda: PlanMetadata(source="rules"))
     patch_proposal: PatchProposal | None = None
+    patch_proposal_metadata: PatchProposalMetadata = field(
+        default_factory=lambda: PatchProposalMetadata(source="rules")
+    )
     validation: list[ValidationResult] = field(default_factory=list)
     summary: str = ""
 
