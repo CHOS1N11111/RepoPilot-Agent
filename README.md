@@ -24,6 +24,7 @@ The current version provides a dependency-light local workflow that can run with
 - Generate suggested commit messages and pull request drafts from local Git changes.
 - Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
 - Use a local web UI for LLM settings, task input, workflow output, GitHub status, and diff review.
+- Generate patch proposals from the web UI without applying file edits or running validation commands.
 - Print a human-readable report or JSON report.
 - Provide unit tests for scanner, search, LLM planning fallback, LLM patch proposal fallback, Git workflow, GitHub workflow, web server helpers, and workflow behavior.
 
@@ -66,10 +67,10 @@ The first version focuses on a complete local workflow:
 6. Run allowlisted validation commands.
 7. Inspect Git state and generate commit or PR draft text.
 8. Inspect GitHub issue, pull request, review, and CI state when a GitHub remote is configured.
-9. Review workflow results, GitHub status, and diffs in a local browser UI.
+9. Review workflow results, GitHub status, patch proposals, and diffs in a local browser UI.
 10. Generate a final engineering summary.
 
-Diff generation and human-approved patch application are planned next.
+Human-approved patch application is planned next.
 
 ## Usage
 
@@ -99,7 +100,7 @@ Then open:
 http://127.0.0.1:8765
 ```
 
-The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
+The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, standalone patch proposal generation, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
 
 Use the LLM planner and patch proposal generator:
 

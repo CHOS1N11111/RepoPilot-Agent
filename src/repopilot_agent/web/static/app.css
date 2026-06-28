@@ -123,12 +123,17 @@ button.secondary:hover {
 }
 
 .switch-row,
+.button-row,
 .toolbar,
 .tabs {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.button-row button {
+  flex: 1 1 170px;
 }
 
 .checkbox {
@@ -238,6 +243,11 @@ button.secondary:hover {
 
 .diff-block {
   min-height: 520px;
+}
+
+.code-block.compact {
+  min-height: 160px;
+  margin-bottom: 20px;
 }
 
 .hidden {

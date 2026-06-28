@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
+from urllib.request import Request, urlopen
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.git_tools import get_git_diff
-from repopilot_agent.web_server import STATIC_DIR
+from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR
 
 
 class WebServerTests(unittest.TestCase):
@@ -34,6 +38,43 @@ class WebServerTests(unittest.TestCase):
             diff = get_git_diff(root)
 
             self.assertIn("+second", diff)
+
+    def test_propose_api_returns_patch_proposal_without_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "search.py").write_text(
+                "def search_login(query):\n    return query.lower()\n",
+                encoding="utf-8",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "task": "fix login search behavior",
+                        "validation": ["python -m unittest discover -s tests"],
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/propose",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["task"], "fix login search behavior")
+                self.assertEqual(data["validation"], [])
+                self.assertTrue(data["patch_proposal"]["ready_for_patch"])
+                self.assertEqual(data["patch_proposal"]["files"][0]["path"], "search.py")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
 
 
 if __name__ == "__main__":

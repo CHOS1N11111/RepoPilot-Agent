@@ -64,7 +64,10 @@
           <input id="apiKey" type="password" placeholder="Only sent to this local server for this run" />
         </label>
 
-        <button id="runWorkflow">Run RepoPilot</button>
+        <div class="button-row">
+          <button id="runWorkflow">Run RepoPilot</button>
+          <button id="generateProposal" class="secondary">Generate Proposal</button>
+        </div>
         <p id="statusLine" class="status-line">Ready.</p>
       </section>
 
@@ -87,6 +90,8 @@
           <ol id="planList" class="stack"></ol>
           <h2>Proposed Changes</h2>
           <div id="proposalList" class="stack"></div>
+          <h2>Proposal Preview</h2>
+          <pre id="proposalOutput" class="code-block compact"></pre>
           <h2>Validation</h2>
           <div id="validationList" class="stack"></div>
         </section>

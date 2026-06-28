@@ -52,6 +52,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/run":
             self._handle_run()
             return
+        if parsed.path == "/api/propose":
+            self._handle_propose()
+            return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -88,6 +91,42 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 repo,
                 task,
                 validation_commands=validation,
+                use_llm=use_llm,
+                llm_client=llm_client,
+                llm_model=str(payload.get("model") or "") or None,
+                allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+            )
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json(report.to_dict())
+
+    def _handle_propose(self) -> None:
+        payload = self._read_json()
+        repo = str(payload.get("repo") or ".")
+        task = str(payload.get("task") or "").strip()
+        if not task:
+            self._send_json({"error": "Task is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        use_llm = bool(payload.get("use_llm"))
+        llm_client = None
+        if use_llm and payload.get("api_key"):
+            try:
+                llm_client = OpenAICompatibleClient(
+                    api_key=str(payload.get("api_key")),
+                    base_url=str(payload.get("base_url") or "") or None,
+                    model=str(payload.get("model") or "") or None,
+                )
+            except LLMError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+        try:
+            report = run_workflow(
+                repo,
+                task,
+                validation_commands=[],
                 use_llm=use_llm,
                 llm_client=llm_client,
                 llm_model=str(payload.get("model") or "") or None,

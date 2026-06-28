@@ -19,6 +19,7 @@ $("modelSelect").addEventListener("change", () => {
 });
 
 $("runWorkflow").addEventListener("click", runWorkflow);
+$("generateProposal").addEventListener("click", generateProposal);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
@@ -32,17 +33,7 @@ function selectedModel() {
 
 async function runWorkflow() {
   setStatus("Running RepoPilot...");
-  const validation = $("validationInput").value.trim();
-  const payload = {
-    repo: $("repoPath").value.trim() || ".",
-    task: $("taskInput").value.trim(),
-    validation: validation ? [validation] : [],
-    use_llm: $("useLlm").checked,
-    model: selectedModel(),
-    base_url: $("baseUrl").value.trim(),
-    api_key: $("apiKey").value,
-    no_llm_fallback: $("disableFallback").checked,
-  };
+  const payload = buildWorkflowPayload();
 
   try {
     const report = await postJson("/api/run", payload);
@@ -55,6 +46,37 @@ async function runWorkflow() {
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
+}
+
+async function generateProposal() {
+  setStatus("Generating patch proposal...");
+  const payload = buildWorkflowPayload();
+
+  try {
+    const report = await postJson("/api/propose", payload);
+    if (report.error) {
+      throw new Error(report.error);
+    }
+    state.lastReport = report;
+    renderReport(report, payload);
+    setStatus("Proposal ready for review.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+function buildWorkflowPayload() {
+  const validation = $("validationInput").value.trim();
+  return {
+    repo: $("repoPath").value.trim() || ".",
+    task: $("taskInput").value.trim(),
+    validation: validation ? [validation] : [],
+    use_llm: $("useLlm").checked,
+    model: selectedModel(),
+    base_url: $("baseUrl").value.trim(),
+    api_key: $("apiKey").value,
+    no_llm_fallback: $("disableFallback").checked,
+  };
 }
 
 async function loadGithub() {
@@ -77,6 +99,14 @@ function renderReport(report, payload) {
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderProposals(report.patch_proposal);
+  $("proposalOutput").textContent = JSON.stringify(
+    {
+      metadata: report.patch_proposal_metadata,
+      proposal: report.patch_proposal,
+    },
+    null,
+    2
+  );
   $("validationList").innerHTML = renderValidation(report.validation);
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);
