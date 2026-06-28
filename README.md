@@ -20,8 +20,10 @@ The current version provides a dependency-light local workflow that can run with
 - Generate a deterministic engineering plan from the task and retrieved context.
 - Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions.
 - Run validation commands through an allowlist.
+- Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
+- Generate suggested commit messages and pull request drafts from local Git changes.
 - Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, patch proposal, and workflow behavior.
+- Provide unit tests for scanner, search, patch proposal, Git workflow, and workflow behavior.
 
 This MVP intentionally uses deterministic local logic first. LLM providers, patch application, persistent storage, and web UI features will be added after the core workflow is stable.
 
@@ -33,6 +35,7 @@ This MVP intentionally uses deterministic local logic first. LLM providers, patc
 - **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, and validation suggestions before applying edits.
 - **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
+- **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
 - **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
 - **PR Summary Generation**: Generate concise pull request descriptions, risk notes, and test evidence.
 - **Safety Controls**: Use command allowlists, sensitive file protection, and clear approval boundaries.
@@ -57,7 +60,8 @@ The first version focuses on a complete local workflow:
 4. Search and display relevant files.
 5. Propose file-level changes for user review.
 6. Run allowlisted validation commands.
-7. Generate a final engineering summary.
+7. Inspect Git state and generate commit or PR draft text.
+8. Generate a final engineering summary.
 
 Diff generation and human-approved patch application are planned next.
 
@@ -81,6 +85,24 @@ Print JSON output:
 
 ```bash
 python repopilot.py run --repo . --task "inspect validation workflow" --json
+```
+
+Inspect local Git state:
+
+```bash
+python repopilot.py git status --repo .
+```
+
+Generate a commit and workflow summary:
+
+```bash
+python repopilot.py git summary --repo . --validation "python -m unittest discover -s tests"
+```
+
+Generate a pull request draft:
+
+```bash
+python repopilot.py git pr-draft --repo . --validation "python -m unittest discover -s tests"
 ```
 
 Run tests:
@@ -113,9 +135,9 @@ This project combines modern AI engineering with real software development workf
 - LLM-backed planning, review, and patch generation
 - Diff proposal generation
 - Human-approved patch application
+- GitHub API integration for issue import and pull request creation
 - FastAPI service for workflow execution
 - React or Next.js dashboard for execution traces, diffs, approvals, and results
-- GitHub issue import and pull request creation
 - Multi-agent collaboration between planner, implementer, tester, and reviewer
 - Persistent memory per repository
 - Automatic benchmark suite using real open-source issues
@@ -124,4 +146,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, patch proposal module, validation runner, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, patch proposal module, validation runner, Git workflow awareness commands, root launcher, and unit tests are implemented.

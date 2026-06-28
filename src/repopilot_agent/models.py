@@ -66,6 +66,65 @@ class PatchProposal:
     ready_for_patch: bool
 
 
+@dataclass(frozen=True)
+class GitRemote:
+    name: str
+    url: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class GitCommit:
+    short_hash: str
+    subject: str
+    author: str
+    date: str
+
+
+@dataclass(frozen=True)
+class GitFileChange:
+    path: str
+    index_status: str
+    working_tree_status: str
+    description: str
+
+
+@dataclass(frozen=True)
+class GitRepositoryState:
+    repo_path: str
+    branch: str
+    upstream: str | None
+    ahead: int
+    behind: int
+    remotes: list[GitRemote]
+    latest_commit: GitCommit | None
+    changes: list[GitFileChange]
+    diff_stat: str
+    staged_diff_stat: str
+
+    @property
+    def clean(self) -> bool:
+        return not self.changes
+
+
+@dataclass(frozen=True)
+class PullRequestDraft:
+    title: str
+    body: str
+
+
+@dataclass(frozen=True)
+class GitWorkflowSummary:
+    state: GitRepositoryState
+    suggested_commit_message: str
+    change_summary: list[str]
+    validation_notes: list[str]
+    pull_request: PullRequestDraft
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class WorkflowReport:
     task: str
