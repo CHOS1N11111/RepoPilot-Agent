@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import WorkflowReport
+from .patch_proposer import propose_patch
 from .planner import create_plan
 from .scanner import scan_repository
 from .search import search_files
@@ -21,20 +22,34 @@ def run_workflow(
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
     plan = create_plan(task, hits)
+    patch_proposal = propose_patch(task, hits)
     validation = run_validation(root, validation_commands or [])
-    summary = _build_summary(task, files_scanned=len(files), relevant_count=len(hits), validation=validation)
+    summary = _build_summary(
+        task,
+        files_scanned=len(files),
+        relevant_count=len(hits),
+        proposal_ready=patch_proposal.ready_for_patch,
+        validation=validation,
+    )
     return WorkflowReport(
         task=task,
         repo_path=str(root),
         files_scanned=len(files),
         relevant_files=hits,
         plan=plan,
+        patch_proposal=patch_proposal,
         validation=validation,
         summary=summary,
     )
 
 
-def _build_summary(task: str, files_scanned: int, relevant_count: int, validation: list) -> str:
+def _build_summary(
+    task: str,
+    files_scanned: int,
+    relevant_count: int,
+    proposal_ready: bool,
+    validation: list,
+) -> str:
     validation_count = len(validation)
     failed = [result for result in validation if result.exit_code not in (0, None)]
     rejected = [result for result in validation if not result.allowed]
@@ -42,6 +57,10 @@ def _build_summary(task: str, files_scanned: int, relevant_count: int, validatio
         f"RepoPilot analyzed the task: {task}",
         f"Scanned {files_scanned} text files and selected {relevant_count} relevant files for review.",
     ]
+    if proposal_ready:
+        parts.append("Prepared file-level change proposals for user review.")
+    else:
+        parts.append("No patch proposal was prepared because no relevant files were selected.")
     if validation_count:
         parts.append(f"Ran {validation_count} validation command(s).")
     if failed:

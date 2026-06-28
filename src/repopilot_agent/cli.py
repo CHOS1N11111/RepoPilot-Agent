@@ -56,6 +56,27 @@ def _print_report(report) -> None:
         print(f"{step.order}. {step.title}: {step.detail}")
     print()
 
+    print("Proposed changes")
+    if report.patch_proposal and report.patch_proposal.files:
+        print(f"Objective: {report.patch_proposal.objective}")
+        for proposal in report.patch_proposal.files:
+            print(f"- {proposal.path} [{proposal.change_type}, confidence: {proposal.confidence}]")
+            print(f"  Rationale: {proposal.rationale}")
+            for action in proposal.suggested_actions:
+                print(f"  - {action}")
+        if report.patch_proposal.risks:
+            print("Risks")
+            for risk in report.patch_proposal.risks:
+                print(f"- {risk.level}: {risk.message}")
+                print(f"  Mitigation: {risk.mitigation}")
+        if report.patch_proposal.validation_suggestions:
+            print("Validation suggestions")
+            for suggestion in report.patch_proposal.validation_suggestions:
+                print(f"- {suggestion}")
+    else:
+        print("- No patch proposal was prepared from the current query.")
+    print()
+
     if report.validation:
         print("Validation")
         for result in report.validation:

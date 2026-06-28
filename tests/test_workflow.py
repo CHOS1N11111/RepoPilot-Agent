@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from repopilot_agent.models import SearchHit
+from repopilot_agent.patch_proposer import propose_patch
 from repopilot_agent.scanner import scan_repository
 from repopilot_agent.search import search_files
 from repopilot_agent.workflow import run_workflow
@@ -50,7 +52,35 @@ class RepoPilotWorkflowTests(unittest.TestCase):
 
             self.assertEqual(report.files_scanned, 1)
             self.assertGreaterEqual(len(report.plan), 5)
+            self.assertIsNotNone(report.patch_proposal)
+            self.assertTrue(report.patch_proposal.ready_for_patch)
             self.assertIn("RepoPilot analyzed the task", report.summary)
+            self.assertIn("Prepared file-level change proposals", report.summary)
+
+    def test_patch_proposal_describes_file_changes_and_risks(self) -> None:
+        hits = [
+            SearchHit(
+                path="src/auth.py",
+                score=12,
+                reasons=["path matches 'auth'", "content matches 'token'"],
+                preview="def validate_token(token):",
+            ),
+            SearchHit(
+                path="tests/test_auth.py",
+                score=7,
+                reasons=["content matches 'auth'"],
+                preview="def test_validate_token():",
+            ),
+        ]
+
+        proposal = propose_patch("fix auth token validation", hits)
+
+        self.assertTrue(proposal.ready_for_patch)
+        self.assertEqual(proposal.files[0].path, "src/auth.py")
+        self.assertEqual(proposal.files[0].change_type, "bugfix")
+        self.assertEqual(proposal.files[1].change_type, "test")
+        self.assertTrue(any(risk.level == "high" for risk in proposal.risks))
+        self.assertIn("python -m unittest discover -s tests", proposal.validation_suggestions)
 
 
 if __name__ == "__main__":

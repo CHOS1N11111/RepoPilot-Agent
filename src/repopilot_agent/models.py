@@ -41,6 +41,31 @@ class ValidationResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class FileChangeProposal:
+    path: str
+    change_type: str
+    rationale: str
+    suggested_actions: list[str]
+    confidence: str
+
+
+@dataclass(frozen=True)
+class RiskNote:
+    level: str
+    message: str
+    mitigation: str
+
+
+@dataclass(frozen=True)
+class PatchProposal:
+    objective: str
+    files: list[FileChangeProposal]
+    risks: list[RiskNote]
+    validation_suggestions: list[str]
+    ready_for_patch: bool
+
+
 @dataclass
 class WorkflowReport:
     task: str
@@ -48,6 +73,7 @@ class WorkflowReport:
     files_scanned: int
     relevant_files: list[SearchHit] = field(default_factory=list)
     plan: list[PlanStep] = field(default_factory=list)
+    patch_proposal: PatchProposal | None = None
     validation: list[ValidationResult] = field(default_factory=list)
     summary: str = ""
 

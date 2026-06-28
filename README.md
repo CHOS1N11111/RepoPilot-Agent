@@ -18,9 +18,10 @@ The current version provides a dependency-light local workflow that can run with
 - Read supported text files such as Python, Markdown, JavaScript, TypeScript, JSON, TOML, YAML, HTML, CSS, Go, Rust, Java, and shell files.
 - Search repository files using task keywords and return ranked relevant files with match reasons and previews.
 - Generate a deterministic engineering plan from the task and retrieved context.
+- Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions.
 - Run validation commands through an allowlist.
 - Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, and workflow behavior.
+- Provide unit tests for scanner, search, patch proposal, and workflow behavior.
 
 This MVP intentionally uses deterministic local logic first. LLM providers, patch application, persistent storage, and web UI features will be added after the core workflow is stable.
 
@@ -29,7 +30,7 @@ This MVP intentionally uses deterministic local logic first. LLM providers, patc
 - **Repository Understanding**: Index source code, README files, configuration files, and project documentation.
 - **Task Planning**: Convert a user request into a clear engineering plan with actionable steps.
 - **Code Search and Context Retrieval**: Combine semantic search with precise keyword search to locate relevant files and functions.
-- **Patch Generation**: Propose focused code changes as readable diffs before applying them.
+- **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, and validation suggestions before applying edits.
 - **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
 - **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
@@ -54,10 +55,11 @@ The first version focuses on a complete local workflow:
 2. Submit a bug report or feature request.
 3. Generate an implementation plan.
 4. Search and display relevant files.
-5. Run allowlisted validation commands.
-6. Generate a final engineering summary.
+5. Propose file-level changes for user review.
+6. Run allowlisted validation commands.
+7. Generate a final engineering summary.
 
-Patch generation and human-approved patch application are planned next.
+Diff generation and human-approved patch application are planned next.
 
 ## Usage
 
@@ -72,6 +74,8 @@ Run with validation:
 ```bash
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --validate "python -m unittest discover -s tests"
 ```
+
+The report includes ranked relevant files, an implementation plan, proposed file-level changes, risk notes, validation suggestions, validation results, and a final summary.
 
 Print JSON output:
 
@@ -107,6 +111,7 @@ This project combines modern AI engineering with real software development workf
 ## Future Extensions
 
 - LLM-backed planning, review, and patch generation
+- Diff proposal generation
 - Human-approved patch application
 - FastAPI service for workflow execution
 - React or Next.js dashboard for execution traces, diffs, approvals, and results
@@ -119,4 +124,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, validation runner, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, patch proposal module, validation runner, root launcher, and unit tests are implemented.
