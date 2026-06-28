@@ -2,7 +2,7 @@
 
 RepoPilot Agent is an AI-powered developer workflow assistant designed for real software engineering tasks. Given a GitHub issue, a bug report, or a feature request, it analyzes a codebase, plans the work, proposes code changes, runs validation commands, and produces a review-ready implementation summary.
 
-The project is designed as a portfolio-grade LLM/agent system rather than a simple chatbot. It focuses on tool use, repository understanding, human approval, execution traceability, and practical engineering automation.
+The project is designed as a practical LLM/agent system rather than a simple chatbot. It focuses on tool use, repository understanding, human approval, execution traceability, and engineering automation.
 
 ## What This Project Will Do
 
@@ -45,9 +45,9 @@ The first version will focus on a complete local workflow:
 7. Run validation commands.
 8. Generate a final engineering summary.
 
-## Why It Is Resume-Friendly
+## Engineering Value
 
-This project demonstrates practical skills across modern AI engineering and software development:
+This project combines modern AI engineering with real software development workflows:
 
 - LLM tool use and agent orchestration
 - Retrieval-augmented generation for codebases
