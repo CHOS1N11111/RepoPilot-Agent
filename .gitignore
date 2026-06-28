@@ -1,0 +1,24 @@
+# Local work log
+log.md
+
+# Environment files
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
