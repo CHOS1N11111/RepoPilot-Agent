@@ -212,6 +212,36 @@ button:disabled:hover {
   margin-bottom: 20px;
 }
 
+.timeline {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.timeline-event {
+  display: grid;
+  grid-template-columns: 120px 90px 1fr;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fbfcfe;
+}
+
+.timeline-step {
+  font-weight: 800;
+}
+
+.timeline-status {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.issue-actions {
+  margin-top: 8px;
+}
+
 .item-title {
   font-weight: 800;
   margin-bottom: 6px;
@@ -274,6 +304,10 @@ button:disabled:hover {
   }
 
   .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-event {
     grid-template-columns: 1fr;
   }
 }

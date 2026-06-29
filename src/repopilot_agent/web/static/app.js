@@ -1,6 +1,7 @@
 const state = {
   lastReport: null,
   github: null,
+  proposalId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -68,12 +69,12 @@ async function generateProposal() {
 
 async function applyProposal() {
   const proposal = state.lastReport?.patch_proposal;
-  const fileEdits = proposal?.file_edits || [];
-  if (!proposal?.apply_ready || fileEdits.length === 0) {
+  if (!state.proposalId || !proposal?.apply_ready) {
     setStatus("No apply-ready proposal is available.");
     return;
   }
-  const confirmed = window.confirm(`Apply ${fileEdits.length} proposed file edit(s) to the working tree?`);
+  const fileCount = (proposal.file_edits || []).length;
+  const confirmed = window.confirm(`Apply proposal ${state.proposalId} with ${fileCount} file edit(s) to the working tree?`);
   if (!confirmed) {
     return;
   }
@@ -81,13 +82,15 @@ async function applyProposal() {
   setStatus("Applying proposal...");
   try {
     const result = await postJson("/api/apply", {
-      repo: $("repoPath").value.trim() || ".",
-      file_edits: fileEdits,
+      proposal_id: state.proposalId,
     });
     if (result.error) {
       throw new Error(result.error);
     }
     $("diffOutput").textContent = result.diff || "No diff.";
+    $("validationList").innerHTML = renderValidation(result.validation || []);
+    renderTimeline(result.timeline || []);
+    $("applyProposal").disabled = true;
     setStatus(result.message || "Proposal applied.");
     await loadDiff(false);
   } catch (error) {
@@ -124,9 +127,11 @@ async function loadDiff(staged) {
 }
 
 function renderReport(report, payload) {
+  state.proposalId = report.proposal_id || null;
   $("filesScanned").textContent = report.files_scanned;
   $("planSource").textContent = sourceLabel(report.plan_metadata);
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
+  renderTimeline(report.timeline || []);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
@@ -138,7 +143,7 @@ function renderReport(report, payload) {
     2
   );
   $("proposedDiffOutput").textContent = report.patch_proposal?.proposed_diff || "No proposed diff. Use LLM proposal generation for apply-ready edits.";
-  $("applyProposal").disabled = !report.patch_proposal?.apply_ready || !(report.patch_proposal.file_edits || []).length;
+  $("applyProposal").disabled = !state.proposalId || !report.patch_proposal?.apply_ready || !(report.patch_proposal.file_edits || []).length;
   $("validationList").innerHTML = renderValidation(report.validation);
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);
@@ -187,12 +192,42 @@ function renderGithub(data) {
   }
   const repo = data.repository ? item(`<strong>${escapeHtml(data.repository.owner)}/${escapeHtml(data.repository.repo)}</strong><br>${escapeHtml(data.repository.html_url)}`) : item("Repository unavailable.");
   const issues = data.issues.length
-    ? data.issues.map((issue) => item(`#${issue.number} ${escapeHtml(issue.title)}<br><small>${escapeHtml(issue.author)} updated ${escapeHtml(issue.updated_at)}</small>`)).join("")
+    ? data.issues.map(renderIssue).join("")
     : item("No open issues returned.");
   const prs = data.pull_requests.length
     ? data.pull_requests.map(renderPullRequest).join("")
     : item("No open pull requests returned.");
   $("githubContent").innerHTML = `<h2>Repository</h2>${repo}<h2>Open Issues</h2>${issues}<h2>Open Pull Requests</h2>${prs}`;
+}
+
+function renderTimeline(events) {
+  if (!events || events.length === 0) {
+    $("timelineList").innerHTML = item("No timeline events yet.");
+    return;
+  }
+  $("timelineList").innerHTML = events
+    .map((event) => `<div class="timeline-event">
+      <div class="timeline-step">${escapeHtml(event.step)}</div>
+      <div class="timeline-status">${escapeHtml(event.status)}</div>
+      <div>${escapeHtml(event.detail)}</div>
+    </div>`)
+    .join("");
+}
+
+function renderIssue(issue) {
+  const taskText = buildIssueTask(issue);
+  return `<div class="item">
+    <div class="item-title">#${issue.number} ${escapeHtml(issue.title)}</div>
+    <p><small>${escapeHtml(issue.author)} updated ${escapeHtml(issue.updated_at)}</small></p>
+    <div class="issue-actions">
+      <button class="secondary" data-task="${escapeHtml(taskText)}">Use as task</button>
+    </div>
+  </div>`;
+}
+
+function buildIssueTask(issue) {
+  const labels = issue.labels && issue.labels.length ? `\nLabels: ${issue.labels.join(", ")}` : "";
+  return `GitHub issue #${issue.number}: ${issue.title}${labels}\nURL: ${issue.html_url}`;
 }
 
 function renderPullRequest(pr) {
@@ -206,6 +241,15 @@ function renderPullRequest(pr) {
     <strong>Checks</strong><ul>${checks}</ul>
   </div>`;
 }
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || !target.matches("[data-task]")) {
+    return;
+  }
+  $("taskInput").value = target.dataset.task || "";
+  setStatus("GitHub issue loaded into task input.");
+});
 
 function buildLlmInputPreview(report, payload) {
   const context = report.relevant_files

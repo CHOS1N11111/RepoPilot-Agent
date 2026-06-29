@@ -15,7 +15,9 @@ from .git_tools import get_git_diff, inspect_repository
 from .github_tools import inspect_github_repository
 from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
-from .patch_apply import apply_file_edits, parse_file_edits
+from .patch_apply import apply_file_edits
+from .validator import run_validation
+from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
 from .workflow import run_workflow
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
@@ -107,17 +109,48 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_apply(self) -> None:
         payload = self._read_json()
-        repo = str(payload.get("repo") or ".")
+        proposal_id = str(payload.get("proposal_id") or "").strip()
+        if not proposal_id:
+            self._send_json({"error": "proposal_id is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        session = get_proposal_session(proposal_id)
+        if session is None:
+            self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if session.applied:
+            self._send_json({"error": "Proposal has already been applied."}, status=HTTPStatus.BAD_REQUEST)
+            return
         try:
-            edits = parse_file_edits(payload.get("file_edits"))
-            result = apply_file_edits(repo, edits)
+            result = apply_file_edits(session.repo_path, session.file_edits)
+            session.applied = True
+            append_timeline(session, "apply", "done", result.message)
+            if session.validation_commands:
+                validation = run_validation(session.repo_path, session.validation_commands)
+                session.validation = validation
+                failed = [item for item in validation if item.exit_code not in (0, None)]
+                rejected = [item for item in validation if not item.allowed]
+                if failed or rejected:
+                    append_timeline(
+                        session,
+                        "validation",
+                        "warning",
+                        f"Validation completed with {len(failed)} failed and {len(rejected)} rejected command(s).",
+                    )
+                else:
+                    append_timeline(session, "validation", "done", f"Ran {len(validation)} validation command(s).")
+            else:
+                append_timeline(session, "validation", "skipped", "No validation command was configured.")
         except (FileNotFoundError, ValueError) as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send_json(result.to_dict())
+        data = result.to_dict()
+        data["proposal_id"] = proposal_id
+        data["validation"] = [asdict(item) for item in session.validation]
+        data["timeline"] = session.to_public_dict()["timeline"]
+        self._send_json(data)
 
     def _handle_propose(self) -> None:
         payload = self._read_json()
@@ -125,6 +158,10 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         task = str(payload.get("task") or "").strip()
         if not task:
             self._send_json({"error": "Task is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        validation = payload.get("validation") or []
+        if not isinstance(validation, list) or not all(isinstance(item, str) for item in validation):
+            self._send_json({"error": "validation must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
             return
 
         use_llm = bool(payload.get("use_llm"))
@@ -153,7 +190,24 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send_json(report.to_dict())
+        proposal_id = None
+        timeline = build_report_timeline(report)
+        proposal = report.patch_proposal
+        if proposal and proposal.file_edits:
+            session = create_proposal_session(
+                repo_path=report.repo_path,
+                task=task,
+                file_edits=proposal.file_edits,
+                validation_commands=validation,
+                timeline=timeline,
+            )
+            proposal_id = session.proposal_id
+            append_timeline(session, "approval", "pending", f"Waiting for approval on proposal {proposal_id}.")
+            timeline = session.timeline
+        data = report.to_dict()
+        data["proposal_id"] = proposal_id
+        data["timeline"] = [asdict(event) for event in timeline]
+        self._send_json(data)
 
     def _handle_git_status(self, query: str) -> None:
         params = parse_qs(query)

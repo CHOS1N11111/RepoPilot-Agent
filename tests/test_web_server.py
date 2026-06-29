@@ -9,12 +9,23 @@ import unittest
 from http.server import ThreadingHTTPServer
 from urllib.request import Request, urlopen
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.git_tools import get_git_diff
+from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR
+
+
+class FakeLLMClient(LLMClient):
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.model = "fake-web"
+
+    def complete(self, messages: list[LLMMessage]) -> str:
+        return self.responses.pop(0)
 
 
 class WebServerTests(unittest.TestCase):
@@ -76,38 +87,63 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
-    def test_apply_api_writes_approved_file_edits(self) -> None:
+    def test_apply_api_writes_session_file_edits_and_runs_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
             (root / "notes.txt").write_text("old\n", encoding="utf-8")
             server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                payload = json.dumps(
-                    {
-                        "repo": str(root),
-                        "file_edits": [
-                            {
-                                "path": "notes.txt",
-                                "new_content": "new\n",
-                                "rationale": "Update approved content.",
-                            }
-                        ],
-                    }
-                ).encode("utf-8")
-                request = Request(
+                with patch(
+                    "repopilot_agent.web_server.OpenAICompatibleClient",
+                    return_value=FakeLLMClient(
+                        [
+                            '{"steps":[{"title":"Inspect notes","detail":"Review notes.txt."}]}',
+                            '{"objective":"Update notes","files":[{"path":"notes.txt","change_type":"refinement",'
+                            '"rationale":"notes.txt is the target.","suggested_actions":["Replace old with new"],'
+                            '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest discover -s tests"],'
+                            '"ready_for_patch":true,"file_edits":[{"path":"notes.txt","new_content":"new\\n",'
+                            '"rationale":"Approved replacement."}]}',
+                        ]
+                    ),
+                ):
+                    propose_payload = json.dumps(
+                        {
+                            "repo": str(root),
+                            "task": "update notes",
+                            "validation": ["python -m unittest discover -s tests"],
+                            "use_llm": True,
+                            "api_key": "test-key",
+                        }
+                    ).encode("utf-8")
+                    propose_request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/propose",
+                        data=propose_payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urlopen(propose_request, timeout=5) as response:
+                        proposal = json.loads(response.read().decode("utf-8"))
+
+                self.assertIsNotNone(proposal["proposal_id"])
+                apply_payload = json.dumps({"proposal_id": proposal["proposal_id"]}).encode("utf-8")
+                apply_request = Request(
                     f"http://127.0.0.1:{server.server_port}/api/apply",
-                    data=payload,
+                    data=apply_payload,
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
 
-                with urlopen(request, timeout=5) as response:
+                with urlopen(apply_request, timeout=5) as response:
                     data = json.loads(response.read().decode("utf-8"))
 
                 self.assertTrue(data["applied"])
                 self.assertEqual(data["changed_files"], ["notes.txt"])
+                self.assertEqual(data["validation"][0]["command"], "python -m unittest discover -s tests")
+                self.assertTrue(any(event["step"] == "apply" for event in data["timeline"]))
                 self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "new\n")
             finally:
                 server.shutdown()
@@ -121,21 +157,40 @@ class WebServerTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                payload = json.dumps(
-                    {
-                        "repo": str(root),
-                        "file_edits": [
-                            {
-                                "path": "log.md",
-                                "new_content": "hidden\n",
-                                "rationale": "Should be blocked.",
-                            }
-                        ],
-                    }
-                ).encode("utf-8")
+                with patch(
+                    "repopilot_agent.web_server.OpenAICompatibleClient",
+                    return_value=FakeLLMClient(
+                        [
+                            '{"steps":[{"title":"Inspect log","detail":"Review log.md."}]}',
+                            '{"objective":"Update log","files":[{"path":"log.md","change_type":"documentation",'
+                            '"rationale":"log.md is the target.","suggested_actions":["Replace content"],'
+                            '"confidence":"high"}],"risks":[],"validation_suggestions":[],"ready_for_patch":true,'
+                            '"file_edits":[{"path":"log.md","new_content":"hidden\\n","rationale":"Should be blocked."}]}',
+                        ]
+                    ),
+                ):
+                    propose_payload = json.dumps(
+                        {
+                            "repo": str(root),
+                            "task": "update log",
+                            "use_llm": True,
+                            "api_key": "test-key",
+                        }
+                    ).encode("utf-8")
+                    propose_request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/propose",
+                        data=propose_payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urlopen(propose_request, timeout=5) as response:
+                        proposal = json.loads(response.read().decode("utf-8"))
+
+                apply_payload = json.dumps({"proposal_id": proposal["proposal_id"]}).encode("utf-8")
                 request = Request(
                     f"http://127.0.0.1:{server.server_port}/api/apply",
-                    data=payload,
+                    data=apply_payload,
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )

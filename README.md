@@ -25,8 +25,11 @@ The current version provides a dependency-light local workflow that can run with
 - Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
 - Use a local web UI for LLM settings, task input, workflow output, GitHub status, and diff review.
 - Generate patch proposals from the web UI without running validation commands.
+- Store web-generated patch proposals as server-side approval sessions and apply them by proposal ID.
 - Preview LLM-generated file edits as unified diffs before applying them.
-- Apply approved file edits from the web UI with repository path protection and blocked sensitive files.
+- Apply approved file edits from the web UI with repository path protection, blocked sensitive files, automatic diff refresh, and validation reruns.
+- Track web workflow progress in a visible agent timeline.
+- Import GitHub issues into the task input from the GitHub panel.
 - Print a human-readable report or JSON report.
 - Provide unit tests for scanner, search, LLM planning fallback, LLM patch proposal fallback, Git workflow, GitHub workflow, web server helpers, and workflow behavior.
 
@@ -42,10 +45,10 @@ This MVP uses deterministic local logic by default and can use an OpenAI-compati
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
 - **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
 - **GitHub Workflow Awareness**: Read open issues, open pull requests, PR reviews, and CI/check status from the GitHub REST API.
-- **Local Web UI**: Run a dependency-light browser interface for LLM configuration, task execution, GitHub status, proposed diff review, approved patch application, and working-tree diff inspection.
+- **Local Web UI**: Run a dependency-light browser interface for LLM configuration, task execution, GitHub issue import, GitHub status, proposed diff review, approved patch application, validation reruns, timeline inspection, and working-tree diff inspection.
 - **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
 - **PR Summary Generation**: Generate concise pull request descriptions, risk notes, and test evidence.
-- **Safety Controls**: Use command allowlists, LLM fallback behavior, sensitive file protection, and clear approval boundaries.
+- **Safety Controls**: Use command allowlists, LLM fallback behavior, server-side proposal IDs, sensitive file protection, and clear approval boundaries.
 
 ## Planned Architecture
 
@@ -69,9 +72,11 @@ The first version focuses on a complete local workflow:
 6. Run allowlisted validation commands.
 7. Inspect Git state and generate commit or PR draft text.
 8. Inspect GitHub issue, pull request, review, and CI state when a GitHub remote is configured.
-9. Review workflow results, GitHub status, patch proposals, and diffs in a local browser UI.
-10. Apply LLM-generated file edits after explicit user approval.
-11. Generate a final engineering summary.
+9. Import GitHub issues into the task input from the browser UI.
+10. Review workflow timeline, GitHub status, patch proposals, and diffs in a local browser UI.
+11. Apply LLM-generated file edits by server-side proposal ID after explicit user approval.
+12. Rerun configured validation after approved patch application.
+13. Generate a final engineering summary.
 
 ## Usage
 
@@ -101,7 +106,7 @@ Then open:
 http://127.0.0.1:8765
 ```
 
-The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, standalone patch proposal generation, proposed diff preview, approved patch application, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
+The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, agent timeline, standalone patch proposal generation, server-side proposal approval sessions, proposed diff preview, approved patch application, validation reruns after apply, GitHub issue import, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
 
 Use the LLM planner and patch proposal generator:
 
@@ -193,7 +198,6 @@ This project combines modern AI engineering with real software development workf
 ## Future Extensions
 
 - LLM-backed review generation
-- GitHub issue import into RepoPilot tasks
 - GitHub pull request creation after user approval
 - FastAPI service for workflow execution
 - Rich React or Next.js dashboard for execution traces, diffs, approvals, and results
@@ -205,4 +209,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, validation runner, Git workflow awareness commands, GitHub workflow awareness command, local web UI, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, protected patch application, validation runner, Git workflow awareness commands, GitHub workflow awareness command, local web UI, root launcher, and unit tests are implemented.
