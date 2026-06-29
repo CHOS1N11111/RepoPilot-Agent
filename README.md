@@ -1,88 +1,100 @@
 # RepoPilot Agent
 
-RepoPilot Agent is an AI-powered developer workflow assistant designed for real software engineering tasks. Given a GitHub issue, a bug report, or a feature request, it analyzes a codebase, plans the work, proposes code changes, runs validation commands, and produces a review-ready implementation summary.
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![LLM](https://img.shields.io/badge/LLM-OpenAI--compatible-111827)
+![Workflow](https://img.shields.io/badge/Workflow-Human--in--the--loop-176B87)
+![Status](https://img.shields.io/badge/Status-Local%20MVP-18794E)
 
-The project is designed as a practical LLM/agent system rather than a simple chatbot. It focuses on tool use, repository understanding, human approval, execution traceability, and engineering automation.
+RepoPilot Agent is a local coding workflow agent for turning GitHub issues, bug reports, or feature requests into reviewed, validated code-change proposals. It scans a repository, retrieves relevant files, plans the work, asks an optional OpenAI-compatible LLM for patch proposals, previews diffs, waits for human approval, applies approved edits, reruns validation, and summarizes the result.
 
-## What This Project Will Do
+The project is designed around practical agent engineering: tool use, repository understanding, Git/GitHub awareness, structured LLM outputs, traceability, and human-in-the-loop safety.
 
-RepoPilot Agent will help developers move from a vague task description to a validated code change. The system will read project files, search relevant code, reason about implementation steps, generate patches, run tests or linters, and explain the final result.
+## Agent Workflow
 
-The long-term goal is to build a safe, observable, and extensible coding agent that can work with local repositories and GitHub workflows.
+```text
+Task or GitHub issue
+-> repository scan
+-> relevant file search
+-> deterministic or LLM plan
+-> patch proposal
+-> LLM self-review
+-> proposed diff preview
+-> human approval
+-> protected file application
+-> validation rerun
+-> Git diff and PR draft support
+```
 
-## Current MVP
+```mermaid
+flowchart LR
+    A["GitHub issue or task"] --> B["Repository scan"]
+    B --> C["Relevant file search"]
+    C --> D["Plan"]
+    D --> E["Patch proposal"]
+    E --> F["LLM self-review"]
+    F --> G["Proposed diff"]
+    G --> H{"Human approval"}
+    H -->|Approve| I["Protected apply"]
+    H -->|Reject| E
+    I --> J["Validation rerun"]
+    J --> K["Git diff and PR draft"]
+```
 
-The current version provides a dependency-light local workflow that can run without installing external packages:
+## Highlights
 
-- Scan a local repository while ignoring common build, dependency, cache, and Git directories.
-- Read supported text files such as Python, Markdown, JavaScript, TypeScript, JSON, TOML, YAML, HTML, CSS, Go, Rust, Java, and shell files.
-- Search repository files using task keywords and return ranked relevant files with match reasons and previews.
-- Generate an engineering plan from the task and retrieved context, with optional LLM-backed planning.
-- Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions, with optional LLM-backed proposal generation.
-- Validate LLM outputs through strict schema parsers for planning, patch proposal, and patch review JSON.
-- Record LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
-- Review LLM-generated proposed diffs with an LLM self-review step before user approval.
-- Run validation commands through an allowlist.
-- Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
-- Generate suggested commit messages and pull request drafts from local Git changes.
-- Inspect GitHub repository collaboration state, including open issues, open pull requests, recent PR reviews, and CI/check status for PR heads.
-- Use a local web UI for LLM settings, task input, workflow output, GitHub status, and diff review.
-- Generate patch proposals from the web UI without running validation commands.
-- Store web-generated patch proposals as server-side approval sessions and apply them by proposal ID.
-- Preview LLM-generated file edits as unified diffs before applying them.
-- Apply approved file edits from the web UI with repository path protection, blocked sensitive files, automatic diff refresh, and validation reruns.
-- Track web workflow progress in a visible agent timeline.
-- Import GitHub issues into the task input from the GitHub panel.
-- Print a human-readable report or JSON report.
-- Provide unit tests for scanner, search, LLM planning fallback, LLM patch proposal fallback, Git workflow, GitHub workflow, web server helpers, and workflow behavior.
+- 🧭 Dependency-light Python implementation using the standard library for the current MVP.
+- 🖥️ Local web UI for task input, LLM settings, proposal review, timelines, GitHub state, and diffs.
+- 🧠 Optional OpenAI-compatible LLM integration with deterministic fallback.
+- ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
+- 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
+- 🛡️ LLM self-review for proposed diffs before human approval.
+- 🔐 Server-side proposal sessions so the browser applies proposals by `proposal_id`, not raw edits.
+- 🧪 Validation command allowlist for safer test and lint execution.
+- 🌿 Git workflow awareness for branch state, remotes, changes, diff stats, commit messages, and PR drafts.
+- 🔗 GitHub awareness for open issues, pull requests, reviews, and CI/check status.
 
-This MVP uses deterministic local logic by default and can use an OpenAI-compatible LLM for planning and patch proposal generation when configured. If the LLM is unavailable or returns invalid JSON, RepoPilot falls back to deterministic behavior unless fallback is disabled.
+## Capability Map
 
-## Core Features
+| Area | What RepoPilot Does |
+| --- | --- |
+| 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths. |
+| 🔎 Retrieval | Scores files by task keywords and returns relevant file previews with match reasons. |
+| 🧭 Planning | Builds deterministic plans or LLM-generated engineering plans. |
+| 🧩 Patch proposal | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits. |
+| 🧠 LLM governance | Centralizes prompts, validates schemas, records traces, and runs patch self-review. |
+| 🖐️ Web approval | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID. |
+| 🧪 Validation | Runs allowlisted commands and reports stdout, stderr, exit code, and rejected commands. |
+| 🌿 Git | Inspects branch/upstream/ahead/behind, changed files, latest commit, and diff stats. |
+| 🔗 GitHub | Reads issues, PRs, reviews, and CI/check status from the repository remote. |
 
-- **Repository Understanding**: Index source code, README files, configuration files, and project documentation.
-- **Task Planning**: Convert a user request into a clear engineering plan with actionable steps, either through deterministic rules or an optional LLM planner.
-- **Code Search and Context Retrieval**: Combine semantic search with precise keyword search to locate relevant files and functions.
-- **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, validation suggestions, and LLM-generated editable file content before applying edits.
-- **LLM Governance**: Keep prompt templates in one module, parse model outputs through strict schemas, trace every LLM call, and add an LLM self-review step for proposed diffs.
-- **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
-- **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
-- **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
-- **GitHub Workflow Awareness**: Read open issues, open pull requests, PR reviews, and CI/check status from the GitHub REST API.
-- **Local Web UI**: Run a dependency-light browser interface for LLM configuration, task execution, GitHub issue import, GitHub status, proposed diff review, approved patch application, validation reruns, timeline inspection, and working-tree diff inspection.
-- **Execution Trace**: Show each agent step, tool call, result, retry, and decision in a transparent timeline.
-- **PR Summary Generation**: Generate concise pull request descriptions, risk notes, and test evidence.
-- **Safety Controls**: Use command allowlists, LLM fallback behavior, server-side proposal IDs, sensitive file protection, and clear approval boundaries.
+## Architecture
 
-## Planned Architecture
+```text
+repopilot.py
+  CLI entry point
 
-- **Frontend**: React or Next.js dashboard for task input, execution timeline, diffs, approvals, and results.
-- **Backend**: FastAPI service for project management, agent orchestration, file access, and tool execution.
-- **Agent Orchestration**: LangGraph-style state machine with planner, coder, tester, and reviewer nodes.
-- **Retrieval Layer**: LlamaIndex or a lightweight custom index for repository search and documentation retrieval.
-- **Storage**: SQLite for task history, execution traces, repository metadata, and validation results.
-- **Sandboxing**: Docker-based execution environment for safer command execution.
-- **Model Layer**: Pluggable LLM provider interface for OpenAI-compatible APIs, with deterministic fallback.
+src/repopilot_agent/
+  scanner.py            repository file scanning
+  search.py             lightweight relevance search
+  planner.py            deterministic and LLM planning
+  patch_proposer.py     patch proposal and LLM patch review
+  patch_apply.py        protected file edit application
+  workflow.py           end-to-end local workflow
+  validator.py          allowlisted validation runner
+  git_tools.py          local Git inspection
+  git_summary.py        commit message and PR draft generation
+  github_tools.py       GitHub REST API inspection
+  web_server.py         local stdlib HTTP server
+  web_sessions.py       in-memory proposal sessions and timeline events
+  llm/
+    base.py             provider protocol and message model
+    openai_compatible.py OpenAI-compatible client
+    prompts.py          prompt templates
+    schema.py           strict JSON parsers
+    tracing.py          LLM call tracing
+```
 
-## MVP Scope
-
-The first version focuses on a complete local workflow:
-
-1. Select or register a local repository.
-2. Submit a bug report or feature request.
-3. Generate an implementation plan with rules or an optional LLM planner.
-4. Search and display relevant files.
-5. Propose file-level changes for user review with rules or an optional LLM proposal module.
-6. Run allowlisted validation commands.
-7. Inspect Git state and generate commit or PR draft text.
-8. Inspect GitHub issue, pull request, review, and CI state when a GitHub remote is configured.
-9. Import GitHub issues into the task input from the browser UI.
-10. Review workflow timeline, GitHub status, patch proposals, and diffs in a local browser UI.
-11. Apply LLM-generated file edits by server-side proposal ID after explicit user approval.
-12. Rerun configured validation after approved patch application.
-13. Generate a final engineering summary.
-
-## Usage
+## Quick Start
 
 Run the local workflow from the project root:
 
@@ -96,7 +108,13 @@ Run with validation:
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --validate "python -m unittest discover -s tests"
 ```
 
-The report includes ranked relevant files, an implementation plan, proposed file-level changes, risk notes, validation suggestions, validation results, and a final summary.
+Print JSON output:
+
+```bash
+python repopilot.py run --repo . --task "inspect validation workflow" --json
+```
+
+## Web UI
 
 Start the local web UI:
 
@@ -104,15 +122,29 @@ Start the local web UI:
 python repopilot.py serve
 ```
 
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:8765
 ```
 
-The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, LLM call traces, LLM patch review output, agent timeline, standalone patch proposal generation, server-side proposal approval sessions, proposed diff preview, approved patch application, validation reruns after apply, GitHub issue import, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
+The web UI supports:
 
-Use the LLM planner and patch proposal generator:
+- 🧠 LLM model, API base URL, and API key inputs.
+- 📌 Task input and GitHub issue import.
+- 🚦 Workflow execution and standalone proposal generation.
+- 🔍 LLM input/output, self-review, and call trace inspection.
+- 🕒 Agent timeline showing scan, search, plan, proposal, review, approval, apply, and validation events.
+- 🧾 Proposed diff preview before file writes.
+- 🖐️ Human-approved patch application by server-side `proposal_id`.
+- 🔗 GitHub issue/PR/review/check display.
+- 🌿 Working tree and staged diff display.
+
+API keys entered in the UI are sent only to the local server for that request and are not written to disk.
+
+## LLM Configuration
+
+RepoPilot works without an LLM by using deterministic rules. To enable LLM-backed planning, patch proposals, and patch review:
 
 ```bash
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm
@@ -124,23 +156,19 @@ Use a specific model:
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --model gpt-4o-mini
 ```
 
-Disable fallback when debugging LLM output:
+Disable deterministic fallback while debugging model output:
 
 ```bash
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --no-llm-fallback
 ```
 
-The LLM planner and patch proposal generator read these environment variables:
+Environment variables:
 
 - `OPENAI_API_KEY`: API key for the OpenAI-compatible provider.
 - `OPENAI_BASE_URL`: Optional API base URL. Defaults to `https://api.openai.com/v1`.
 - `REPOPILOT_MODEL`: Optional default model name.
 
-Print JSON output:
-
-```bash
-python repopilot.py run --repo . --task "inspect validation workflow" --json
-```
+## Git And GitHub
 
 Inspect local Git state:
 
@@ -148,15 +176,10 @@ Inspect local Git state:
 python repopilot.py git status --repo .
 ```
 
-Generate a commit and workflow summary:
+Generate a commit summary and PR draft:
 
 ```bash
 python repopilot.py git summary --repo . --validation "python -m unittest discover -s tests"
-```
-
-Generate a pull request draft:
-
-```bash
 python repopilot.py git pr-draft --repo . --validation "python -m unittest discover -s tests"
 ```
 
@@ -172,9 +195,22 @@ Print GitHub state as JSON:
 python repopilot.py github status --repo . --limit 10 --json
 ```
 
-The GitHub command resolves the repository from the local `origin` remote. It can read public repositories without a token, but `GITHUB_TOKEN` or `GH_TOKEN` is recommended for private repositories and higher rate limits.
+The GitHub command resolves the repository from the local `origin` remote. Public repositories can be read without a token, but `GITHUB_TOKEN` or `GH_TOKEN` is recommended for private repositories and higher rate limits.
 
-Run tests:
+## Safety Model
+
+RepoPilot is intentionally approval-first:
+
+- ✅ It previews proposed diffs before writing files.
+- 🔐 It applies only server-stored proposal edits by `proposal_id`.
+- 🚧 It blocks repository escapes and sensitive paths such as `.git`, `.env`, and `log.md`.
+- 🧪 It runs validation commands only through an allowlist.
+- 🧯 It keeps deterministic fallbacks for invalid or unavailable LLM output.
+- 🔍 It exposes LLM traces and self-review output so decisions are inspectable.
+
+## Tests
+
+Run the test suite:
 
 ```bash
 python -m unittest discover -s tests
@@ -186,30 +222,16 @@ Compile-check Python files:
 python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.py
 ```
 
-## Engineering Value
+## Roadmap
 
-This project combines modern AI engineering with real software development workflows:
+- 💾 Persist proposal sessions and trace history in SQLite.
+- 🧩 Add per-file approval controls before applying proposals.
+- 🚀 Add GitHub pull request creation after explicit user approval.
+- 📏 Add context budget management for larger repositories.
+- ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
+- 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
+- 🧪 Add benchmark tasks from real open-source issues.
 
-- LLM tool use and agent orchestration
-- Retrieval-augmented generation for codebases
-- Workflow automation with human approval
-- Backend API design
-- Frontend product design for developer tools
-- Git and GitHub workflow integration
-- Test execution and result interpretation
-- Security-aware agent design
+## Status
 
-## Future Extensions
-
-- GitHub pull request creation after user approval
-- FastAPI service for workflow execution
-- Rich React or Next.js dashboard for execution traces, diffs, approvals, and results
-- Multi-agent collaboration between planner, implementer, tester, and reviewer
-- Persistent memory per repository
-- Automatic benchmark suite using real open-source issues
-- Browser-based investigation for documentation and dependency research
-- Team workspace support with task history and approval logs
-
-## Current Status
-
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch self-review, protected patch application, validation runner, Git workflow awareness commands, GitHub workflow awareness command, local web UI, root launcher, and unit tests are implemented.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, GitHub workflow awareness, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
