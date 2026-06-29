@@ -52,6 +52,7 @@ flowchart LR
 - 🧪 Validation command allowlist for safer test and lint execution.
 - 🌿 Git workflow awareness for branch state, remotes, changes, diff stats, commit messages, and PR drafts.
 - 🔗 GitHub awareness for open issues, pull requests, reviews, and CI/check status.
+- 📦 Delivery draft panel for suggested commit messages, validation notes, and PR-ready text.
 
 ## Capability Map
 
@@ -64,7 +65,7 @@ flowchart LR
 | 🧠 LLM governance | Centralizes prompts, validates schemas, records traces, and runs patch self-review. |
 | 🖐️ Web approval | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID. |
 | 🧪 Validation | Runs allowlisted commands and reports stdout, stderr, exit code, and rejected commands. |
-| 🌿 Git | Inspects branch/upstream/ahead/behind, changed files, latest commit, and diff stats. |
+| 🌿 Git | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
 | 🔗 GitHub | Reads issues, PRs, reviews, and CI/check status from the repository remote. |
 
 ## Architecture
@@ -137,6 +138,7 @@ The web UI supports:
 - 🕒 Agent timeline showing scan, search, plan, proposal, review, approval, apply, and validation events.
 - 🧾 Proposed diff preview before file writes.
 - 🖐️ Human-approved patch application by server-side `proposal_id`.
+- 📦 Delivery draft generation for commit message and PR body preparation.
 - 🔗 GitHub issue/PR/review/check display.
 - 🌿 Working tree and staged diff display.
 
@@ -182,6 +184,8 @@ Generate a commit summary and PR draft:
 python repopilot.py git summary --repo . --validation "python -m unittest discover -s tests"
 python repopilot.py git pr-draft --repo . --validation "python -m unittest discover -s tests"
 ```
+
+The web UI also includes a Delivery tab that generates the same kind of commit message and PR draft from the current working tree. It does not commit, push, or create pull requests.
 
 Inspect GitHub issue, pull request, review, and CI state:
 
@@ -234,4 +238,4 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, GitHub workflow awareness, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

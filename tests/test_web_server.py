@@ -207,6 +207,46 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_git_summary_api_returns_delivery_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "tester@example.local"], cwd=root, check=True)
+            (root / "README.md").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "Initial"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "README.md").write_text("first\nsecond\n", encoding="utf-8")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "validation_notes": ["python -m unittest discover -s tests: exit 0"],
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/git/summary",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["suggested_commit_message"], "Update project documentation")
+                self.assertIn("README.md", data["change_summary"][-1])
+                self.assertIn("## What changed", data["pull_request"]["body"])
+                self.assertEqual(data["validation_notes"], ["python -m unittest discover -s tests: exit 0"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

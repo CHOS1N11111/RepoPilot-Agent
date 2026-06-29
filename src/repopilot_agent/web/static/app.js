@@ -25,6 +25,7 @@ $("applyProposal").addEventListener("click", applyProposal);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
+$("generateDelivery").addEventListener("click", generateDelivery);
 $("refreshAll").addEventListener("click", async () => {
   await Promise.allSettled([loadGithub(), loadDiff(false)]);
 });
@@ -126,6 +127,23 @@ async function loadDiff(staged) {
   $("diffOutput").textContent = data.diff || data.error || "No diff.";
 }
 
+async function generateDelivery() {
+  setStatus("Generating delivery draft...");
+  try {
+    const data = await postJson("/api/git/summary", {
+      repo: $("repoPath").value.trim() || ".",
+      validation_notes: buildValidationNotes(),
+    });
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    renderDelivery(data);
+    setStatus("Delivery draft ready.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
   $("filesScanned").textContent = report.files_scanned;
@@ -185,6 +203,64 @@ function renderValidation(results) {
       <pre>${escapeHtml(result.stdout || result.stderr || "")}</pre>
     </div>`)
     .join("");
+}
+
+function renderDelivery(data) {
+  const state = data.state || {};
+  const changes = state.changes || [];
+  const changedFiles = changes.length
+    ? changes.map((change) => `<li>${escapeHtml(change.path)} <span class="tag">${escapeHtml(change.description)}</span></li>`).join("")
+    : "<li>No changed files detected.</li>";
+  const summaries = (data.change_summary || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  const validation = (data.validation_notes || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  $("deliveryContent").innerHTML = `
+    <div class="metrics">
+      <div><span>${escapeHtml(state.branch || "unknown")}</span><small>branch</small></div>
+      <div><span>${escapeHtml(String(state.ahead ?? 0))}</span><small>ahead</small></div>
+      <div><span>${escapeHtml(String(state.behind ?? 0))}</span><small>behind</small></div>
+    </div>
+    <div class="item">
+      <div class="item-title">Suggested Commit Message</div>
+      <pre>${escapeHtml(data.suggested_commit_message || "")}</pre>
+    </div>
+    <div class="item">
+      <div class="item-title">Changed Files</div>
+      <ul>${changedFiles}</ul>
+    </div>
+    <div class="item">
+      <div class="item-title">Change Summary</div>
+      <ul>${summaries || "<li>No summary available.</li>"}</ul>
+    </div>
+    <div class="item">
+      <div class="item-title">Validation Notes</div>
+      <ul>${validation || "<li>Validation not provided.</li>"}</ul>
+    </div>
+    <div class="item">
+      <div class="item-title">PR Draft Title</div>
+      <pre>${escapeHtml(data.pull_request?.title || "")}</pre>
+    </div>
+    <div class="item">
+      <div class="item-title">PR Draft Body</div>
+      <pre>${escapeHtml(data.pull_request?.body || "")}</pre>
+    </div>
+    <div class="item">
+      <div class="item-title">Diff Stat</div>
+      <pre>${escapeHtml(state.diff_stat || state.staged_diff_stat || "No diff stat.")}</pre>
+    </div>
+  `;
+}
+
+function buildValidationNotes() {
+  const validation = state.lastReport?.validation || [];
+  if (!validation.length) {
+    return [];
+  }
+  return validation.map((result) => {
+    if (!result.allowed) {
+      return `${result.command}: rejected`;
+    }
+    return `${result.command}: exit ${result.exit_code}`;
+  });
 }
 
 function renderLlmTraces(traces) {

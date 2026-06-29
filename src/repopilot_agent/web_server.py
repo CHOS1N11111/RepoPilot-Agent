@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .git_tools import get_git_diff, inspect_repository
+from .git_summary import build_git_workflow_summary
 from .github_tools import inspect_github_repository
 from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
@@ -60,6 +61,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/apply":
             self._handle_apply()
+            return
+        if parsed.path == "/api/git/summary":
+            self._handle_git_summary()
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -151,6 +155,20 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["validation"] = [asdict(item) for item in session.validation]
         data["timeline"] = session.to_public_dict()["timeline"]
         self._send_json(data)
+
+    def _handle_git_summary(self) -> None:
+        payload = self._read_json()
+        repo = str(payload.get("repo") or ".")
+        validation_notes = payload.get("validation_notes") or []
+        if not isinstance(validation_notes, list) or not all(isinstance(item, str) for item in validation_notes):
+            self._send_json({"error": "validation_notes must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            summary = build_git_workflow_summary(repo, validation_notes=validation_notes)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json(summary.to_dict())
 
     def _handle_propose(self) -> None:
         payload = self._read_json()
