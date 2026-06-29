@@ -18,6 +18,7 @@ document.querySelectorAll(".tab").forEach((button) => {
 $("modelSelect").addEventListener("change", () => {
   $("customModelWrap").classList.toggle("hidden", $("modelSelect").value !== "custom");
 });
+$("repoSource").addEventListener("change", updateRepositorySourceUi);
 
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
@@ -104,6 +105,8 @@ function buildWorkflowPayload() {
   const validation = $("validationInput").value.trim();
   return {
     repo: $("repoPath").value.trim() || ".",
+    repo_source: $("repoSource").value,
+    github_url: $("githubUrl").value.trim(),
     task: $("taskInput").value.trim(),
     validation: validation ? [validation] : [],
     use_llm: $("useLlm").checked,
@@ -115,17 +118,16 @@ function buildWorkflowPayload() {
 }
 
 async function loadGithub() {
-  const repo = encodeURIComponent($("repoPath").value.trim() || ".");
   $("githubContent").innerHTML = item("Loading GitHub status...");
-  const data = await getJson(`/api/github/status?repo=${repo}&limit=8`);
+  const data = await getJson(`/api/github/status?${repositoryQuery()}&limit=8`);
   state.github = data;
   renderGithub(data);
 }
 
 async function loadDiff(staged) {
-  const repo = encodeURIComponent($("repoPath").value.trim() || ".");
-  const data = await getJson(`/api/git/diff?repo=${repo}&staged=${staged ? "true" : "false"}`);
+  const data = await getJson(`/api/git/diff?${repositoryQuery()}&staged=${staged ? "true" : "false"}`);
   $("diffOutput").textContent = data.diff || data.error || "No diff.";
+  updateRepositorySourceStatus(data.repository_source);
 }
 
 async function generateDelivery() {
@@ -133,6 +135,8 @@ async function generateDelivery() {
   try {
     const data = await postJson("/api/git/summary", {
       repo: $("repoPath").value.trim() || ".",
+      repo_source: $("repoSource").value,
+      github_url: $("githubUrl").value.trim(),
       validation_notes: buildValidationNotes(),
     });
     if (data.error) {
@@ -146,13 +150,13 @@ async function generateDelivery() {
 }
 
 async function loadHistory() {
-  const repo = encodeURIComponent($("repoPath").value.trim() || ".");
   $("historyContent").innerHTML = item("Loading history...");
   try {
-    const data = await getJson(`/api/history?repo=${repo}&limit=20`);
+    const data = await getJson(`/api/history?${repositoryQuery()}&limit=20`);
     if (data.error) {
       throw new Error(data.error);
     }
+    updateRepositorySourceStatus(data.repository_source);
     renderHistory(data.runs || []);
   } catch (error) {
     $("historyContent").innerHTML = item(`History unavailable: ${escapeHtml(error.message)}`);
@@ -160,10 +164,9 @@ async function loadHistory() {
 }
 
 async function loadHistoryDetail(runId) {
-  const repo = encodeURIComponent($("repoPath").value.trim() || ".");
   $("historyDetail").innerHTML = item("Loading run detail...");
   try {
-    const data = await getJson(`/api/history/run?repo=${repo}&id=${encodeURIComponent(runId)}`);
+    const data = await getJson(`/api/history/run?${repositoryQuery()}&id=${encodeURIComponent(runId)}`);
     if (data.error) {
       throw new Error(data.error);
     }
@@ -175,6 +178,7 @@ async function loadHistoryDetail(runId) {
 
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
+  updateRepositorySourceStatus(report.repository_source);
   $("filesScanned").textContent = report.files_scanned;
   $("planSource").textContent = sourceLabel(report.plan_metadata);
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
@@ -236,6 +240,7 @@ function renderValidation(results) {
 }
 
 function renderDelivery(data) {
+  updateRepositorySourceStatus(data.repository_source);
   const state = data.state || {};
   const changes = state.changes || [];
   const changedFiles = changes.length
@@ -367,6 +372,7 @@ function renderLlmTraces(traces) {
 }
 
 function renderGithub(data) {
+  updateRepositorySourceStatus(data.repository_source);
   if (data.error || data.unavailable_reason) {
     $("githubContent").innerHTML = item(data.error || data.unavailable_reason);
     return;
@@ -446,7 +452,7 @@ function buildLlmInputPreview(report, payload) {
     .slice(0, 5)
     .map((hit) => `Path: ${hit.path}\nScore: ${hit.score}\nReasons: ${hit.reasons.join(", ")}\nPreview:\n${hit.preview}`)
     .join("\n\n---\n\n");
-  return `Use LLM: ${payload.use_llm}\nModel: ${payload.model || "(default)"}\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
+  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nUse LLM: ${payload.use_llm}\nModel: ${payload.model || "(default)"}\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
 }
 
 function buildLlmOutputPreview(report) {
@@ -485,6 +491,42 @@ function sourceLabel(metadata) {
   return metadata.fallback_used ? `${metadata.source} fallback` : metadata.source;
 }
 
+function repositoryQuery() {
+  const params = new URLSearchParams({
+    repo: $("repoPath").value.trim() || ".",
+    repo_source: $("repoSource").value,
+  });
+  const githubUrl = $("githubUrl").value.trim();
+  if (githubUrl) {
+    params.set("github_url", githubUrl);
+  }
+  return params.toString();
+}
+
+function updateRepositorySourceUi() {
+  const source = $("repoSource").value;
+  $("githubUrlWrap").classList.toggle("hidden", source === "local");
+  $("repoPath").placeholder = source === "github" ? "Optional cache context; GitHub URL is used" : ".";
+  if (source === "github") {
+    $("repoSourceLine").textContent = "GitHub repositories are cloned into .repopilot/repos before analysis.";
+  } else if (source === "auto") {
+    $("repoSourceLine").textContent = "Auto detects GitHub URLs or local paths from the repository input.";
+  } else {
+    $("repoSourceLine").textContent = "Using local repository path.";
+  }
+}
+
+function updateRepositorySourceStatus(source) {
+  if (!source) {
+    return;
+  }
+  const label = source.source === "github" ? `GitHub ${source.owner}/${source.repo}` : "Local path";
+  $("repoSourceLine").textContent = `${label}: ${source.local_path}. ${source.message || ""}`.trim();
+  if (source.local_path) {
+    $("repoPath").value = source.source === "github" ? $("repoPath").value : source.local_path;
+  }
+}
+
 function item(content) {
   return `<div class="item">${content}</div>`;
 }
@@ -508,4 +550,5 @@ loadGithub().catch((error) => {
 loadDiff(false).catch((error) => {
   $("diffOutput").textContent = `Diff unavailable: ${error.message}`;
 });
+updateRepositorySourceUi();
 loadHistory().catch(() => {});

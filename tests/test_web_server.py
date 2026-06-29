@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
+from repopilot_agent.repo_source import RepositorySource
 from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR
 
 
@@ -82,6 +83,51 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(data["validation"], [])
                 self.assertTrue(data["patch_proposal"]["ready_for_patch"])
                 self.assertEqual(data["patch_proposal"]["files"][0]["path"], "search.py")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_run_api_accepts_github_repository_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def login():\n    return True\n", encoding="utf-8")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                source = RepositorySource(
+                    source="github",
+                    input="https://github.com/example/project",
+                    local_path=str(root),
+                    github_url="https://github.com/example/project",
+                    owner="example",
+                    repo="project",
+                    cached=True,
+                    message="Using cached clone for https://github.com/example/project.",
+                )
+                with patch("repopilot_agent.web_server.resolve_repository_reference", return_value=source):
+                    payload = json.dumps(
+                        {
+                            "repo_source": "github",
+                            "github_url": "https://github.com/example/project",
+                            "task": "fix login behavior",
+                        }
+                    ).encode("utf-8")
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/run",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["repository_source"]["source"], "github")
+                self.assertEqual(data["repository_source"]["github_url"], "https://github.com/example/project")
+                self.assertEqual(data["repo_path"], str(root.resolve()))
+                self.assertEqual(data["relevant_files"][0]["path"], "main.py")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

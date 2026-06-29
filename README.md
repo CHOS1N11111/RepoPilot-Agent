@@ -85,6 +85,7 @@ src/repopilot_agent/
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
   github_tools.py       GitHub REST API inspection
+  repo_source.py        local path and GitHub URL resolution
   web_server.py         local stdlib HTTP server
   web_sessions.py       in-memory proposal sessions and timeline events
   llm/
@@ -131,6 +132,7 @@ http://127.0.0.1:8765
 
 The web UI supports:
 
+- Repository source selection for local paths, GitHub URLs, or auto detection.
 - 🧠 LLM model, API base URL, and API key inputs.
 - 📌 Task input and GitHub issue import.
 - 🚦 Workflow execution and standalone proposal generation.
@@ -143,6 +145,19 @@ The web UI supports:
 - 🌿 Working tree and staged diff display.
 
 API keys entered in the UI are sent only to the local server for that request and are not written to disk.
+
+## Repository Sources
+
+The web UI can analyze either a local repository path or a GitHub repository URL.
+
+- Local path mode uses the directory exactly like the CLI `--repo` option.
+- GitHub URL mode accepts inputs such as `https://github.com/owner/repo`, `git@github.com:owner/repo.git`, or `owner/repo`.
+- GitHub repositories are cloned into a local cache under `.repopilot/repos/` before analysis.
+- Existing cached clones are reused on later runs.
+- All patch previews, approved file writes, validation commands, Git diffs, and history records operate on the local cached working tree.
+- Set `REPOPILOT_REPO_CACHE` to override the clone cache directory.
+
+The first run for a GitHub URL requires `git clone` network access and any credentials required by that repository. RepoPilot still does not commit, push, or open pull requests automatically.
 
 ## LLM Configuration
 

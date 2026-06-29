@@ -18,6 +18,7 @@ from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
 from .patch_apply import apply_file_edits
+from .repo_source import resolve_repository_reference
 from .validator import run_validation
 from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
 from .workflow import run_workflow
@@ -79,7 +80,6 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_run(self) -> None:
         payload = self._read_json()
-        repo = str(payload.get("repo") or ".")
         task = str(payload.get("task") or "").strip()
         if not task:
             self._send_json({"error": "Task is required."}, status=HTTPStatus.BAD_REQUEST)
@@ -88,6 +88,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         validation = payload.get("validation") or []
         if not isinstance(validation, list) or not all(isinstance(item, str) for item in validation):
             self._send_json({"error": "validation must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        repo_source = self._resolve_payload_repository_or_error(payload)
+        if repo_source is None:
             return
 
         use_llm = bool(payload.get("use_llm"))
@@ -105,7 +108,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
         try:
             report = run_workflow(
-                repo,
+                repo_source.local_path,
                 task,
                 validation_commands=validation,
                 use_llm=use_llm,
@@ -117,6 +120,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         data = report.to_dict()
+        data["repository_source"] = repo_source.to_dict()
         timeline = build_report_timeline(report)
         data["timeline"] = [asdict(event) for event in timeline]
         try:
@@ -186,21 +190,24 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_git_summary(self) -> None:
         payload = self._read_json()
-        repo = str(payload.get("repo") or ".")
+        repo_source = self._resolve_payload_repository_or_error(payload)
+        if repo_source is None:
+            return
         validation_notes = payload.get("validation_notes") or []
         if not isinstance(validation_notes, list) or not all(isinstance(item, str) for item in validation_notes):
             self._send_json({"error": "validation_notes must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            summary = build_git_workflow_summary(repo, validation_notes=validation_notes)
+            summary = build_git_workflow_summary(repo_source.local_path, validation_notes=validation_notes)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send_json(summary.to_dict())
+        data = summary.to_dict()
+        data["repository_source"] = repo_source.to_dict()
+        self._send_json(data)
 
     def _handle_propose(self) -> None:
         payload = self._read_json()
-        repo = str(payload.get("repo") or ".")
         task = str(payload.get("task") or "").strip()
         if not task:
             self._send_json({"error": "Task is required."}, status=HTTPStatus.BAD_REQUEST)
@@ -208,6 +215,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         validation = payload.get("validation") or []
         if not isinstance(validation, list) or not all(isinstance(item, str) for item in validation):
             self._send_json({"error": "validation must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        repo_source = self._resolve_payload_repository_or_error(payload)
+        if repo_source is None:
             return
 
         use_llm = bool(payload.get("use_llm"))
@@ -225,7 +235,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
         try:
             report = run_workflow(
-                repo,
+                repo_source.local_path,
                 task,
                 validation_commands=[],
                 use_llm=use_llm,
@@ -251,6 +261,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             append_timeline(session, "approval", "pending", f"Waiting for approval on proposal {proposal_id}.")
             timeline = session.timeline
         data = report.to_dict()
+        data["repository_source"] = repo_source.to_dict()
         data["proposal_id"] = proposal_id
         data["timeline"] = [asdict(event) for event in timeline]
         try:
@@ -268,54 +279,68 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_git_status(self, query: str) -> None:
         params = parse_qs(query)
-        repo = _first(params, "repo", ".")
         try:
-            self._send_json(asdict(inspect_repository(repo)))
+            repo_source = self._resolve_query_repository(params)
+            data = asdict(inspect_repository(repo_source.local_path))
+            data["repository_source"] = repo_source.to_dict()
+            self._send_json(data)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_git_diff(self, query: str) -> None:
         params = parse_qs(query)
-        repo = _first(params, "repo", ".")
         staged = _first(params, "staged", "false").lower() == "true"
         try:
-            self._send_json({"repo": repo, "staged": staged, "diff": get_git_diff(repo, staged=staged)})
+            repo_source = self._resolve_query_repository(params)
+            self._send_json(
+                {
+                    "repo": repo_source.local_path,
+                    "staged": staged,
+                    "diff": get_git_diff(repo_source.local_path, staged=staged),
+                    "repository_source": repo_source.to_dict(),
+                }
+            )
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_github_status(self, query: str) -> None:
         params = parse_qs(query)
-        repo = _first(params, "repo", ".")
         try:
             limit = int(_first(params, "limit", "5"))
         except ValueError:
             limit = 5
-        snapshot = inspect_github_repository(repo, limit=limit)
-        self._send_json(snapshot.to_dict())
+        try:
+            repo_source = self._resolve_query_repository(params)
+            snapshot = inspect_github_repository(repo_source.local_path, limit=limit)
+            data = snapshot.to_dict()
+            data["repository_source"] = repo_source.to_dict()
+            self._send_json(data)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_history_list(self, query: str) -> None:
         params = parse_qs(query)
-        repo = _first(params, "repo", ".")
         try:
             limit = int(_first(params, "limit", "20"))
         except ValueError:
             limit = 20
         try:
-            runs = self._memory(repo).list_runs(limit=limit)
+            repo_source = self._resolve_query_repository(params, clone_if_missing=False)
+            runs = self._memory(repo_source.local_path).list_runs(limit=limit)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send_json({"runs": runs})
+        self._send_json({"runs": runs, "repository_source": repo_source.to_dict()})
 
     def _handle_history_detail(self, query: str) -> None:
         params = parse_qs(query)
-        repo = _first(params, "repo", ".")
         run_id = _first(params, "id", "").strip()
         if not run_id:
             self._send_json({"error": "id is required."}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            run = self._memory(repo).get_run(run_id)
+            repo_source = self._resolve_query_repository(params, clone_if_missing=False)
+            run = self._memory(repo_source.local_path).get_run(run_id)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -355,6 +380,30 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _memory(self, repo: str | Path) -> MemoryStore:
         return MemoryStore(default_memory_path(repo))
+
+    def _resolve_payload_repository_or_error(self, payload: dict[str, Any]) -> Any | None:
+        try:
+            return self._resolve_payload_repository(payload)
+        except (ValueError, FileNotFoundError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        return None
+
+    def _resolve_payload_repository(self, payload: dict[str, Any]) -> Any:
+        return resolve_repository_reference(
+            repo=payload.get("repo") or ".",
+            repo_source=str(payload.get("repo_source") or "auto"),
+            github_url=str(payload.get("github_url") or ""),
+        )
+
+    def _resolve_query_repository(self, params: dict[str, list[str]], clone_if_missing: bool = True) -> Any:
+        return resolve_repository_reference(
+            repo=_first(params, "repo", "."),
+            repo_source=_first(params, "repo_source", "auto"),
+            github_url=_first(params, "github_url", ""),
+            clone_if_missing=clone_if_missing,
+        )
 
 
 def _first(params: dict[str, list[str]], name: str, default: str) -> str:

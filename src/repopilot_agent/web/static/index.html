@@ -19,9 +19,22 @@
       <section class="panel control-panel">
         <h2>Run Workflow</h2>
         <label>
+          Repository source
+          <select id="repoSource">
+            <option value="local">Local path</option>
+            <option value="github">GitHub URL</option>
+            <option value="auto">Auto detect</option>
+          </select>
+        </label>
+        <label>
           Repository path
           <input id="repoPath" value="." />
         </label>
+        <label id="githubUrlWrap" class="hidden">
+          GitHub repository URL
+          <input id="githubUrl" placeholder="https://github.com/owner/repo" />
+        </label>
+        <p id="repoSourceLine" class="status-line">Using local repository path.</p>
         <label>
           Task
           <textarea id="taskInput" rows="7">fix search relevance for login behavior</textarea>
