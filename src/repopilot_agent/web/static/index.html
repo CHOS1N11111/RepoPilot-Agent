@@ -78,6 +78,7 @@
           <button class="tab" data-tab="github">GitHub</button>
           <button class="tab" data-tab="diff">Diff</button>
           <button class="tab" data-tab="delivery">Delivery</button>
+          <button class="tab" data-tab="history">History</button>
           <button class="tab" data-tab="json">JSON</button>
         </div>
 
@@ -135,6 +136,15 @@
             <button id="generateDelivery" class="secondary">Generate Delivery Draft</button>
           </div>
           <div id="deliveryContent" class="stack"></div>
+        </section>
+
+        <section id="historyTab" class="tab-content">
+          <div class="toolbar">
+            <button id="loadHistory" class="secondary">Load History</button>
+          </div>
+          <div id="historyContent" class="stack"></div>
+          <h2>Run Detail</h2>
+          <div id="historyDetail" class="stack"></div>
         </section>
 
         <section id="jsonTab" class="tab-content">

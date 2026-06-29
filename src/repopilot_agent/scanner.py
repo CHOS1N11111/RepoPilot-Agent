@@ -8,6 +8,7 @@ from .models import RepoFile
 
 DEFAULT_IGNORED_DIRS = {
     ".git",
+    ".repopilot",
     ".hg",
     ".mypy_cache",
     ".pytest_cache",

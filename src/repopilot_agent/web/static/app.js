@@ -26,8 +26,9 @@ $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
 $("generateDelivery").addEventListener("click", generateDelivery);
+$("loadHistory").addEventListener("click", loadHistory);
 $("refreshAll").addEventListener("click", async () => {
-  await Promise.allSettled([loadGithub(), loadDiff(false)]);
+  await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
 });
 
 function selectedModel() {
@@ -144,6 +145,34 @@ async function generateDelivery() {
   }
 }
 
+async function loadHistory() {
+  const repo = encodeURIComponent($("repoPath").value.trim() || ".");
+  $("historyContent").innerHTML = item("Loading history...");
+  try {
+    const data = await getJson(`/api/history?repo=${repo}&limit=20`);
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    renderHistory(data.runs || []);
+  } catch (error) {
+    $("historyContent").innerHTML = item(`History unavailable: ${escapeHtml(error.message)}`);
+  }
+}
+
+async function loadHistoryDetail(runId) {
+  const repo = encodeURIComponent($("repoPath").value.trim() || ".");
+  $("historyDetail").innerHTML = item("Loading run detail...");
+  try {
+    const data = await getJson(`/api/history/run?repo=${repo}&id=${encodeURIComponent(runId)}`);
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    renderHistoryDetail(data);
+  } catch (error) {
+    $("historyDetail").innerHTML = item(`Run detail unavailable: ${escapeHtml(error.message)}`);
+  }
+}
+
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
   $("filesScanned").textContent = report.files_scanned;
@@ -168,6 +197,7 @@ function renderReport(report, payload) {
   $("llmReview").textContent = JSON.stringify(report.patch_review || {}, null, 2);
   $("llmTraceList").innerHTML = renderLlmTraces(report.llm_traces || []);
   $("jsonOutput").textContent = JSON.stringify(report, null, 2);
+  loadHistory().catch(() => {});
 }
 
 function renderProposals(proposal) {
@@ -246,6 +276,60 @@ function renderDelivery(data) {
     <div class="item">
       <div class="item-title">Diff Stat</div>
       <pre>${escapeHtml(state.diff_stat || state.staged_diff_stat || "No diff stat.")}</pre>
+    </div>
+  `;
+}
+
+function renderHistory(runs) {
+  if (!runs.length) {
+    $("historyContent").innerHTML = item("No saved runs yet.");
+    return;
+  }
+  $("historyContent").innerHTML = runs
+    .map((run) => `<div class="item">
+      <div class="item-title">${escapeHtml(run.task)}
+        <span class="tag">${escapeHtml(run.mode)}</span>
+        <span class="tag ${run.applied ? "ok" : "warn"}">${run.applied ? "applied" : "open"}</span>
+      </div>
+      <p><small>${escapeHtml(run.created_at)}</small></p>
+      <p>${escapeHtml(run.summary || "")}</p>
+      <div class="toolbar">
+        <button class="secondary" data-history-id="${escapeHtml(run.id)}">Open</button>
+        <button class="secondary" data-task="${escapeHtml(run.task)}">Use as task</button>
+      </div>
+    </div>`)
+    .join("");
+}
+
+function renderHistoryDetail(run) {
+  const timeline = (run.timeline || [])
+    .map((event) => `<li>${escapeHtml(event.step)}: ${escapeHtml(event.status)} - ${escapeHtml(event.detail)}</li>`)
+    .join("");
+  const validation = (run.validation || [])
+    .map((result) => `<li>${escapeHtml(result.command)}: ${result.allowed ? `exit ${result.exit_code}` : "rejected"}</li>`)
+    .join("");
+  const traceCount = (run.llm_traces || []).length;
+  $("historyDetail").innerHTML = `
+    <div class="item">
+      <div class="item-title">${escapeHtml(run.task)}</div>
+      <p>${escapeHtml(run.summary || "")}</p>
+      <p><small>${escapeHtml(run.created_at)} | ${escapeHtml(run.mode)} | ${escapeHtml(run.id)}</small></p>
+    </div>
+    <div class="item">
+      <div class="item-title">Timeline</div>
+      <ul>${timeline || "<li>No timeline saved.</li>"}</ul>
+    </div>
+    <div class="item">
+      <div class="item-title">Proposal Diff</div>
+      <pre>${escapeHtml(run.proposal?.proposed_diff || "No proposed diff saved.")}</pre>
+    </div>
+    <div class="item">
+      <div class="item-title">LLM Traces</div>
+      <p>${traceCount} trace record(s) saved.</p>
+    </div>
+    <div class="item">
+      <div class="item-title">Validation</div>
+      <ul>${validation || "<li>No validation saved.</li>"}</ul>
     </div>
   `;
 }
@@ -341,11 +425,17 @@ function renderPullRequest(pr) {
 
 document.addEventListener("click", (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLElement) || !target.matches("[data-task]")) {
+  if (!(target instanceof HTMLElement)) {
     return;
   }
-  $("taskInput").value = target.dataset.task || "";
-  setStatus("GitHub issue loaded into task input.");
+  if (target.matches("[data-task]")) {
+    $("taskInput").value = target.dataset.task || "";
+    setStatus("Task loaded into input.");
+    return;
+  }
+  if (target.matches("[data-history-id]")) {
+    loadHistoryDetail(target.dataset.historyId || "");
+  }
 });
 
 function buildLlmInputPreview(report, payload) {
@@ -418,3 +508,4 @@ loadGithub().catch((error) => {
 loadDiff(false).catch((error) => {
   $("diffOutput").textContent = `Diff unavailable: ${error.message}`;
 });
+loadHistory().catch(() => {});

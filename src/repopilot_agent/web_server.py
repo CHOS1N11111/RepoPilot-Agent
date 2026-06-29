@@ -16,6 +16,7 @@ from .git_summary import build_git_workflow_summary
 from .github_tools import inspect_github_repository
 from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
+from .memory import MemoryStore, default_memory_path
 from .patch_apply import apply_file_edits
 from .validator import run_validation
 from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
@@ -48,6 +49,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/github/status":
             self._handle_github_status(parsed.query)
+            return
+        if parsed.path == "/api/history":
+            self._handle_history_list(parsed.query)
+            return
+        if parsed.path == "/api/history/run":
+            self._handle_history_detail(parsed.query)
             return
         self._serve_static(parsed.path)
 
@@ -109,7 +116,20 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send_json(report.to_dict())
+        data = report.to_dict()
+        timeline = build_report_timeline(report)
+        data["timeline"] = [asdict(event) for event in timeline]
+        try:
+            data["run_id"] = self._memory(report.repo_path).create_run(
+                repo_path=report.repo_path,
+                task=task,
+                mode="run",
+                report=report,
+                timeline=[asdict(event) for event in timeline],
+            )
+        except Exception as exc:
+            data["memory_error"] = str(exc)
+        self._send_json(data)
 
     def _handle_apply(self) -> None:
         payload = self._read_json()
@@ -154,6 +174,14 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["proposal_id"] = proposal_id
         data["validation"] = [asdict(item) for item in session.validation]
         data["timeline"] = session.to_public_dict()["timeline"]
+        try:
+            self._memory(session.repo_path).mark_proposal_applied(
+                proposal_id,
+                session.validation,
+                data["timeline"],
+            )
+        except Exception as exc:
+            data["memory_error"] = str(exc)
         self._send_json(data)
 
     def _handle_git_summary(self) -> None:
@@ -225,6 +253,17 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data = report.to_dict()
         data["proposal_id"] = proposal_id
         data["timeline"] = [asdict(event) for event in timeline]
+        try:
+            data["run_id"] = self._memory(report.repo_path).create_run(
+                repo_path=report.repo_path,
+                task=task,
+                mode="propose",
+                report=report,
+                proposal_id=proposal_id,
+                timeline=data["timeline"],
+            )
+        except Exception as exc:
+            data["memory_error"] = str(exc)
         self._send_json(data)
 
     def _handle_git_status(self, query: str) -> None:
@@ -254,6 +293,37 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         snapshot = inspect_github_repository(repo, limit=limit)
         self._send_json(snapshot.to_dict())
 
+    def _handle_history_list(self, query: str) -> None:
+        params = parse_qs(query)
+        repo = _first(params, "repo", ".")
+        try:
+            limit = int(_first(params, "limit", "20"))
+        except ValueError:
+            limit = 20
+        try:
+            runs = self._memory(repo).list_runs(limit=limit)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json({"runs": runs})
+
+    def _handle_history_detail(self, query: str) -> None:
+        params = parse_qs(query)
+        repo = _first(params, "repo", ".")
+        run_id = _first(params, "id", "").strip()
+        if not run_id:
+            self._send_json({"error": "id is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            run = self._memory(repo).get_run(run_id)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if run is None:
+            self._send_json({"error": "Run not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_json(run)
+
     def _serve_static(self, path: str) -> None:
         target = "index.html" if path in {"", "/"} else path.lstrip("/")
         file_path = (STATIC_DIR / target).resolve()
@@ -282,6 +352,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _memory(self, repo: str | Path) -> MemoryStore:
+        return MemoryStore(default_memory_path(repo))
 
 
 def _first(params: dict[str, list[str]], name: str, default: str) -> str:

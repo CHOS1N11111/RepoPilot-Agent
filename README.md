@@ -56,17 +56,17 @@ flowchart LR
 
 ## Capability Map
 
-| Area | What RepoPilot Does |
-| --- | --- |
-| 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths. |
-| 🔎 Retrieval | Scores files by task keywords and returns relevant file previews with match reasons. |
-| 🧭 Planning | Builds deterministic plans or LLM-generated engineering plans. |
-| 🧩 Patch proposal | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits. |
-| 🧠 LLM governance | Centralizes prompts, validates schemas, records traces, and runs patch self-review. |
-| 🖐️ Web approval | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID. |
-| 🧪 Validation | Runs allowlisted commands and reports stdout, stderr, exit code, and rejected commands. |
-| 🌿 Git | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
-| 🔗 GitHub | Reads issues, PRs, reviews, and CI/check status from the repository remote. |
+| Area                   | What RepoPilot Does                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths.           |
+| 🔎 Retrieval           | Scores files by task keywords and returns relevant file previews with match reasons.                  |
+| 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
+| 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
+| 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
+| 🖐️ Web approval      | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID.          |
+| 🧪 Validation          | Runs allowlisted commands and reports stdout, stderr, exit code, and rejected commands.               |
+| 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
+| 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
 ## Architecture
 
@@ -201,6 +201,16 @@ python repopilot.py github status --repo . --limit 10 --json
 
 The GitHub command resolves the repository from the local `origin` remote. Public repositories can be read without a token, but `GITHUB_TOKEN` or `GH_TOKEN` is recommended for private repositories and higher rate limits.
 
+## Local Memory
+
+RepoPilot stores local web workflow history in SQLite under:
+
+```text
+.repopilot/memory.sqlite3
+```
+
+The memory layer records run metadata, tasks, summaries, proposal metadata, proposed diffs, LLM traces, validation results, and timeline events. API keys are not stored. The web UI exposes this through the History tab, where previous runs can be inspected or reused as new tasks.
+
 ## Safety Model
 
 RepoPilot is intentionally approval-first:
@@ -238,4 +248,4 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

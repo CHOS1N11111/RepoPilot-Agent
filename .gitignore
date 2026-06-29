@@ -1,5 +1,6 @@
 # Local work log
 log.md
+.repopilot/
 
 # Environment files
 .env

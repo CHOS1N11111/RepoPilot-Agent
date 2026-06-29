@@ -247,6 +247,42 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_history_api_returns_saved_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "main.py").write_text("def login():\n    return True\n", encoding="utf-8")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps({"repo": str(root), "task": "fix login behavior"}).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/run",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=5) as response:
+                    run_data = json.loads(response.read().decode("utf-8"))
+
+                history_url = f"http://127.0.0.1:{server.server_port}/api/history?repo={root}&limit=5"
+                with urlopen(history_url, timeout=5) as response:
+                    history = json.loads(response.read().decode("utf-8"))
+
+                run_id = run_data["run_id"]
+                detail_url = f"http://127.0.0.1:{server.server_port}/api/history/run?repo={root}&id={run_id}"
+                with urlopen(detail_url, timeout=5) as response:
+                    detail = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(history["runs"][0]["id"], run_id)
+                self.assertEqual(detail["task"], "fix login behavior")
+                self.assertTrue(detail["timeline"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
