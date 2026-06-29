@@ -147,6 +147,8 @@ function renderReport(report, payload) {
   $("validationList").innerHTML = renderValidation(report.validation);
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);
+  $("llmReview").textContent = JSON.stringify(report.patch_review || {}, null, 2);
+  $("llmTraceList").innerHTML = renderLlmTraces(report.llm_traces || []);
   $("jsonOutput").textContent = JSON.stringify(report, null, 2);
 }
 
@@ -181,6 +183,25 @@ function renderValidation(results) {
     .map((result) => `<div class="item">
       <div class="item-title">${escapeHtml(result.command)} <span class="tag ${result.exit_code === 0 ? "ok" : "danger"}">${result.exit_code ?? "rejected"}</span></div>
       <pre>${escapeHtml(result.stdout || result.stderr || "")}</pre>
+    </div>`)
+    .join("");
+}
+
+function renderLlmTraces(traces) {
+  if (!traces || traces.length === 0) {
+    return item("No LLM calls were recorded for this run.");
+  }
+  return traces
+    .map((trace) => `<div class="item">
+      <div class="item-title">${escapeHtml(trace.name)}
+        <span class="tag">${escapeHtml(trace.model)}</span>
+        <span class="tag ${trace.parsed ? "ok" : "danger"}">${trace.parsed ? "parsed" : "failed"}</span>
+      </div>
+      <p>${escapeHtml(trace.error || `Latency: ${trace.latency_ms ?? 0} ms`)}</p>
+      <strong>Prompt</strong>
+      <pre>${escapeHtml(trace.prompt_preview || "")}</pre>
+      <strong>Raw Output</strong>
+      <pre>${escapeHtml(trace.raw_output || "")}</pre>
     </div>`)
     .join("");
 }
@@ -252,6 +273,9 @@ document.addEventListener("click", (event) => {
 });
 
 function buildLlmInputPreview(report, payload) {
+  if (report.llm_traces && report.llm_traces.length) {
+    return report.llm_traces.map((trace) => `# ${trace.name}\n${trace.prompt_preview || ""}`).join("\n\n---\n\n");
+  }
   const context = report.relevant_files
     .slice(0, 5)
     .map((hit) => `Path: ${hit.path}\nScore: ${hit.score}\nReasons: ${hit.reasons.join(", ")}\nPreview:\n${hit.preview}`)
@@ -260,12 +284,16 @@ function buildLlmInputPreview(report, payload) {
 }
 
 function buildLlmOutputPreview(report) {
+  if (report.llm_traces && report.llm_traces.length) {
+    return report.llm_traces.map((trace) => `# ${trace.name}\n${trace.raw_output || ""}`).join("\n\n---\n\n");
+  }
   return JSON.stringify(
     {
       plan_metadata: report.plan_metadata,
       plan: report.plan,
       patch_proposal_metadata: report.patch_proposal_metadata,
       patch_proposal: report.patch_proposal,
+      patch_review: report.patch_review,
     },
     null,
     2

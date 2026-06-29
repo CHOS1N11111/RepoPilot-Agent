@@ -7,15 +7,18 @@ workflow safe while still moving from repository analysis toward implementation.
 from __future__ import annotations
 
 import difflib
-from pathlib import PurePosixPath
 
 from .llm.base import LLMClient, LLMError, LLMMessage
-from .llm.json_utils import parse_json_object
+from .llm.prompts import PATCH_REVIEW_SYSTEM_PROMPT, PATCH_SYSTEM_PROMPT, build_patch_prompt, build_patch_review_prompt
+from .llm.schema import parse_patch_proposal_json, parse_patch_review_json
+from .llm.tracing import record_llm_fallback, traced_llm_json_call
 from .models import (
-    FileEditProposal,
     FileChangeProposal,
+    FileEditProposal,
+    LLMCallTrace,
     PatchProposal,
     PatchProposalMetadata,
+    PatchReview,
     PlanStep,
     RiskNote,
     SearchHit,
@@ -48,15 +51,17 @@ def propose_patch_with_optional_llm(
     llm_client: LLMClient | None = None,
     allow_fallback: bool = True,
     file_contents: dict[str, str] | None = None,
+    traces: list[LLMCallTrace] | None = None,
 ) -> tuple[PatchProposal, PatchProposalMetadata]:
     if llm_client is None:
         return propose_patch(task, hits), PatchProposalMetadata(source="rules")
 
     try:
-        proposal = _propose_llm_patch(task, hits, plan, llm_client, file_contents or {})
+        proposal = _propose_llm_patch(task, hits, plan, llm_client, file_contents or {}, traces)
     except LLMError as exc:
         if not allow_fallback:
             raise
+        record_llm_fallback(traces, "patch_proposal", llm_client.model, str(exc))
         return (
             propose_patch(task, hits),
             PatchProposalMetadata(source="rules", model=llm_client.model, fallback_used=True, error=str(exc)),
@@ -70,173 +75,73 @@ def _propose_llm_patch(
     plan: list[PlanStep],
     llm_client: LLMClient,
     file_contents: dict[str, str],
+    traces: list[LLMCallTrace] | None = None,
 ) -> PatchProposal:
-    response = llm_client.complete(
+    parsed = traced_llm_json_call(
+        "patch_proposal",
+        llm_client,
         [
-            LLMMessage(
-                role="system",
-                content=(
-                    "You are RepoPilot Agent's patch proposal module. "
-                    "Return only JSON with this exact shape: "
-                    '{"objective":"...","files":[{"path":"...","change_type":"bugfix|feature|test|documentation|refinement",'
-                    '"rationale":"...","suggested_actions":["..."],"confidence":"high|medium|low"}],'
-                    '"risks":[{"level":"low|medium|high","message":"...","mitigation":"..."}],'
-                    '"validation_suggestions":["..."],"ready_for_patch":true,'
-                    '"file_edits":[{"path":"...","new_content":"complete file content after edit","rationale":"..."}]}. '
-                    "For file_edits, include complete replacement content for existing context files only. "
-                    "Use an empty file_edits list if you are not confident enough to edit."
-                ),
-            ),
-            LLMMessage(role="user", content=_build_patch_prompt(task, hits, plan, file_contents)),
-        ]
+            LLMMessage(role="system", content=PATCH_SYSTEM_PROMPT),
+            LLMMessage(role="user", content=build_patch_prompt(task, hits, plan, file_contents)),
+        ],
+        parse_patch_proposal_json,
+        traces,
     )
-    data = parse_json_object(response)
-    data["_original_contents"] = file_contents
-    return _parse_patch_proposal(data)
-
-
-def _parse_patch_proposal(data: dict) -> PatchProposal:
-    objective = data.get("objective")
-    if not isinstance(objective, str) or not objective.strip():
-        raise LLMError("Patch proposal JSON must include a non-empty objective.")
-
-    raw_files = data.get("files")
-    if not isinstance(raw_files, list):
-        raise LLMError("Patch proposal JSON must include a files list.")
-    files = [_parse_file_change(item) for item in raw_files]
-
-    raw_risks = data.get("risks", [])
-    if not isinstance(raw_risks, list):
-        raise LLMError("Patch proposal risks must be a list.")
-    risks = [_parse_risk(item) for item in raw_risks]
-
-    raw_validation = data.get("validation_suggestions", [])
-    if not isinstance(raw_validation, list) or not all(isinstance(item, str) for item in raw_validation):
-        raise LLMError("Patch proposal validation_suggestions must be a list of strings.")
-
-    ready_for_patch = data.get("ready_for_patch")
-    if not isinstance(ready_for_patch, bool):
-        raise LLMError("Patch proposal ready_for_patch must be a boolean.")
-
-    raw_file_edits = data.get("file_edits", [])
-    if not isinstance(raw_file_edits, list):
-        raise LLMError("Patch proposal file_edits must be a list.")
-    file_edits = [_parse_file_edit(item, files) for item in raw_file_edits]
-    proposed_diff = _build_proposed_diff(file_edits, data.get("_original_contents", {}))
-
+    proposed_diff = _build_proposed_diff(parsed["file_edits"], file_contents)
     return PatchProposal(
-        objective=objective.strip(),
-        files=files,
-        risks=risks,
-        validation_suggestions=[item.strip() for item in raw_validation if item.strip()],
-        ready_for_patch=ready_for_patch,
-        file_edits=file_edits,
+        objective=parsed["objective"],
+        files=parsed["files"],
+        risks=parsed["risks"],
+        validation_suggestions=parsed["validation_suggestions"],
+        ready_for_patch=parsed["ready_for_patch"],
+        file_edits=parsed["file_edits"],
         proposed_diff=proposed_diff,
-        apply_ready=bool(file_edits),
+        apply_ready=bool(parsed["file_edits"]),
     )
 
 
-def _parse_file_change(item: object) -> FileChangeProposal:
-    if not isinstance(item, dict):
-        raise LLMError("Each patch proposal file entry must be an object.")
-    path = item.get("path")
-    change_type = item.get("change_type")
-    rationale = item.get("rationale")
-    suggested_actions = item.get("suggested_actions")
-    confidence = item.get("confidence")
-
-    if not isinstance(path, str) or not path.strip():
-        raise LLMError("Each file proposal must include a non-empty path.")
-    if change_type not in ALLOWED_CHANGE_TYPES:
-        raise LLMError(f"Invalid change_type for {path}: {change_type}")
-    if not isinstance(rationale, str) or not rationale.strip():
-        raise LLMError(f"File proposal for {path} must include a non-empty rationale.")
-    if not isinstance(suggested_actions, list) or not all(isinstance(action, str) for action in suggested_actions):
-        raise LLMError(f"File proposal for {path} must include suggested_actions as strings.")
-    if confidence not in ALLOWED_CONFIDENCE:
-        raise LLMError(f"Invalid confidence for {path}: {confidence}")
-
-    actions = [action.strip() for action in suggested_actions if action.strip()]
-    if not actions:
-        raise LLMError(f"File proposal for {path} must include at least one suggested action.")
-    return FileChangeProposal(
-        path=path.strip(),
-        change_type=change_type,
-        rationale=rationale.strip(),
-        suggested_actions=actions,
-        confidence=confidence,
-    )
-
-
-def _parse_file_edit(item: object, files: list[FileChangeProposal]) -> FileEditProposal:
-    if not isinstance(item, dict):
-        raise LLMError("Each file edit proposal must be an object.")
-    path = item.get("path")
-    new_content = item.get("new_content")
-    rationale = item.get("rationale")
-    if not isinstance(path, str) or not path.strip():
-        raise LLMError("Each file edit proposal must include a non-empty path.")
-    clean_path = _normalize_proposal_path(path)
-    known_paths = {file.path for file in files}
-    if clean_path not in known_paths:
-        raise LLMError(f"File edit path was not included in proposed files: {clean_path}")
-    if not isinstance(new_content, str):
-        raise LLMError(f"File edit for {clean_path} must include new_content as a string.")
-    if not isinstance(rationale, str) or not rationale.strip():
-        raise LLMError(f"File edit for {clean_path} must include a non-empty rationale.")
-    return FileEditProposal(path=clean_path, new_content=new_content, rationale=rationale.strip())
-
-
-def _parse_risk(item: object) -> RiskNote:
-    if not isinstance(item, dict):
-        raise LLMError("Each risk entry must be an object.")
-    level = item.get("level")
-    message = item.get("message")
-    mitigation = item.get("mitigation")
-    if level not in ALLOWED_RISK_LEVELS:
-        raise LLMError(f"Invalid risk level: {level}")
-    if not isinstance(message, str) or not message.strip():
-        raise LLMError("Each risk must include a non-empty message.")
-    if not isinstance(mitigation, str) or not mitigation.strip():
-        raise LLMError("Each risk must include a non-empty mitigation.")
-    return RiskNote(level=level, message=message.strip(), mitigation=mitigation.strip())
-
-
-def _build_patch_prompt(
+def review_patch_with_optional_llm(
     task: str,
-    hits: list[SearchHit],
-    plan: list[PlanStep],
-    file_contents: dict[str, str] | None = None,
-) -> str:
-    plan_lines = [f"{step.order}. {step.title}: {step.detail}" for step in plan]
-    hit_blocks = []
-    for hit in hits[:6]:
-        hit_blocks.append(
-            "\n".join(
-                [
-                    f"Path: {hit.path}",
-                    f"Score: {hit.score}",
-                    f"Reasons: {', '.join(hit.reasons)}",
-                    f"Preview:\n{hit.preview[:1200]}",
-                    f"Current file content:\n{(file_contents or {}).get(hit.path, '')[:12000]}",
-                ]
-            )
+    proposal: PatchProposal,
+    llm_client: LLMClient | None = None,
+    allow_fallback: bool = True,
+    traces: list[LLMCallTrace] | None = None,
+) -> PatchReview | None:
+    if llm_client is None or not proposal.proposed_diff:
+        return None
+    try:
+        return traced_llm_json_call(
+            "patch_review",
+            llm_client,
+            [
+                LLMMessage(role="system", content=PATCH_REVIEW_SYSTEM_PROMPT),
+                LLMMessage(
+                    role="user",
+                    content=build_patch_review_prompt(
+                        task,
+                        proposal.proposed_diff,
+                        proposal.validation_suggestions,
+                    ),
+                ),
+            ],
+            lambda response: parse_patch_review_json(response, model=llm_client.model),
+            traces,
         )
-    context = "\n\n---\n\n".join(hit_blocks) if hit_blocks else "No relevant files were selected."
-    return "\n".join(
-        [
-            f"Task: {task}",
-            "",
-            "Implementation plan:",
-            "\n".join(plan_lines),
-            "",
-            "Relevant repository context:",
-            context,
-            "",
-            "Propose concrete file-level changes. Only include file_edits for paths shown in the context. "
-            "When editing a file, return its complete post-edit content in new_content.",
-        ]
-    )
+    except LLMError as exc:
+        if not allow_fallback:
+            raise
+        record_llm_fallback(traces, "patch_review", llm_client.model, str(exc))
+        return PatchReview(
+            summary="LLM patch review was unavailable; rely on manual review before applying.",
+            risk_level="medium",
+            concerns=[str(exc)],
+            suggested_tests=proposal.validation_suggestions,
+            approved_for_apply=False,
+            source="rules",
+            model=llm_client.model,
+            fallback_used=True,
+            error=str(exc),
+        )
 
 
 def _build_objective(task: str) -> str:
@@ -353,14 +258,6 @@ def _build_validation_suggestions(task: str, files: list[FileChangeProposal]) ->
     if any(file.change_type == "documentation" for file in files) or "readme" in task.lower():
         suggestions.append("Review rendered documentation for clarity and accuracy.")
     return suggestions
-
-
-def _normalize_proposal_path(path: str) -> str:
-    normalized = PurePosixPath(path.replace("\\", "/"))
-    parts = normalized.parts
-    if normalized.is_absolute() or ".." in parts or any(part in {"", "."} for part in parts):
-        raise LLMError(f"Unsafe file edit path: {path}")
-    return normalized.as_posix()
 
 
 def _build_proposed_diff(file_edits: list[FileEditProposal], original_contents: object) -> str:

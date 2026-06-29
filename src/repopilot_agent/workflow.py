@@ -6,8 +6,8 @@ from pathlib import Path
 
 from .llm.base import LLMClient, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
-from .models import PatchProposalMetadata, PlanMetadata, WorkflowReport
-from .patch_proposer import propose_patch, propose_patch_with_optional_llm
+from .models import LLMCallTrace, PatchProposalMetadata, PlanMetadata, WorkflowReport
+from .patch_proposer import propose_patch, propose_patch_with_optional_llm, review_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
 from .scanner import scan_repository
 from .search import search_files
@@ -28,6 +28,7 @@ def run_workflow(
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
     file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
+    llm_traces: list[LLMCallTrace] = []
     llm_creation_error: LLMError | None = None
     if use_llm:
         if llm_client is None:
@@ -45,6 +46,7 @@ def run_workflow(
                     hits,
                     llm_client=llm_client,
                     allow_fallback=allow_llm_fallback,
+                    traces=llm_traces,
                 )
         else:
             plan, plan_metadata = create_plan_with_optional_llm(
@@ -52,6 +54,7 @@ def run_workflow(
                 hits,
                 llm_client=llm_client,
                 allow_fallback=allow_llm_fallback,
+                traces=llm_traces,
             )
     else:
         plan = create_plan(task, hits)
@@ -74,10 +77,21 @@ def run_workflow(
                 llm_client=llm_client,
                 allow_fallback=allow_llm_fallback,
                 file_contents=file_contents,
+                traces=llm_traces,
             )
     else:
         patch_proposal = propose_patch(task, hits)
         patch_proposal_metadata = PatchProposalMetadata(source="rules")
+
+    patch_review = None
+    if use_llm and llm_client is not None:
+        patch_review = review_patch_with_optional_llm(
+            task,
+            patch_proposal,
+            llm_client=llm_client,
+            allow_fallback=allow_llm_fallback,
+            traces=llm_traces,
+        )
 
     validation = run_validation(root, validation_commands or [])
     summary = _build_summary(
@@ -96,6 +110,8 @@ def run_workflow(
         plan_metadata=plan_metadata,
         patch_proposal=patch_proposal,
         patch_proposal_metadata=patch_proposal_metadata,
+        patch_review=patch_review,
+        llm_traces=llm_traces,
         validation=validation,
         summary=summary,
     )

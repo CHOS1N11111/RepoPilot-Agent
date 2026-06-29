@@ -41,6 +41,18 @@ class PlanMetadata:
 
 
 @dataclass(frozen=True)
+class LLMCallTrace:
+    name: str
+    model: str
+    prompt_preview: str
+    raw_output: str
+    parsed: bool
+    fallback_used: bool = False
+    error: str | None = None
+    latency_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class ValidationResult:
     command: str
     allowed: bool
@@ -86,6 +98,19 @@ class PatchProposal:
 
 @dataclass(frozen=True)
 class PatchProposalMetadata:
+    source: str
+    model: str | None = None
+    fallback_used: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class PatchReview:
+    summary: str
+    risk_level: str
+    concerns: list[str]
+    suggested_tests: list[str]
+    approved_for_apply: bool
     source: str
     model: str | None = None
     fallback_used: bool = False
@@ -224,6 +249,8 @@ class WorkflowReport:
     patch_proposal_metadata: PatchProposalMetadata = field(
         default_factory=lambda: PatchProposalMetadata(source="rules")
     )
+    patch_review: PatchReview | None = None
+    llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     summary: str = ""
 

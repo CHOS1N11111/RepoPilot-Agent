@@ -19,6 +19,9 @@ The current version provides a dependency-light local workflow that can run with
 - Search repository files using task keywords and return ranked relevant files with match reasons and previews.
 - Generate an engineering plan from the task and retrieved context, with optional LLM-backed planning.
 - Propose file-level changes with rationale, suggested actions, confidence, risks, and validation suggestions, with optional LLM-backed proposal generation.
+- Validate LLM outputs through strict schema parsers for planning, patch proposal, and patch review JSON.
+- Record LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
+- Review LLM-generated proposed diffs with an LLM self-review step before user approval.
 - Run validation commands through an allowlist.
 - Inspect local Git workflow state, including branch, upstream, remotes, latest commit, working tree changes, and diff stats.
 - Generate suggested commit messages and pull request drafts from local Git changes.
@@ -41,6 +44,7 @@ This MVP uses deterministic local logic by default and can use an OpenAI-compati
 - **Task Planning**: Convert a user request into a clear engineering plan with actionable steps, either through deterministic rules or an optional LLM planner.
 - **Code Search and Context Retrieval**: Combine semantic search with precise keyword search to locate relevant files and functions.
 - **Patch Proposal**: Propose focused file-level changes, rationale, risk notes, validation suggestions, and LLM-generated editable file content before applying edits.
+- **LLM Governance**: Keep prompt templates in one module, parse model outputs through strict schemas, trace every LLM call, and add an LLM self-review step for proposed diffs.
 - **Human-in-the-Loop Approval**: Require user confirmation before applying file edits, running risky commands, or creating pull requests.
 - **Test and Validation Runner**: Run project-specific tests, linters, or type checks and summarize the results.
 - **Git Workflow Awareness**: Inspect branch state, remotes, latest commit, changed files, diff stats, and ahead/behind information.
@@ -106,7 +110,7 @@ Then open:
 http://127.0.0.1:8765
 ```
 
-The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, agent timeline, standalone patch proposal generation, server-side proposal approval sessions, proposed diff preview, approved patch application, validation reruns after apply, GitHub issue import, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
+The web UI includes LLM model selection, API base URL and API key inputs, task input, workflow output, LLM call traces, LLM patch review output, agent timeline, standalone patch proposal generation, server-side proposal approval sessions, proposed diff preview, approved patch application, validation reruns after apply, GitHub issue import, GitHub issue/PR/review/check display, and working tree or staged diff display. API keys entered in the UI are sent only to the local server for that workflow request and are not written to disk.
 
 Use the LLM planner and patch proposal generator:
 
@@ -197,7 +201,6 @@ This project combines modern AI engineering with real software development workf
 
 ## Future Extensions
 
-- LLM-backed review generation
 - GitHub pull request creation after user approval
 - FastAPI service for workflow execution
 - Rich React or Next.js dashboard for execution traces, diffs, approvals, and results
@@ -209,4 +212,4 @@ This project combines modern AI engineering with real software development workf
 
 ## Current Status
 
-Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, protected patch application, validation runner, Git workflow awareness commands, GitHub workflow awareness command, local web UI, root launcher, and unit tests are implemented.
+Local MVP implementation is in progress. The CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, deterministic and optional LLM patch proposal modules, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch self-review, protected patch application, validation runner, Git workflow awareness commands, GitHub workflow awareness command, local web UI, root launcher, and unit tests are implemented.

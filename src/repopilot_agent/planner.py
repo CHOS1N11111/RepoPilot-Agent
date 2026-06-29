@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from .llm.base import LLMClient, LLMError, LLMMessage
-from .llm.json_utils import parse_json_object
-from .models import PlanMetadata, PlanStep, SearchHit
+from .llm.prompts import PLAN_SYSTEM_PROMPT, build_planner_prompt
+from .llm.schema import parse_plan_steps_json
+from .llm.tracing import record_llm_fallback, traced_llm_json_call
+from .models import LLMCallTrace, PlanMetadata, PlanStep, SearchHit
 
 
 def create_plan(task: str, hits: list[SearchHit]) -> list[PlanStep]:
@@ -75,15 +77,17 @@ def create_plan_with_optional_llm(
     hits: list[SearchHit],
     llm_client: LLMClient | None = None,
     allow_fallback: bool = True,
+    traces: list[LLMCallTrace] | None = None,
 ) -> tuple[list[PlanStep], PlanMetadata]:
     if llm_client is None:
         return create_plan(task, hits), PlanMetadata(source="rules")
 
     try:
-        plan = _create_llm_plan(task, hits, llm_client)
+        plan = _create_llm_plan(task, hits, llm_client, traces)
     except LLMError as exc:
         if not allow_fallback:
             raise
+        record_llm_fallback(traces, "planner", llm_client.model, str(exc))
         return (
             create_plan(task, hits),
             PlanMetadata(source="rules", model=llm_client.model, fallback_used=True, error=str(exc)),
@@ -91,62 +95,19 @@ def create_plan_with_optional_llm(
     return plan, PlanMetadata(source="llm", model=llm_client.model)
 
 
-def _create_llm_plan(task: str, hits: list[SearchHit], llm_client: LLMClient) -> list[PlanStep]:
-    response = llm_client.complete(
+def _create_llm_plan(
+    task: str,
+    hits: list[SearchHit],
+    llm_client: LLMClient,
+    traces: list[LLMCallTrace] | None = None,
+) -> list[PlanStep]:
+    return traced_llm_json_call(
+        "planner",
+        llm_client,
         [
-            LLMMessage(
-                role="system",
-                content=(
-                    "You are RepoPilot Agent's planning module. "
-                    "Return only JSON with this shape: "
-                    '{"steps":[{"title":"short title","detail":"specific engineering action"}]}. '
-                    "Create 4 to 8 practical software engineering steps. "
-                    "Do not include markdown or extra prose."
-                ),
-            ),
-            LLMMessage(role="user", content=_build_planner_prompt(task, hits)),
-        ]
-    )
-    data = parse_json_object(response)
-    raw_steps = data.get("steps")
-    if not isinstance(raw_steps, list) or not raw_steps:
-        raise LLMError("LLM plan JSON must contain a non-empty 'steps' list.")
-
-    steps: list[PlanStep] = []
-    for index, raw_step in enumerate(raw_steps, start=1):
-        if not isinstance(raw_step, dict):
-            raise LLMError("Each LLM plan step must be an object.")
-        title = raw_step.get("title")
-        detail = raw_step.get("detail")
-        if not isinstance(title, str) or not title.strip():
-            raise LLMError("Each LLM plan step must include a non-empty title.")
-        if not isinstance(detail, str) or not detail.strip():
-            raise LLMError("Each LLM plan step must include a non-empty detail.")
-        steps.append(PlanStep(order=index, title=title.strip(), detail=detail.strip()))
-    return steps
-
-
-def _build_planner_prompt(task: str, hits: list[SearchHit]) -> str:
-    context_lines = []
-    for hit in hits[:6]:
-        context_lines.append(
-            "\n".join(
-                [
-                    f"Path: {hit.path}",
-                    f"Score: {hit.score}",
-                    f"Reasons: {', '.join(hit.reasons)}",
-                    f"Preview:\n{hit.preview[:1200]}",
-                ]
-            )
-        )
-    context = "\n\n---\n\n".join(context_lines) if context_lines else "No relevant files were selected."
-    return "\n".join(
-        [
-            f"Task: {task}",
-            "",
-            "Relevant repository context:",
-            context,
-            "",
-            "Generate a concrete implementation plan that a developer can follow.",
-        ]
+            LLMMessage(role="system", content=PLAN_SYSTEM_PROMPT),
+            LLMMessage(role="user", content=build_planner_prompt(task, hits)),
+        ],
+        parse_plan_steps_json,
+        traces,
     )

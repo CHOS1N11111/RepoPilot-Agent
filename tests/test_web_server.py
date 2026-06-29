@@ -106,6 +106,8 @@ class WebServerTests(unittest.TestCase):
                             '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest discover -s tests"],'
                             '"ready_for_patch":true,"file_edits":[{"path":"notes.txt","new_content":"new\\n",'
                             '"rationale":"Approved replacement."}]}',
+                            '{"summary":"The diff is focused.","risk_level":"low","concerns":[],'
+                            '"suggested_tests":["python -m unittest discover -s tests"],"approved_for_apply":true}',
                         ]
                     ),
                 ):
@@ -166,6 +168,8 @@ class WebServerTests(unittest.TestCase):
                             '"rationale":"log.md is the target.","suggested_actions":["Replace content"],'
                             '"confidence":"high"}],"risks":[],"validation_suggestions":[],"ready_for_patch":true,'
                             '"file_edits":[{"path":"log.md","new_content":"hidden\\n","rationale":"Should be blocked."}]}',
+                            '{"summary":"The diff touches a blocked file.","risk_level":"high","concerns":["log.md should not be edited"],'
+                            '"suggested_tests":[],"approved_for_apply":false}',
                         ]
                     ),
                 ):

@@ -34,6 +34,7 @@ class FakeLLMClient:
 
 class LLMPlannerTests(unittest.TestCase):
     def test_create_plan_with_llm_response(self) -> None:
+        traces = []
         client = FakeLLMClient(
             '{"steps":[{"title":"Inspect parser","detail":"Review parser.py and identify failing branch."},'
             '{"title":"Add regression test","detail":"Capture the broken input before changing code."}]}'
@@ -47,12 +48,14 @@ class LLMPlannerTests(unittest.TestCase):
             )
         ]
 
-        plan, metadata = create_plan_with_optional_llm("fix parser failure", hits, client)
+        plan, metadata = create_plan_with_optional_llm("fix parser failure", hits, client, traces=traces)
 
         self.assertEqual(metadata.source, "llm")
         self.assertEqual(metadata.model, "fake-planner")
         self.assertEqual(plan[0].title, "Inspect parser")
         self.assertIn("fix parser failure", client.messages[1].content)
+        self.assertEqual(traces[0].name, "planner")
+        self.assertTrue(traces[0].parsed)
 
     def test_invalid_llm_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")
@@ -106,6 +109,7 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertTrue(proposal.ready_for_patch)
 
     def test_patch_proposal_with_llm_file_edits_includes_diff(self) -> None:
+        traces = []
         client = FakeLLMClient(
             '{"objective":"Fix parser failure safely","files":[{"path":"src/parser.py","change_type":"bugfix",'
             '"rationale":"Parser is the matched implementation point.","suggested_actions":["Guard empty input"],'
@@ -130,6 +134,7 @@ class LLMPlannerTests(unittest.TestCase):
             plan,
             client,
             file_contents={"src/parser.py": "def parse(value):\n    return value\n"},
+            traces=traces,
         )
 
         self.assertEqual(metadata.source, "llm")
@@ -137,6 +142,8 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(proposal.file_edits[0].path, "src/parser.py")
         self.assertIn("--- a/src/parser.py", proposal.proposed_diff)
         self.assertIn("+    return value or \"\"", proposal.proposed_diff)
+        self.assertEqual(traces[0].name, "patch_proposal")
+        self.assertTrue(traces[0].parsed)
 
     def test_invalid_patch_proposal_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")
@@ -177,7 +184,10 @@ class LLMPlannerTests(unittest.TestCase):
                 '{"objective":"Fix parser failure safely","files":[{"path":"main.py","change_type":"bugfix",'
                 '"rationale":"main.py contains the matched behavior.","suggested_actions":["Guard invalid input"],'
                 '"confidence":"medium"}],"risks":[],"validation_suggestions":["python -m unittest discover -s tests"],'
-                '"ready_for_patch":true}',
+                '"ready_for_patch":true,"file_edits":[{"path":"main.py","new_content":"def parse(value):\\n    return value or \\"\\"\\n",'
+                '"rationale":"Guard invalid input."}]}',
+                '{"summary":"The diff is focused.","risk_level":"low","concerns":[],'
+                '"suggested_tests":["python -m unittest discover -s tests"],"approved_for_apply":true}',
             ],
             model="fake-combined",
         )
@@ -189,7 +199,10 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.plan_metadata.source, "llm")
         self.assertEqual(report.patch_proposal_metadata.source, "llm")
         self.assertEqual(report.patch_proposal.files[0].path, "main.py")
-        self.assertEqual(len(client.calls), 2)
+        self.assertIsNotNone(report.patch_review)
+        self.assertTrue(report.patch_review.approved_for_apply)
+        self.assertEqual([trace.name for trace in report.llm_traces], ["planner", "patch_proposal", "patch_review"])
+        self.assertEqual(len(client.calls), 3)
 
 
 if __name__ == "__main__":

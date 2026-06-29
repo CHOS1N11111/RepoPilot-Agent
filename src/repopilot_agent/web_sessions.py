@@ -81,6 +81,10 @@ def build_report_timeline(report: Any, proposal_id: str | None = None) -> list[T
         events.append(TimelineEvent("diff", "done", "Prepared a proposed diff for review."))
     else:
         events.append(TimelineEvent("diff", "skipped", "No proposed diff is available."))
+    review = getattr(report, "patch_review", None)
+    if review:
+        status = "done" if review.approved_for_apply else "warning"
+        events.append(TimelineEvent("review", status, f"Review risk: {review.risk_level}. {review.summary}"))
     if proposal_id:
         events.append(TimelineEvent("approval", "pending", f"Waiting for approval on proposal {proposal_id}."))
     return events
