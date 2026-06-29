@@ -27,6 +27,7 @@ def run_workflow(
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
+    file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
     llm_creation_error: LLMError | None = None
     if use_llm:
         if llm_client is None:
@@ -72,6 +73,7 @@ def run_workflow(
                 plan,
                 llm_client=llm_client,
                 allow_fallback=allow_llm_fallback,
+                file_contents=file_contents,
             )
     else:
         patch_proposal = propose_patch(task, hits)

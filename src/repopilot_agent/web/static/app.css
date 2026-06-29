@@ -122,6 +122,15 @@ button.secondary:hover {
   background: #d6ebf0;
 }
 
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button:disabled:hover {
+  background: #e8f3f6;
+}
+
 .switch-row,
 .button-row,
 .toolbar,
@@ -243,6 +252,11 @@ button.secondary:hover {
 
 .diff-block {
   min-height: 520px;
+}
+
+.diff-block.compact {
+  min-height: 220px;
+  margin-bottom: 20px;
 }
 
 .code-block.compact {

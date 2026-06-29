@@ -6,9 +6,13 @@ workflow safe while still moving from repository analysis toward implementation.
 
 from __future__ import annotations
 
+import difflib
+from pathlib import PurePosixPath
+
 from .llm.base import LLMClient, LLMError, LLMMessage
 from .llm.json_utils import parse_json_object
 from .models import (
+    FileEditProposal,
     FileChangeProposal,
     PatchProposal,
     PatchProposalMetadata,
@@ -43,12 +47,13 @@ def propose_patch_with_optional_llm(
     plan: list[PlanStep],
     llm_client: LLMClient | None = None,
     allow_fallback: bool = True,
+    file_contents: dict[str, str] | None = None,
 ) -> tuple[PatchProposal, PatchProposalMetadata]:
     if llm_client is None:
         return propose_patch(task, hits), PatchProposalMetadata(source="rules")
 
     try:
-        proposal = _propose_llm_patch(task, hits, plan, llm_client)
+        proposal = _propose_llm_patch(task, hits, plan, llm_client, file_contents or {})
     except LLMError as exc:
         if not allow_fallback:
             raise
@@ -64,6 +69,7 @@ def _propose_llm_patch(
     hits: list[SearchHit],
     plan: list[PlanStep],
     llm_client: LLMClient,
+    file_contents: dict[str, str],
 ) -> PatchProposal:
     response = llm_client.complete(
         [
@@ -75,14 +81,17 @@ def _propose_llm_patch(
                     '{"objective":"...","files":[{"path":"...","change_type":"bugfix|feature|test|documentation|refinement",'
                     '"rationale":"...","suggested_actions":["..."],"confidence":"high|medium|low"}],'
                     '"risks":[{"level":"low|medium|high","message":"...","mitigation":"..."}],'
-                    '"validation_suggestions":["..."],"ready_for_patch":true}. '
-                    "Do not generate a diff. Propose file-level implementation intent only."
+                    '"validation_suggestions":["..."],"ready_for_patch":true,'
+                    '"file_edits":[{"path":"...","new_content":"complete file content after edit","rationale":"..."}]}. '
+                    "For file_edits, include complete replacement content for existing context files only. "
+                    "Use an empty file_edits list if you are not confident enough to edit."
                 ),
             ),
-            LLMMessage(role="user", content=_build_patch_prompt(task, hits, plan)),
+            LLMMessage(role="user", content=_build_patch_prompt(task, hits, plan, file_contents)),
         ]
     )
     data = parse_json_object(response)
+    data["_original_contents"] = file_contents
     return _parse_patch_proposal(data)
 
 
@@ -109,12 +118,21 @@ def _parse_patch_proposal(data: dict) -> PatchProposal:
     if not isinstance(ready_for_patch, bool):
         raise LLMError("Patch proposal ready_for_patch must be a boolean.")
 
+    raw_file_edits = data.get("file_edits", [])
+    if not isinstance(raw_file_edits, list):
+        raise LLMError("Patch proposal file_edits must be a list.")
+    file_edits = [_parse_file_edit(item, files) for item in raw_file_edits]
+    proposed_diff = _build_proposed_diff(file_edits, data.get("_original_contents", {}))
+
     return PatchProposal(
         objective=objective.strip(),
         files=files,
         risks=risks,
         validation_suggestions=[item.strip() for item in raw_validation if item.strip()],
         ready_for_patch=ready_for_patch,
+        file_edits=file_edits,
+        proposed_diff=proposed_diff,
+        apply_ready=bool(file_edits),
     )
 
 
@@ -150,6 +168,25 @@ def _parse_file_change(item: object) -> FileChangeProposal:
     )
 
 
+def _parse_file_edit(item: object, files: list[FileChangeProposal]) -> FileEditProposal:
+    if not isinstance(item, dict):
+        raise LLMError("Each file edit proposal must be an object.")
+    path = item.get("path")
+    new_content = item.get("new_content")
+    rationale = item.get("rationale")
+    if not isinstance(path, str) or not path.strip():
+        raise LLMError("Each file edit proposal must include a non-empty path.")
+    clean_path = _normalize_proposal_path(path)
+    known_paths = {file.path for file in files}
+    if clean_path not in known_paths:
+        raise LLMError(f"File edit path was not included in proposed files: {clean_path}")
+    if not isinstance(new_content, str):
+        raise LLMError(f"File edit for {clean_path} must include new_content as a string.")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise LLMError(f"File edit for {clean_path} must include a non-empty rationale.")
+    return FileEditProposal(path=clean_path, new_content=new_content, rationale=rationale.strip())
+
+
 def _parse_risk(item: object) -> RiskNote:
     if not isinstance(item, dict):
         raise LLMError("Each risk entry must be an object.")
@@ -165,7 +202,12 @@ def _parse_risk(item: object) -> RiskNote:
     return RiskNote(level=level, message=message.strip(), mitigation=mitigation.strip())
 
 
-def _build_patch_prompt(task: str, hits: list[SearchHit], plan: list[PlanStep]) -> str:
+def _build_patch_prompt(
+    task: str,
+    hits: list[SearchHit],
+    plan: list[PlanStep],
+    file_contents: dict[str, str] | None = None,
+) -> str:
     plan_lines = [f"{step.order}. {step.title}: {step.detail}" for step in plan]
     hit_blocks = []
     for hit in hits[:6]:
@@ -176,6 +218,7 @@ def _build_patch_prompt(task: str, hits: list[SearchHit], plan: list[PlanStep]) 
                     f"Score: {hit.score}",
                     f"Reasons: {', '.join(hit.reasons)}",
                     f"Preview:\n{hit.preview[:1200]}",
+                    f"Current file content:\n{(file_contents or {}).get(hit.path, '')[:12000]}",
                 ]
             )
         )
@@ -190,7 +233,8 @@ def _build_patch_prompt(task: str, hits: list[SearchHit], plan: list[PlanStep]) 
             "Relevant repository context:",
             context,
             "",
-            "Propose concrete file-level changes. Do not invent file paths that are not in the context unless a new test file is clearly needed.",
+            "Propose concrete file-level changes. Only include file_edits for paths shown in the context. "
+            "When editing a file, return its complete post-edit content in new_content.",
         ]
     )
 
@@ -309,3 +353,31 @@ def _build_validation_suggestions(task: str, files: list[FileChangeProposal]) ->
     if any(file.change_type == "documentation" for file in files) or "readme" in task.lower():
         suggestions.append("Review rendered documentation for clarity and accuracy.")
     return suggestions
+
+
+def _normalize_proposal_path(path: str) -> str:
+    normalized = PurePosixPath(path.replace("\\", "/"))
+    parts = normalized.parts
+    if normalized.is_absolute() or ".." in parts or any(part in {"", "."} for part in parts):
+        raise LLMError(f"Unsafe file edit path: {path}")
+    return normalized.as_posix()
+
+
+def _build_proposed_diff(file_edits: list[FileEditProposal], original_contents: object) -> str:
+    if not file_edits or not isinstance(original_contents, dict):
+        return ""
+    chunks: list[str] = []
+    for edit in file_edits:
+        original = original_contents.get(edit.path)
+        if not isinstance(original, str):
+            continue
+        chunks.extend(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                edit.new_content.splitlines(keepends=True),
+                fromfile=f"a/{edit.path}",
+                tofile=f"b/{edit.path}",
+                lineterm="",
+            )
+        )
+    return "\n".join(chunks)

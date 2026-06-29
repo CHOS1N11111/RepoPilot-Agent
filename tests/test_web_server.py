@@ -76,6 +76,78 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_apply_api_writes_approved_file_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "file_edits": [
+                            {
+                                "path": "notes.txt",
+                                "new_content": "new\n",
+                                "rationale": "Update approved content.",
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(data["applied"])
+                self.assertEqual(data["changed_files"], ["notes.txt"])
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "new\n")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_rejects_blocked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "file_edits": [
+                            {
+                                "path": "log.md",
+                                "new_content": "hidden\n",
+                                "rationale": "Should be blocked.",
+                            }
+                        ],
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(Exception):
+                    urlopen(request, timeout=5)
+                self.assertFalse((root / "log.md").exists())
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

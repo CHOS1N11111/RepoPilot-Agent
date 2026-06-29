@@ -105,6 +105,39 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(proposal.files[0].confidence, "high")
         self.assertTrue(proposal.ready_for_patch)
 
+    def test_patch_proposal_with_llm_file_edits_includes_diff(self) -> None:
+        client = FakeLLMClient(
+            '{"objective":"Fix parser failure safely","files":[{"path":"src/parser.py","change_type":"bugfix",'
+            '"rationale":"Parser is the matched implementation point.","suggested_actions":["Guard empty input"],'
+            '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest discover -s tests"],'
+            '"ready_for_patch":true,"file_edits":[{"path":"src/parser.py",'
+            '"new_content":"def parse(value):\\n    return value or \\"\\"\\n",'
+            '"rationale":"Guard empty input."}]}'
+        )
+        hits = [
+            SearchHit(
+                path="src/parser.py",
+                score=12,
+                reasons=["path matches 'parser'"],
+                preview="def parse(value):",
+            )
+        ]
+        plan, _ = create_plan_with_optional_llm("fix parser failure", hits, None)
+
+        proposal, metadata = propose_patch_with_optional_llm(
+            "fix parser failure",
+            hits,
+            plan,
+            client,
+            file_contents={"src/parser.py": "def parse(value):\n    return value\n"},
+        )
+
+        self.assertEqual(metadata.source, "llm")
+        self.assertTrue(proposal.apply_ready)
+        self.assertEqual(proposal.file_edits[0].path, "src/parser.py")
+        self.assertIn("--- a/src/parser.py", proposal.proposed_diff)
+        self.assertIn("+    return value or \"\"", proposal.proposed_diff)
+
     def test_invalid_patch_proposal_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")
 

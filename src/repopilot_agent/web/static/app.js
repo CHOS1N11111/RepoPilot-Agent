@@ -20,6 +20,7 @@ $("modelSelect").addEventListener("change", () => {
 
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
+$("applyProposal").addEventListener("click", applyProposal);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
@@ -60,6 +61,35 @@ async function generateProposal() {
     state.lastReport = report;
     renderReport(report, payload);
     setStatus("Proposal ready for review.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function applyProposal() {
+  const proposal = state.lastReport?.patch_proposal;
+  const fileEdits = proposal?.file_edits || [];
+  if (!proposal?.apply_ready || fileEdits.length === 0) {
+    setStatus("No apply-ready proposal is available.");
+    return;
+  }
+  const confirmed = window.confirm(`Apply ${fileEdits.length} proposed file edit(s) to the working tree?`);
+  if (!confirmed) {
+    return;
+  }
+
+  setStatus("Applying proposal...");
+  try {
+    const result = await postJson("/api/apply", {
+      repo: $("repoPath").value.trim() || ".",
+      file_edits: fileEdits,
+    });
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    $("diffOutput").textContent = result.diff || "No diff.";
+    setStatus(result.message || "Proposal applied.");
+    await loadDiff(false);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -107,6 +137,8 @@ function renderReport(report, payload) {
     null,
     2
   );
+  $("proposedDiffOutput").textContent = report.patch_proposal?.proposed_diff || "No proposed diff. Use LLM proposal generation for apply-ready edits.";
+  $("applyProposal").disabled = !report.patch_proposal?.apply_ready || !(report.patch_proposal.file_edits || []).length;
   $("validationList").innerHTML = renderValidation(report.validation);
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);

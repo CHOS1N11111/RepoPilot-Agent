@@ -15,6 +15,7 @@ from .git_tools import get_git_diff, inspect_repository
 from .github_tools import inspect_github_repository
 from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
+from .patch_apply import apply_file_edits, parse_file_edits
 from .workflow import run_workflow
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
@@ -54,6 +55,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/propose":
             self._handle_propose()
+            return
+        if parsed.path == "/api/apply":
+            self._handle_apply()
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -100,6 +104,20 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._send_json(report.to_dict())
+
+    def _handle_apply(self) -> None:
+        payload = self._read_json()
+        repo = str(payload.get("repo") or ".")
+        try:
+            edits = parse_file_edits(payload.get("file_edits"))
+            result = apply_file_edits(repo, edits)
+        except (FileNotFoundError, ValueError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json(result.to_dict())
 
     def _handle_propose(self) -> None:
         payload = self._read_json()

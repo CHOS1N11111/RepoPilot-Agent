@@ -66,12 +66,22 @@ class RiskNote:
 
 
 @dataclass(frozen=True)
+class FileEditProposal:
+    path: str
+    new_content: str
+    rationale: str
+
+
+@dataclass(frozen=True)
 class PatchProposal:
     objective: str
     files: list[FileChangeProposal]
     risks: list[RiskNote]
     validation_suggestions: list[str]
     ready_for_patch: bool
+    file_edits: list[FileEditProposal] = field(default_factory=list)
+    proposed_diff: str = ""
+    apply_ready: bool = False
 
 
 @dataclass(frozen=True)
