@@ -18,7 +18,7 @@ from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
 from .patch_apply import apply_file_edits
-from .repo_source import resolve_repository_reference
+from .repo_source import resolve_repository_reference, sync_repository_reference
 from .validator import run_validation
 from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
 from .workflow import run_workflow
@@ -72,6 +72,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/git/summary":
             self._handle_git_summary()
+            return
+        if parsed.path == "/api/repository/sync":
+            self._handle_repository_sync()
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -205,6 +208,23 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data = summary.to_dict()
         data["repository_source"] = repo_source.to_dict()
         self._send_json(data)
+
+    def _handle_repository_sync(self) -> None:
+        payload = self._read_json()
+        try:
+            source = sync_repository_reference(
+                repo=payload.get("repo") or ".",
+                repo_source=str(payload.get("repo_source") or "auto"),
+                github_url=str(payload.get("github_url") or ""),
+                branch=str(payload.get("branch") or ""),
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json({"repository_source": source.to_dict()})
 
     def _handle_propose(self) -> None:
         payload = self._read_json()

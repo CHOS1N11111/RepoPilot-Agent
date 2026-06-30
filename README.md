@@ -133,6 +133,7 @@ http://127.0.0.1:8765
 The web UI supports:
 
 - Repository source selection for local paths, GitHub URLs, or auto detection.
+- Repository sync controls for cached GitHub clones, branch checkout, latest commit display, and local-change protection.
 - 🧠 LLM model, API base URL, and API key inputs.
 - 📌 Task input and GitHub issue import.
 - 🚦 Workflow execution and standalone proposal generation.
@@ -154,6 +155,9 @@ The web UI can analyze either a local repository path or a GitHub repository URL
 - GitHub URL mode accepts inputs such as `https://github.com/owner/repo`, `git@github.com:owner/repo.git`, or `owner/repo`.
 - GitHub repositories are cloned into a local cache under `.repopilot/repos/` before analysis.
 - Existing cached clones are reused on later runs.
+- Use `Sync Repository` to clone missing repositories, fetch remote updates, checkout a branch, and fast-forward pull cached clones.
+- Branch input can select a remote branch during first clone or switch a clean cached clone to another branch.
+- If local changes are present in the cached working tree, RepoPilot fetches metadata but skips checkout and pull.
 - All patch previews, approved file writes, validation commands, Git diffs, and history records operate on the local cached working tree.
 - Set `REPOPILOT_REPO_CACHE` to override the clone cache directory.
 

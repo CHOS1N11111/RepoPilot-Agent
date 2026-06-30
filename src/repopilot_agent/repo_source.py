@@ -23,7 +23,11 @@ class RepositorySource:
     github_url: str | None = None
     owner: str | None = None
     repo: str | None = None
+    branch: str | None = None
+    latest_commit: str | None = None
+    dirty: bool = False
     cached: bool = False
+    synced: bool = False
     message: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -63,6 +67,9 @@ def resolve_repository_reference(
             source="local",
             input=repo_value,
             local_path=str(local_path),
+            branch=_current_branch(local_path) if (local_path / ".git").exists() else None,
+            latest_commit=_latest_commit(local_path) if (local_path / ".git").exists() else None,
+            dirty=_has_local_changes(local_path) if (local_path / ".git").exists() else False,
             cached=True,
             message="Using local repository path.",
         )
@@ -93,7 +100,99 @@ def resolve_repository_reference(
         github_url=parsed.html_url,
         owner=parsed.owner,
         repo=parsed.repo,
+        branch=_current_branch(target),
+        latest_commit=_latest_commit(target),
+        dirty=_has_local_changes(target),
         cached=existed,
+        message=message,
+    )
+
+
+def sync_repository_reference(
+    repo: str | Path | None = None,
+    repo_source: str = "auto",
+    github_url: str | None = None,
+    branch: str | None = None,
+    cache_root: str | Path | None = None,
+) -> RepositorySource:
+    source = (repo_source or "auto").strip().lower()
+    repo_value = str(repo or ".").strip() or "."
+    github_value = str(github_url or "").strip()
+    requested_branch = (branch or "").strip() or None
+
+    if source == "auto":
+        candidate = github_value or repo_value
+        if github_value:
+            source = "github" if parse_github_repository_input(candidate) else "local"
+        elif Path(repo_value).expanduser().exists():
+            source = "local"
+        else:
+            source = "github" if parse_github_repository_input(candidate) else "local"
+
+    if source == "local":
+        path = Path(repo_value).expanduser().resolve()
+        _ensure_cached_repository(path)
+        dirty = _has_local_changes(path)
+        if requested_branch and dirty:
+            message = "Local changes are present; fetch and branch checkout were skipped."
+        elif requested_branch:
+            _checkout_branch(path, requested_branch)
+            message = f"Checked out local branch {requested_branch}."
+        else:
+            message = "Using local repository path."
+        return RepositorySource(
+            source="local",
+            input=repo_value,
+            local_path=str(path),
+            branch=_current_branch(path),
+            latest_commit=_latest_commit(path),
+            dirty=_has_local_changes(path),
+            cached=True,
+            synced=not dirty,
+            message=message,
+        )
+
+    if source != "github":
+        raise ValueError(f"Unsupported repository source: {repo_source}")
+
+    github_input = github_value or repo_value
+    parsed = parse_github_repository_input(github_input)
+    if parsed is None:
+        raise ValueError("GitHub repository source must be a github.com URL, SSH remote, or owner/repo slug.")
+
+    target = github_cache_path(parsed.owner, parsed.repo, cache_root)
+    existed = target.exists()
+    if not existed:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _clone_repository(parsed.clone_url, target, requested_branch)
+        message = f"Cloned {parsed.html_url} into the local RepoPilot cache."
+        synced = True
+    else:
+        _ensure_cached_repository(target)
+        _run_git_command(["-C", str(target), "fetch", "origin", "--prune"])
+        dirty = _has_local_changes(target)
+        if dirty:
+            message = "Fetched remote updates, but local changes are present; checkout and pull were skipped."
+            synced = False
+        else:
+            if requested_branch:
+                _checkout_branch(target, requested_branch, remote="origin")
+            _run_git_command(["-C", str(target), "pull", "--ff-only"])
+            message = f"Synced cached clone for {parsed.html_url}."
+            synced = True
+
+    return RepositorySource(
+        source="github",
+        input=github_input,
+        local_path=str(target.resolve()),
+        github_url=parsed.html_url,
+        owner=parsed.owner,
+        repo=parsed.repo,
+        branch=_current_branch(target),
+        latest_commit=_latest_commit(target),
+        dirty=_has_local_changes(target),
+        cached=existed,
+        synced=synced,
         message=message,
     )
 
@@ -171,9 +270,50 @@ def _ensure_cached_repository(path: Path) -> None:
         raise RuntimeError(f"Cached repository path is not a Git repository: {path}")
 
 
+def _clone_repository(clone_url: str, target: Path, branch: str | None = None) -> None:
+    args = ["clone", "--depth", "1"]
+    if branch:
+        args.extend(["--branch", branch])
+    args.extend([clone_url, str(target)])
+    _run_git_command(args)
+
+
+def _checkout_branch(path: Path, branch: str, remote: str | None = None) -> None:
+    if _run_raw_git(["-C", str(path), "rev-parse", "--verify", branch]).returncode == 0:
+        _run_git_command(["-C", str(path), "checkout", branch])
+        return
+    if remote:
+        _run_git_command(["-C", str(path), "checkout", "--track", f"{remote}/{branch}"])
+        return
+    raise RuntimeError(f"Branch does not exist locally: {branch}")
+
+
+def _current_branch(path: Path) -> str | None:
+    result = _run_raw_git(["-C", str(path), "branch", "--show-current"])
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _latest_commit(path: Path) -> str | None:
+    result = _run_raw_git(["-C", str(path), "log", "-1", "--pretty=format:%h %s"])
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _has_local_changes(path: Path) -> bool:
+    result = _run_raw_git(["-C", str(path), "status", "--porcelain"])
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 def _run_git_command(args: list[str]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(["git", *args], text=True, capture_output=True)
+    result = _run_raw_git(args)
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or f"Git command failed: {' '.join(args)}"
         raise RuntimeError(message)
     return result
+
+
+def _run_raw_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], text=True, capture_output=True)

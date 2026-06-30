@@ -133,6 +133,55 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_repository_sync_api_returns_branch_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                source = RepositorySource(
+                    source="github",
+                    input="https://github.com/example/project",
+                    local_path=str(root),
+                    github_url="https://github.com/example/project",
+                    owner="example",
+                    repo="project",
+                    branch="feature",
+                    latest_commit="abc123 Sync",
+                    dirty=False,
+                    cached=True,
+                    synced=True,
+                    message="Synced cached clone for https://github.com/example/project.",
+                )
+                with patch("repopilot_agent.web_server.sync_repository_reference", return_value=source) as sync_mock:
+                    payload = json.dumps(
+                        {
+                            "repo_source": "github",
+                            "github_url": "https://github.com/example/project",
+                            "branch": "feature",
+                        }
+                    ).encode("utf-8")
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/repository/sync",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                sync_mock.assert_called_once()
+                self.assertEqual(sync_mock.call_args.kwargs["branch"], "feature")
+                self.assertEqual(data["repository_source"]["branch"], "feature")
+                self.assertTrue(data["repository_source"]["synced"])
+                self.assertEqual(data["repository_source"]["latest_commit"], "abc123 Sync")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
     def test_apply_api_writes_session_file_edits_and_runs_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

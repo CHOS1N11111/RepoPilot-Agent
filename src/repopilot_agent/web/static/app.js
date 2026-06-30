@@ -23,6 +23,7 @@ $("repoSource").addEventListener("change", updateRepositorySourceUi);
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
 $("applyProposal").addEventListener("click", applyProposal);
+$("syncRepository").addEventListener("click", syncRepository);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
@@ -107,6 +108,7 @@ function buildWorkflowPayload() {
     repo: $("repoPath").value.trim() || ".",
     repo_source: $("repoSource").value,
     github_url: $("githubUrl").value.trim(),
+    branch: $("repoBranch").value.trim(),
     task: $("taskInput").value.trim(),
     validation: validation ? [validation] : [],
     use_llm: $("useLlm").checked,
@@ -115,6 +117,21 @@ function buildWorkflowPayload() {
     api_key: $("apiKey").value,
     no_llm_fallback: $("disableFallback").checked,
   };
+}
+
+async function syncRepository() {
+  setStatus("Syncing repository...");
+  try {
+    const data = await postJson("/api/repository/sync", buildRepositoryPayload());
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    updateRepositorySourceStatus(data.repository_source);
+    setStatus(data.repository_source?.message || "Repository synced.");
+    await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
 }
 
 async function loadGithub() {
@@ -134,9 +151,7 @@ async function generateDelivery() {
   setStatus("Generating delivery draft...");
   try {
     const data = await postJson("/api/git/summary", {
-      repo: $("repoPath").value.trim() || ".",
-      repo_source: $("repoSource").value,
-      github_url: $("githubUrl").value.trim(),
+      ...buildRepositoryPayload(),
       validation_notes: buildValidationNotes(),
     });
     if (data.error) {
@@ -452,7 +467,7 @@ function buildLlmInputPreview(report, payload) {
     .slice(0, 5)
     .map((hit) => `Path: ${hit.path}\nScore: ${hit.score}\nReasons: ${hit.reasons.join(", ")}\nPreview:\n${hit.preview}`)
     .join("\n\n---\n\n");
-  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nUse LLM: ${payload.use_llm}\nModel: ${payload.model || "(default)"}\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
+  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nModel: ${payload.model || "(default)"}\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
 }
 
 function buildLlmOutputPreview(report) {
@@ -500,7 +515,20 @@ function repositoryQuery() {
   if (githubUrl) {
     params.set("github_url", githubUrl);
   }
+  const branch = $("repoBranch").value.trim();
+  if (branch) {
+    params.set("branch", branch);
+  }
   return params.toString();
+}
+
+function buildRepositoryPayload() {
+  return {
+    repo: $("repoPath").value.trim() || ".",
+    repo_source: $("repoSource").value,
+    github_url: $("githubUrl").value.trim(),
+    branch: $("repoBranch").value.trim(),
+  };
 }
 
 function updateRepositorySourceUi() {
@@ -521,7 +549,18 @@ function updateRepositorySourceStatus(source) {
     return;
   }
   const label = source.source === "github" ? `GitHub ${source.owner}/${source.repo}` : "Local path";
-  $("repoSourceLine").textContent = `${label}: ${source.local_path}. ${source.message || ""}`.trim();
+  const details = [
+    `${label}: ${source.local_path}.`,
+    source.branch ? `Branch: ${source.branch}.` : "",
+    source.latest_commit ? `Commit: ${source.latest_commit}.` : "",
+    source.dirty ? "Local changes present." : "",
+    source.synced ? "Synced." : "",
+    source.message || "",
+  ].filter(Boolean);
+  $("repoSourceLine").textContent = details.join(" ").trim();
+  if (source.branch && !$("repoBranch").value.trim()) {
+    $("repoBranch").value = source.branch;
+  }
   if (source.local_path) {
     $("repoPath").value = source.source === "github" ? $("repoPath").value : source.local_path;
   }
