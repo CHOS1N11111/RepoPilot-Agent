@@ -273,6 +273,10 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
 
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+
 ## Status
 
 RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
