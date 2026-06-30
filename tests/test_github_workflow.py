@@ -25,6 +25,7 @@ class FakeGitHubClient:
                     "labels": [{"name": "enhancement"}],
                     "updated_at": "2026-06-28T10:00:00Z",
                     "html_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/issues/7",
+                    "body": "Planner should return richer context.",
                 },
                 {
                     "number": 8,
@@ -48,6 +49,51 @@ class FakeGitHubClient:
                     "base": {"ref": "master"},
                     "updated_at": "2026-06-28T12:00:00Z",
                     "html_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/pull/3",
+                    "body": "Adds GitHub status awareness.",
+                }
+            ]
+        if path.endswith("/issues/7/comments"):
+            return [
+                {
+                    "user": {"login": "maintainer"},
+                    "created_at": "2026-06-28T10:10:00Z",
+                    "updated_at": "2026-06-28T10:15:00Z",
+                    "body": "Please include issue comments in context.",
+                    "html_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/issues/7#issuecomment-1",
+                }
+            ]
+        if path.endswith("/issues/3/comments"):
+            return [
+                {
+                    "user": {"login": "alice"},
+                    "created_at": "2026-06-28T12:10:00Z",
+                    "updated_at": "2026-06-28T12:10:00Z",
+                    "body": "Ready for review.",
+                    "html_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/pull/3#issuecomment-2",
+                }
+            ]
+        if path.endswith("/pulls/3/files"):
+            return [
+                {
+                    "filename": "src/repopilot_agent/github_tools.py",
+                    "status": "modified",
+                    "additions": 20,
+                    "deletions": 2,
+                    "changes": 22,
+                    "patch": "@@ -1 +1 @@\n+ richer github context",
+                    "raw_url": "https://raw.githubusercontent.com/example/file",
+                    "blob_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/blob/abc/src/repopilot_agent/github_tools.py",
+                }
+            ]
+        if path.endswith("/pulls/3/comments"):
+            return [
+                {
+                    "user": {"login": "reviewer"},
+                    "path": "src/repopilot_agent/github_tools.py",
+                    "line": 42,
+                    "side": "RIGHT",
+                    "body": "Please add tests for comments.",
+                    "html_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/pull/3#discussion_r1",
                 }
             ]
         if path.endswith("/pulls/3/reviews"):
@@ -68,6 +114,9 @@ class FakeGitHubClient:
                         "status": "completed",
                         "conclusion": "success",
                         "html_url": "https://github.com/CHOS1N11111/RepoPilot-Agent/actions/runs/1",
+                        "started_at": "2026-06-28T12:00:00Z",
+                        "completed_at": "2026-06-28T12:05:00Z",
+                        "output": {"title": "Tests passed", "summary": "All unit tests passed."},
                     }
                 ]
             }
@@ -77,6 +126,7 @@ class FakeGitHubClient:
                     {
                         "context": "legacy-ci",
                         "state": "success",
+                        "description": "Legacy CI passed.",
                         "target_url": "https://ci.example.test/build/1",
                     }
                 ]
@@ -114,9 +164,16 @@ class GitHubWorkflowTests(unittest.TestCase):
             self.assertEqual(repository.owner, "CHOS1N11111")
             self.assertEqual(len(snapshot.issues), 1)
             self.assertEqual(snapshot.issues[0].number, 7)
+            self.assertIn("Planner", snapshot.issues[0].body_preview)
+            self.assertEqual(snapshot.issues[0].comments[0].author, "maintainer")
             self.assertEqual(len(snapshot.pull_requests), 1)
+            self.assertIn("GitHub status", snapshot.pull_requests[0].body_preview)
+            self.assertEqual(snapshot.pull_requests[0].comments[0].body_preview, "Ready for review.")
+            self.assertEqual(snapshot.pull_requests[0].files[0].filename, "src/repopilot_agent/github_tools.py")
+            self.assertEqual(snapshot.pull_requests[0].review_comments[0].line, 42)
             self.assertEqual(snapshot.pull_requests[0].reviews[0].state, "APPROVED")
             self.assertEqual(snapshot.pull_requests[0].checks[0].name, "tests")
+            self.assertIn("unit tests", snapshot.pull_requests[0].checks[0].output_summary_preview)
             self.assertEqual(snapshot.pull_requests[0].checks[1].name, "legacy-ci")
 
 

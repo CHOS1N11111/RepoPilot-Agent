@@ -418,9 +418,14 @@ function renderTimeline(events) {
 
 function renderIssue(issue) {
   const taskText = buildIssueTask(issue);
+  const comments = issue.comments && issue.comments.length
+    ? `<strong>Comments</strong><ul>${issue.comments.map((comment) => `<li>${escapeHtml(comment.author)}: ${escapeHtml(comment.body_preview || "")}</li>`).join("")}</ul>`
+    : "";
   return `<div class="item">
     <div class="item-title">#${issue.number} ${escapeHtml(issue.title)}</div>
     <p><small>${escapeHtml(issue.author)} updated ${escapeHtml(issue.updated_at)}</small></p>
+    ${issue.body_preview ? `<p>${escapeHtml(issue.body_preview)}</p>` : ""}
+    ${comments}
     <div class="issue-actions">
       <button class="secondary" data-task="${escapeHtml(taskText)}">Use as task</button>
     </div>
@@ -429,19 +434,53 @@ function renderIssue(issue) {
 
 function buildIssueTask(issue) {
   const labels = issue.labels && issue.labels.length ? `\nLabels: ${issue.labels.join(", ")}` : "";
-  return `GitHub issue #${issue.number}: ${issue.title}${labels}\nURL: ${issue.html_url}`;
+  const body = issue.body_preview ? `\n\nBody:\n${issue.body_preview}` : "";
+  const comments = issue.comments && issue.comments.length
+    ? `\n\nRecent comments:\n${issue.comments.map((comment) => `- ${comment.author}: ${comment.body_preview}`).join("\n")}`
+    : "";
+  return `GitHub issue #${issue.number}: ${issue.title}${labels}\nURL: ${issue.html_url}${body}${comments}`;
 }
 
 function renderPullRequest(pr) {
   const reviews = pr.reviews.length ? pr.reviews.map((review) => `<li>${escapeHtml(review.state)} by ${escapeHtml(review.reviewer)}</li>`).join("") : "<li>No reviews returned</li>";
   const checks = pr.checks.length ? pr.checks.map((check) => `<li>${escapeHtml(check.name)}: ${escapeHtml(check.status)}${check.conclusion ? `/${escapeHtml(check.conclusion)}` : ""}</li>`).join("") : "<li>No checks returned</li>";
+  const files = pr.files && pr.files.length
+    ? pr.files.map((file) => `<li>${escapeHtml(file.filename)} <span class="tag">${escapeHtml(file.status)}</span> +${escapeHtml(file.additions)} / -${escapeHtml(file.deletions)}</li>`).join("")
+    : "<li>No files returned</li>";
+  const comments = pr.comments && pr.comments.length
+    ? pr.comments.map((comment) => `<li>${escapeHtml(comment.author)}: ${escapeHtml(comment.body_preview || "")}</li>`).join("")
+    : "<li>No conversation comments returned</li>";
+  const reviewComments = pr.review_comments && pr.review_comments.length
+    ? pr.review_comments.map((comment) => `<li>${escapeHtml(comment.path)}${comment.line ? `:${escapeHtml(comment.line)}` : ""} by ${escapeHtml(comment.reviewer)}: ${escapeHtml(comment.body_preview || "")}</li>`).join("")
+    : "<li>No review comments returned</li>";
+  const taskText = buildPullRequestTask(pr);
   return `<div class="item">
     <div class="item-title">#${pr.number} ${escapeHtml(pr.title)}</div>
     <p>${escapeHtml(pr.source_branch)} -> ${escapeHtml(pr.target_branch)}</p>
     <p><small>${escapeHtml(pr.author)} updated ${escapeHtml(pr.updated_at)}</small></p>
+    ${pr.body_preview ? `<p>${escapeHtml(pr.body_preview)}</p>` : ""}
+    <strong>Files</strong><ul>${files}</ul>
+    <strong>Conversation</strong><ul>${comments}</ul>
+    <strong>Review Comments</strong><ul>${reviewComments}</ul>
     <strong>Reviews</strong><ul>${reviews}</ul>
     <strong>Checks</strong><ul>${checks}</ul>
+    <div class="issue-actions">
+      <button class="secondary" data-task="${escapeHtml(taskText)}">Use as task</button>
+    </div>
   </div>`;
+}
+
+function buildPullRequestTask(pr) {
+  const files = pr.files && pr.files.length
+    ? `\n\nChanged files:\n${pr.files.map((file) => `- ${file.filename}: ${file.status}, +${file.additions}/-${file.deletions}`).join("\n")}`
+    : "";
+  const reviewComments = pr.review_comments && pr.review_comments.length
+    ? `\n\nReview comments:\n${pr.review_comments.map((comment) => `- ${comment.path}${comment.line ? `:${comment.line}` : ""} by ${comment.reviewer}: ${comment.body_preview}`).join("\n")}`
+    : "";
+  const checks = pr.checks && pr.checks.length
+    ? `\n\nChecks:\n${pr.checks.map((check) => `- ${check.name}: ${check.status}${check.conclusion ? `/${check.conclusion}` : ""}${check.output_summary_preview ? ` - ${check.output_summary_preview}` : ""}`).join("\n")}`
+    : "";
+  return `GitHub PR #${pr.number}: ${pr.title}\nURL: ${pr.html_url}\nBranch: ${pr.source_branch} -> ${pr.target_branch}\nAuthor: ${pr.author}\n\nBody:\n${pr.body_preview || "(none)"}${files}${reviewComments}${checks}`;
 }
 
 document.addEventListener("click", (event) => {

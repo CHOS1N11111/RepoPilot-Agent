@@ -278,6 +278,12 @@ def _print_github_status(snapshot) -> None:
             print(f"- #{issue.number} {issue.title}{labels}")
             print(f"  Author: {issue.author}; Updated: {issue.updated_at}")
             print(f"  {issue.html_url}")
+            if issue.body_preview:
+                print(f"  Body: {issue.body_preview}")
+            if issue.comments:
+                print("  Comments")
+                for comment in issue.comments:
+                    print(f"  - {comment.author}: {comment.body_preview}")
     else:
         print("- No open issues returned.")
     print()
@@ -291,10 +297,30 @@ def _print_github_status(snapshot) -> None:
                 f"Author: {pull_request.author}; Updated: {pull_request.updated_at}"
             )
             print(f"  {pull_request.html_url}")
+            if pull_request.body_preview:
+                print(f"  Body: {pull_request.body_preview}")
+            if pull_request.files:
+                print("  Files")
+                for file in pull_request.files:
+                    print(
+                        f"  - {file.filename}: {file.status}, "
+                        f"+{file.additions}/-{file.deletions} ({file.changes} changes)"
+                    )
+            if pull_request.comments:
+                print("  Conversation")
+                for comment in pull_request.comments:
+                    print(f"  - {comment.author}: {comment.body_preview}")
+            if pull_request.review_comments:
+                print("  Review comments")
+                for comment in pull_request.review_comments:
+                    line = f":{comment.line}" if comment.line else ""
+                    print(f"  - {comment.path}{line} by {comment.reviewer}: {comment.body_preview}")
             if pull_request.reviews:
                 print("  Reviews")
                 for review in pull_request.reviews:
                     print(f"  - {review.state} by {review.reviewer} at {review.submitted_at or 'unknown time'}")
+                    if review.body_preview:
+                        print(f"    {review.body_preview}")
             else:
                 print("  Reviews: none returned")
             if pull_request.checks:
@@ -302,6 +328,8 @@ def _print_github_status(snapshot) -> None:
                 for check in pull_request.checks:
                     conclusion = f"/{check.conclusion}" if check.conclusion else ""
                     print(f"  - {check.name}: {check.status}{conclusion}")
+                    if check.output_summary_preview:
+                        print(f"    {check.output_summary_preview}")
             else:
                 print("  Checks: none returned")
     else:

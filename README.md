@@ -220,6 +220,14 @@ python repopilot.py github status --repo . --limit 10 --json
 
 The GitHub command resolves the repository from the local `origin` remote. Public repositories can be read without a token, but `GITHUB_TOKEN` or `GH_TOKEN` is recommended for private repositories and higher rate limits.
 
+RepoPilot reads bounded GitHub context for agent use:
+
+- Open issue title, labels, body preview, URL, and recent comments.
+- Open PR title, body preview, source/target branches, changed files, file stats, and patch previews.
+- PR conversation comments and inline review comments.
+- PR review states, review body previews, and reviewer metadata.
+- Check runs, legacy statuses, conclusion, timing, and output summary previews.
+
 ## Local Memory
 
 RepoPilot stores local web workflow history in SQLite under:

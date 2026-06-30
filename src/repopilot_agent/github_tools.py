@@ -14,16 +14,22 @@ from typing import Any
 from .git_tools import inspect_repository
 from .models import (
     GitHubCheck,
+    GitHubComment,
     GitHubIssue,
     GitHubPullRequest,
+    GitHubPullRequestFile,
     GitHubRepositoryRef,
     GitHubReview,
+    GitHubReviewComment,
     GitHubSnapshot,
 )
 
 GITHUB_API_BASE = "https://api.github.com"
 HTTPS_REMOTE_PATTERN = re.compile(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
 SSH_REMOTE_PATTERN = re.compile(r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$")
+PREVIEW_LIMIT = 800
+COMMENT_LIMIT = 5
+FILE_LIMIT = 12
 
 
 class GitHubClient:
@@ -133,6 +139,8 @@ def _fetch_issues(client: GitHubClient, repository: GitHubRepositoryRef, limit: 
                 labels=[label.get("name", "") for label in item.get("labels", []) if label.get("name")],
                 updated_at=item.get("updated_at", ""),
                 html_url=item.get("html_url", ""),
+                body_preview=_preview(item.get("body") or ""),
+                comments=_fetch_issue_comments(client, repository, item["number"]),
             )
         )
     return issues
@@ -162,11 +170,89 @@ def _fetch_pull_requests(
                 head_sha=head_sha,
                 updated_at=item.get("updated_at", ""),
                 html_url=item.get("html_url", ""),
+                body_preview=_preview(item.get("body") or ""),
+                comments=_fetch_issue_comments(client, repository, number),
+                files=_fetch_pull_request_files(client, repository, number),
+                review_comments=_fetch_review_comments(client, repository, number),
                 reviews=_fetch_reviews(client, repository, number),
                 checks=_fetch_checks(client, repository, head_sha),
             )
         )
     return pull_requests
+
+
+def _fetch_issue_comments(
+    client: GitHubClient,
+    repository: GitHubRepositoryRef,
+    number: int,
+) -> list[GitHubComment]:
+    raw_comments = client.get_json(
+        f"/repos/{repository.owner}/{repository.repo}/issues/{number}/comments",
+        {"per_page": COMMENT_LIMIT},
+    )
+    comments: list[GitHubComment] = []
+    for item in raw_comments[-COMMENT_LIMIT:]:
+        body = item.get("body") or ""
+        comments.append(
+            GitHubComment(
+                author=item.get("user", {}).get("login", "unknown"),
+                created_at=item.get("created_at", ""),
+                updated_at=item.get("updated_at", ""),
+                body_preview=_preview(body),
+                html_url=item.get("html_url", ""),
+            )
+        )
+    return comments
+
+
+def _fetch_pull_request_files(
+    client: GitHubClient,
+    repository: GitHubRepositoryRef,
+    pull_number: int,
+) -> list[GitHubPullRequestFile]:
+    raw_files = client.get_json(
+        f"/repos/{repository.owner}/{repository.repo}/pulls/{pull_number}/files",
+        {"per_page": FILE_LIMIT},
+    )
+    files: list[GitHubPullRequestFile] = []
+    for item in raw_files[:FILE_LIMIT]:
+        files.append(
+            GitHubPullRequestFile(
+                filename=item.get("filename", ""),
+                status=item.get("status", "unknown"),
+                additions=int(item.get("additions") or 0),
+                deletions=int(item.get("deletions") or 0),
+                changes=int(item.get("changes") or 0),
+                patch_preview=_preview(item.get("patch") or ""),
+                raw_url=item.get("raw_url"),
+                blob_url=item.get("blob_url"),
+            )
+        )
+    return files
+
+
+def _fetch_review_comments(
+    client: GitHubClient,
+    repository: GitHubRepositoryRef,
+    pull_number: int,
+) -> list[GitHubReviewComment]:
+    raw_comments = client.get_json(
+        f"/repos/{repository.owner}/{repository.repo}/pulls/{pull_number}/comments",
+        {"per_page": COMMENT_LIMIT},
+    )
+    comments: list[GitHubReviewComment] = []
+    for item in raw_comments[-COMMENT_LIMIT:]:
+        comments.append(
+            GitHubReviewComment(
+                reviewer=item.get("user", {}).get("login", "unknown"),
+                path=item.get("path", ""),
+                line=item.get("line"),
+                side=item.get("side"),
+                body_preview=_preview(item.get("body") or ""),
+                html_url=item.get("html_url", ""),
+            )
+        )
+    return comments
 
 
 def _fetch_reviews(
@@ -176,6 +262,7 @@ def _fetch_reviews(
 ) -> list[GitHubReview]:
     raw_reviews = client.get_json(f"/repos/{repository.owner}/{repository.repo}/pulls/{pull_number}/reviews")
     reviews: list[GitHubReview] = []
+    review_comments = _fetch_review_comments(client, repository, pull_number)
     for item in raw_reviews[-5:]:
         body = item.get("body") or ""
         reviews.append(
@@ -183,8 +270,13 @@ def _fetch_reviews(
                 reviewer=item.get("user", {}).get("login", "unknown"),
                 state=item.get("state", "UNKNOWN"),
                 submitted_at=item.get("submitted_at"),
-                body_preview=body[:160],
+                body_preview=_preview(body),
                 html_url=item.get("html_url", ""),
+                comments=[
+                    comment
+                    for comment in review_comments
+                    if not item.get("html_url") or comment.html_url.startswith(item.get("html_url", ""))
+                ][:COMMENT_LIMIT],
             )
         )
     return reviews
@@ -203,6 +295,10 @@ def _fetch_checks(client: GitHubClient, repository: GitHubRepositoryRef, head_sh
                 status=item.get("status", "unknown"),
                 conclusion=item.get("conclusion"),
                 html_url=item.get("html_url"),
+                started_at=item.get("started_at"),
+                completed_at=item.get("completed_at"),
+                output_title=item.get("output", {}).get("title"),
+                output_summary_preview=_preview(item.get("output", {}).get("summary") or ""),
             )
         )
 
@@ -214,6 +310,14 @@ def _fetch_checks(client: GitHubClient, repository: GitHubRepositoryRef, head_sh
                 status=item.get("state", "unknown"),
                 conclusion=item.get("state"),
                 html_url=item.get("target_url"),
+                output_summary_preview=_preview(item.get("description") or ""),
             )
         )
     return checks
+
+
+def _preview(value: str, limit: int = PREVIEW_LIMIT) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()}..."

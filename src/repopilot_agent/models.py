@@ -192,6 +192,17 @@ class GitHubIssue:
     labels: list[str]
     updated_at: str
     html_url: str
+    body_preview: str = ""
+    comments: list["GitHubComment"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GitHubComment:
+    author: str
+    created_at: str
+    updated_at: str
+    body_preview: str
+    html_url: str
 
 
 @dataclass(frozen=True)
@@ -201,6 +212,29 @@ class GitHubReview:
     submitted_at: str | None
     body_preview: str
     html_url: str
+    comments: list["GitHubReviewComment"] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GitHubReviewComment:
+    reviewer: str
+    path: str
+    line: int | None
+    side: str | None
+    body_preview: str
+    html_url: str
+
+
+@dataclass(frozen=True)
+class GitHubPullRequestFile:
+    filename: str
+    status: str
+    additions: int
+    deletions: int
+    changes: int
+    patch_preview: str
+    raw_url: str | None
+    blob_url: str | None
 
 
 @dataclass(frozen=True)
@@ -209,6 +243,10 @@ class GitHubCheck:
     status: str
     conclusion: str | None
     html_url: str | None
+    started_at: str | None = None
+    completed_at: str | None = None
+    output_title: str | None = None
+    output_summary_preview: str = ""
 
 
 @dataclass(frozen=True)
@@ -224,6 +262,10 @@ class GitHubPullRequest:
     html_url: str
     reviews: list[GitHubReview]
     checks: list[GitHubCheck]
+    body_preview: str = ""
+    comments: list[GitHubComment] = field(default_factory=list)
+    files: list[GitHubPullRequestFile] = field(default_factory=list)
+    review_comments: list[GitHubReviewComment] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
