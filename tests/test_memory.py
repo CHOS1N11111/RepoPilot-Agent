@@ -31,6 +31,7 @@ class MemoryStoreTests(unittest.TestCase):
                         raw_output='{"steps":[]}',
                         parsed=True,
                         latency_ms=12,
+                        context_summary="Budget: 9000 chars. Included parser.py.",
                     )
                 ],
             )
@@ -49,6 +50,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(runs[0]["id"], run_id)
             self.assertEqual(runs[0]["task"], "fix parser behavior")
             self.assertEqual(detail["llm_traces"][0]["name"], "planner")
+            self.assertIn("Budget: 9000", detail["llm_traces"][0]["context_summary"])
             self.assertEqual(detail["timeline"][0]["step"], "scan")
 
 

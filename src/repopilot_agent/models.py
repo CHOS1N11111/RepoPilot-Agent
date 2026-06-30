@@ -50,6 +50,7 @@ class LLMCallTrace:
     fallback_used: bool = False
     error: str | None = None
     latency_ms: int | None = None
+    context_summary: str = ""
 
 
 @dataclass(frozen=True)

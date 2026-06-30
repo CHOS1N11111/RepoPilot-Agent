@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..models import PlanStep, SearchHit
+from ..models import PlanStep
 
 
 PLAN_SYSTEM_PROMPT = (
@@ -34,23 +34,13 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
 )
 
 
-def build_planner_prompt(task: str, hits: list[SearchHit]) -> str:
-    context_lines = []
-    for hit in hits[:6]:
-        context_lines.append(
-            "\n".join(
-                [
-                    f"Path: {hit.path}",
-                    f"Score: {hit.score}",
-                    f"Reasons: {', '.join(hit.reasons)}",
-                    f"Preview:\n{hit.preview[:1200]}",
-                ]
-            )
-        )
-    context = "\n\n---\n\n".join(context_lines) if context_lines else "No relevant files were selected."
+def build_planner_prompt(task: str, context: str, context_summary: str = "") -> str:
     return "\n".join(
         [
             f"Task: {task}",
+            "",
+            "Context budget summary:",
+            context_summary or "No context budget summary was provided.",
             "",
             "Relevant repository context:",
             context,
@@ -62,25 +52,13 @@ def build_planner_prompt(task: str, hits: list[SearchHit]) -> str:
 
 def build_patch_prompt(
     task: str,
-    hits: list[SearchHit],
     plan: list[PlanStep],
-    file_contents: dict[str, str] | None = None,
+    context: str,
+    context_summary: str = "",
+    editable_paths: list[str] | None = None,
 ) -> str:
     plan_lines = [f"{step.order}. {step.title}: {step.detail}" for step in plan]
-    hit_blocks = []
-    for hit in hits[:6]:
-        hit_blocks.append(
-            "\n".join(
-                [
-                    f"Path: {hit.path}",
-                    f"Score: {hit.score}",
-                    f"Reasons: {', '.join(hit.reasons)}",
-                    f"Preview:\n{hit.preview[:1200]}",
-                    f"Current file content:\n{(file_contents or {}).get(hit.path, '')[:12000]}",
-                ]
-            )
-        )
-    context = "\n\n---\n\n".join(hit_blocks) if hit_blocks else "No relevant files were selected."
+    editable = ", ".join(editable_paths or []) or "none"
     return "\n".join(
         [
             f"Task: {task}",
@@ -88,11 +66,19 @@ def build_patch_prompt(
             "Implementation plan:",
             "\n".join(plan_lines),
             "",
+            "Context budget summary:",
+            context_summary or "No context budget summary was provided.",
+            "",
+            "Files eligible for direct file_edits:",
+            editable,
+            "",
             "Relevant repository context:",
             context,
             "",
             "Propose concrete file-level changes. Only include file_edits for paths shown in the context. "
-            "When editing a file, return its complete post-edit content in new_content.",
+            "Only include file_edits for paths listed as eligible for direct file_edits. "
+            "When editing a file, return its complete post-edit content in new_content. "
+            "If a relevant file is not eligible for direct edits, describe suggested_actions instead.",
         ]
     )
 

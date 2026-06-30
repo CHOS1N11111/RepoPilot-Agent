@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .context_builder import PLANNER_CONTEXT_BUDGET, build_context_packet
 from .llm.base import LLMClient, LLMError, LLMMessage
 from .llm.prompts import PLAN_SYSTEM_PROMPT, build_planner_prompt
 from .llm.schema import parse_plan_steps_json
@@ -87,7 +88,8 @@ def create_plan_with_optional_llm(
     except LLMError as exc:
         if not allow_fallback:
             raise
-        record_llm_fallback(traces, "planner", llm_client.model, str(exc))
+        context_summary = build_context_packet(hits, budget=PLANNER_CONTEXT_BUDGET).summary
+        record_llm_fallback(traces, "planner", llm_client.model, str(exc), context_summary=context_summary)
         return (
             create_plan(task, hits),
             PlanMetadata(source="rules", model=llm_client.model, fallback_used=True, error=str(exc)),
@@ -101,13 +103,18 @@ def _create_llm_plan(
     llm_client: LLMClient,
     traces: list[LLMCallTrace] | None = None,
 ) -> list[PlanStep]:
+    context_packet = build_context_packet(hits, budget=PLANNER_CONTEXT_BUDGET)
     return traced_llm_json_call(
         "planner",
         llm_client,
         [
             LLMMessage(role="system", content=PLAN_SYSTEM_PROMPT),
-            LLMMessage(role="user", content=build_planner_prompt(task, hits)),
+            LLMMessage(
+                role="user",
+                content=build_planner_prompt(task, context_packet.text, context_packet.summary),
+            ),
         ],
         parse_plan_steps_json,
         traces,
+        context_summary=context_packet.summary,
     )

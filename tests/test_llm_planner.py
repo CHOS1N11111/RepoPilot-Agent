@@ -56,6 +56,8 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("fix parser failure", client.messages[1].content)
         self.assertEqual(traces[0].name, "planner")
         self.assertTrue(traces[0].parsed)
+        self.assertIn("Context budget summary", client.messages[1].content)
+        self.assertIn("src/parser.py", traces[0].context_summary)
 
     def test_invalid_llm_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")
@@ -144,6 +146,46 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("+    return value or \"\"", proposal.proposed_diff)
         self.assertEqual(traces[0].name, "patch_proposal")
         self.assertTrue(traces[0].parsed)
+        self.assertIn("Files eligible for direct file_edits", client.messages[1].content)
+        self.assertIn("edit allowed", traces[0].context_summary)
+
+    def test_patch_proposal_blocks_file_edits_when_context_is_truncated(self) -> None:
+        traces = []
+        client = FakeLLMClient(
+            '{"objective":"Fix parser failure safely","files":[{"path":"src/parser.py","change_type":"bugfix",'
+            '"rationale":"Parser is the matched implementation point.","suggested_actions":["Guard empty input"],'
+            '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest discover -s tests"],'
+            '"ready_for_patch":true,"file_edits":[{"path":"src/parser.py",'
+            '"new_content":"def parse(value):\\n    return value or \\"\\"\\n",'
+            '"rationale":"Guard empty input."}]}'
+        )
+        hits = [
+            SearchHit(
+                path="src/parser.py",
+                score=12,
+                reasons=["path matches 'parser'"],
+                preview="def parse(value):",
+            )
+        ]
+        plan, _ = create_plan_with_optional_llm("fix parser failure", hits, None)
+        large_content = "\n".join(f"# filler {index}" for index in range(5_000))
+
+        proposal, metadata = propose_patch_with_optional_llm(
+            "fix parser failure",
+            hits,
+            plan,
+            client,
+            file_contents={"src/parser.py": large_content},
+            traces=traces,
+        )
+
+        self.assertEqual(metadata.source, "llm")
+        self.assertFalse(proposal.apply_ready)
+        self.assertEqual(proposal.file_edits, [])
+        self.assertEqual(proposal.proposed_diff, "")
+        self.assertTrue(any("full file context" in risk.message for risk in proposal.risks))
+        self.assertIn("none", client.messages[1].content)
+        self.assertIn("truncated", traces[0].context_summary)
 
     def test_invalid_patch_proposal_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")
@@ -194,7 +236,7 @@ class LLMPlannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
-            report = run_workflow(root, "fix parser failure", use_llm=True, llm_client=client)
+            report = run_workflow(root, "fix parse failure", use_llm=True, llm_client=client)
 
         self.assertEqual(report.plan_metadata.source, "llm")
         self.assertEqual(report.patch_proposal_metadata.source, "llm")

@@ -82,8 +82,8 @@ class MemoryStore:
                     """
                     INSERT INTO llm_traces (
                         id, run_id, name, model, prompt_preview, raw_output,
-                        parsed, fallback_used, error, latency_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        parsed, fallback_used, error, latency_ms, context_summary
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         uuid4().hex,
@@ -96,6 +96,7 @@ class MemoryStore:
                         int(trace.fallback_used),
                         trace.error,
                         trace.latency_ms,
+                        trace.context_summary,
                     ),
                 )
             for result in report.validation:
@@ -228,6 +229,7 @@ class MemoryStore:
                     fallback_used INTEGER NOT NULL,
                     error TEXT,
                     latency_ms INTEGER,
+                    context_summary TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(run_id) REFERENCES runs(id)
                 );
 
@@ -243,6 +245,7 @@ class MemoryStore:
                 );
                 """
             )
+            _ensure_column(conn, "llm_traces", "context_summary", "TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def _connect(self):
@@ -295,6 +298,7 @@ def _row_to_trace(row: sqlite3.Row) -> dict[str, Any]:
         "fallback_used": bool(row["fallback_used"]),
         "error": row["error"],
         "latency_ms": row["latency_ms"],
+        "context_summary": row["context_summary"],
     }
 
 
@@ -321,3 +325,10 @@ def _loads(data: str | None, default: Any) -> Any:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if any(row["name"] == column for row in rows):
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

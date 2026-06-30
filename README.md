@@ -88,6 +88,7 @@ src/repopilot_agent/
   repo_source.py        local path and GitHub URL resolution
   web_server.py         local stdlib HTTP server
   web_sessions.py       in-memory proposal sessions and timeline events
+  context_builder.py    bounded LLM context packet construction
   llm/
     base.py             provider protocol and message model
     openai_compatible.py OpenAI-compatible client
@@ -189,6 +190,15 @@ Environment variables:
 - `OPENAI_BASE_URL`: Optional API base URL. Defaults to `https://api.openai.com/v1`.
 - `REPOPILOT_MODEL`: Optional default model name.
 
+## LLM Context Management
+
+RepoPilot builds explicit context packets before each LLM call. Planning receives compact ranked file previews, while patch proposal receives bounded file content for the most relevant files.
+
+- Context packets have per-call character and file-count budgets.
+- LLM traces include a context budget summary showing included, truncated, omitted, and edit-eligible files.
+- Direct `file_edits` are accepted only for files whose full content fit into the patch context packet.
+- If a file is too large and only a snippet was provided, RepoPilot keeps the model's file-level recommendation but blocks apply-ready edits for that file.
+
 ## Git And GitHub
 
 Inspect local Git state:
@@ -268,7 +278,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
 - 🚀 Add GitHub pull request creation after explicit user approval.
-- 📏 Add context budget management for larger repositories.
+- 🔎 Improve retrieval ranking with path intent, symbol-like matches, and source/test pairing.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
@@ -279,4 +289,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

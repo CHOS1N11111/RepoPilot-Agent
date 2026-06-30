@@ -378,6 +378,7 @@ function renderLlmTraces(traces) {
         <span class="tag ${trace.parsed ? "ok" : "danger"}">${trace.parsed ? "parsed" : "failed"}</span>
       </div>
       <p>${escapeHtml(trace.error || `Latency: ${trace.latency_ms ?? 0} ms`)}</p>
+      ${trace.context_summary ? `<strong>Context Budget</strong><p>${escapeHtml(trace.context_summary)}</p>` : ""}
       <strong>Prompt</strong>
       <pre>${escapeHtml(trace.prompt_preview || "")}</pre>
       <strong>Raw Output</strong>

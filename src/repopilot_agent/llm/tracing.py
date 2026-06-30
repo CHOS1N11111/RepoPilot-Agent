@@ -17,6 +17,7 @@ def traced_llm_json_call(
     messages: list[LLMMessage],
     parser: Callable[[str], T],
     traces: list[LLMCallTrace] | None = None,
+    context_summary: str = "",
 ) -> T:
     started = perf_counter()
     raw_output = ""
@@ -33,6 +34,7 @@ def traced_llm_json_call(
             parsed=False,
             error=str(exc),
             latency_ms=_elapsed_ms(started),
+            context_summary=context_summary,
         )
         raise
     _append_trace(
@@ -44,6 +46,7 @@ def traced_llm_json_call(
         parsed=True,
         error=None,
         latency_ms=_elapsed_ms(started),
+        context_summary=context_summary,
     )
     return parsed
 
@@ -53,6 +56,7 @@ def record_llm_fallback(
     name: str,
     model: str | None,
     error: str,
+    context_summary: str = "",
 ) -> None:
     if traces is None:
         return
@@ -65,6 +69,7 @@ def record_llm_fallback(
             parsed=False,
             fallback_used=True,
             error=error,
+            context_summary=context_summary,
         )
     )
 
@@ -78,6 +83,7 @@ def _append_trace(
     parsed: bool,
     error: str | None,
     latency_ms: int,
+    context_summary: str = "",
 ) -> None:
     if traces is None:
         return
@@ -91,6 +97,7 @@ def _append_trace(
             fallback_used=not parsed,
             error=error,
             latency_ms=latency_ms,
+            context_summary=context_summary,
         )
     )
 

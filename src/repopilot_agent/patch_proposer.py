@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 
+from .context_builder import PATCH_CONTEXT_BUDGET, build_context_packet
 from .llm.base import LLMClient, LLMError, LLMMessage
 from .llm.prompts import PATCH_REVIEW_SYSTEM_PROMPT, PATCH_SYSTEM_PROMPT, build_patch_prompt, build_patch_review_prompt
 from .llm.schema import parse_patch_proposal_json, parse_patch_review_json
@@ -61,7 +62,18 @@ def propose_patch_with_optional_llm(
     except LLMError as exc:
         if not allow_fallback:
             raise
-        record_llm_fallback(traces, "patch_proposal", llm_client.model, str(exc))
+        context_summary = build_context_packet(
+            hits,
+            file_contents or {},
+            budget=PATCH_CONTEXT_BUDGET,
+        ).summary
+        record_llm_fallback(
+            traces,
+            "patch_proposal",
+            llm_client.model,
+            str(exc),
+            context_summary=context_summary,
+        )
         return (
             propose_patch(task, hits),
             PatchProposalMetadata(source="rules", model=llm_client.model, fallback_used=True, error=str(exc)),
@@ -77,26 +89,39 @@ def _propose_llm_patch(
     file_contents: dict[str, str],
     traces: list[LLMCallTrace] | None = None,
 ) -> PatchProposal:
+    context_packet = build_context_packet(hits, file_contents, budget=PATCH_CONTEXT_BUDGET)
     parsed = traced_llm_json_call(
         "patch_proposal",
         llm_client,
         [
             LLMMessage(role="system", content=PATCH_SYSTEM_PROMPT),
-            LLMMessage(role="user", content=build_patch_prompt(task, hits, plan, file_contents)),
+            LLMMessage(
+                role="user",
+                content=build_patch_prompt(
+                    task,
+                    plan,
+                    context_packet.text,
+                    context_packet.summary,
+                    context_packet.editable_paths,
+                ),
+            ),
         ],
         parse_patch_proposal_json,
         traces,
+        context_summary=context_packet.summary,
     )
-    proposed_diff = _build_proposed_diff(parsed["file_edits"], file_contents)
+    file_edits, safety_risks = _filter_file_edits_by_context(parsed["file_edits"], context_packet.editable_paths)
+    risks = [*parsed["risks"], *safety_risks]
+    proposed_diff = _build_proposed_diff(file_edits, file_contents)
     return PatchProposal(
         objective=parsed["objective"],
         files=parsed["files"],
-        risks=parsed["risks"],
+        risks=risks,
         validation_suggestions=parsed["validation_suggestions"],
         ready_for_patch=parsed["ready_for_patch"],
-        file_edits=parsed["file_edits"],
+        file_edits=file_edits,
         proposed_diff=proposed_diff,
-        apply_ready=bool(parsed["file_edits"]),
+        apply_ready=bool(file_edits),
     )
 
 
@@ -258,6 +283,27 @@ def _build_validation_suggestions(task: str, files: list[FileChangeProposal]) ->
     if any(file.change_type == "documentation" for file in files) or "readme" in task.lower():
         suggestions.append("Review rendered documentation for clarity and accuracy.")
     return suggestions
+
+
+def _filter_file_edits_by_context(
+    file_edits: list[FileEditProposal],
+    editable_paths: list[str],
+) -> tuple[list[FileEditProposal], list[RiskNote]]:
+    editable = set(editable_paths)
+    allowed_edits = [edit for edit in file_edits if edit.path in editable]
+    blocked_paths = sorted({edit.path for edit in file_edits if edit.path not in editable})
+    if not blocked_paths:
+        return allowed_edits, []
+    return allowed_edits, [
+        RiskNote(
+            level="medium",
+            message=(
+                "Some LLM file edits were not apply-ready because RepoPilot did not provide full file context: "
+                + ", ".join(blocked_paths)
+            ),
+            mitigation="Inspect the file manually or rerun with a narrower task so full context can fit in budget.",
+        )
+    ]
 
 
 def _build_proposed_diff(file_edits: list[FileEditProposal], original_contents: object) -> str:
