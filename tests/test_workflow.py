@@ -43,6 +43,76 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             self.assertTrue(hits)
             self.assertEqual(hits[0].path, "auth.py")
 
+    def test_search_files_matches_symbol_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
+            (root / "notes.md").write_text("parser notes without implementation\n", encoding="utf-8")
+
+            files = scan_repository(root)
+            hits = search_files("fix parser failure", files)
+
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].path, "main.py")
+            self.assertTrue(any("symbol matches 'parse'" in reason for reason in hits[0].reasons))
+
+    def test_search_files_uses_path_intent_for_web_ui(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "server.py").write_text("def render():\n    return 'ok'\n", encoding="utf-8")
+            (root / "web").mkdir()
+            (root / "web" / "static").mkdir()
+            (root / "web" / "static" / "app.js").write_text("function renderPanel() {}\n", encoding="utf-8")
+
+            files = scan_repository(root)
+            hits = search_files("improve web ui panel", files)
+
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].path, "web/static/app.js")
+            self.assertTrue(any("path intent matches web_ui" in reason for reason in hits[0].reasons))
+
+    def test_search_files_pairs_source_and_test_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            (root / "src" / "auth.py").write_text("def login_user():\n    return True\n", encoding="utf-8")
+            (root / "tests" / "test_auth.py").write_text("def test_login_user():\n    assert True\n", encoding="utf-8")
+
+            files = scan_repository(root)
+            hits = search_files("fix login behavior", files, limit=4)
+            paths = [hit.path for hit in hits]
+
+            self.assertIn("src/auth.py", paths)
+            self.assertIn("tests/test_auth.py", paths)
+            paired_hit = next(hit for hit in hits if hit.path == "tests/test_auth.py")
+            self.assertTrue(any("paired with src/auth.py" in reason for reason in paired_hit.reasons))
+
+    def test_search_preview_returns_multiple_matching_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            content = "\n".join(
+                [
+                    "def login_user():",
+                    "    return True",
+                    "",
+                    "def unrelated():",
+                    "    return None",
+                    "",
+                    "def logout_user():",
+                    "    return True",
+                ]
+            )
+            (root / "auth.py").write_text(content, encoding="utf-8")
+
+            files = scan_repository(root)
+            hits = search_files("login logout user", files)
+
+            self.assertIn("def login_user", hits[0].preview)
+            self.assertIn("def logout_user", hits[0].preview)
+            self.assertIn("...", hits[0].preview)
+
     def test_run_workflow_returns_plan_and_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

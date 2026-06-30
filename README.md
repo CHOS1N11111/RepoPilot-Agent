@@ -59,7 +59,7 @@ flowchart LR
 | Area                   | What RepoPilot Does                                                                                   |
 | ---------------------- | ----------------------------------------------------------------------------------------------------- |
 | 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths.           |
-| 🔎 Retrieval           | Scores files by task keywords and returns relevant file previews with match reasons.                  |
+| 🔎 Retrieval           | Scores files with task terms, path intent, symbols, multi-snippets, and source/test pairing.          |
 | 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
@@ -199,6 +199,16 @@ RepoPilot builds explicit context packets before each LLM call. Planning receive
 - Direct `file_edits` are accepted only for files whose full content fit into the patch context packet.
 - If a file is too large and only a snippet was provided, RepoPilot keeps the model's file-level recommendation but blocks apply-ready edits for that file.
 
+## Retrieval Quality
+
+RepoPilot uses explainable local retrieval to decide which files should enter the agent context.
+
+- Task terms are expanded with lightweight aliases and simple variants such as `parser` -> `parse`.
+- Path-intent rules boost likely modules for web UI, GitHub/PR/CI, LLM, memory/history, and validation tasks.
+- Python and JavaScript-like symbols receive extra weight when they match the task.
+- File previews can include multiple matching snippets instead of only the first match.
+- Source files and likely test files are paired so implementation and validation context travel together.
+
 ## Git And GitHub
 
 Inspect local Git state:
@@ -278,7 +288,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
 - 🚀 Add GitHub pull request creation after explicit user approval.
-- 🔎 Improve retrieval ranking with path intent, symbol-like matches, and source/test pairing.
+- 🛡️ Add a stronger pre-apply safety check for risky, unrelated, or inconsistent edits.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
@@ -289,4 +299,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, search layer, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
