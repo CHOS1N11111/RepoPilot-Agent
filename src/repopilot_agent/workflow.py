@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from .llm.base import LLMClient, LLMError
@@ -9,6 +10,7 @@ from .llm.openai_compatible import OpenAICompatibleClient
 from .models import LLMCallTrace, PatchProposalMetadata, PlanMetadata, WorkflowReport
 from .patch_proposer import propose_patch, propose_patch_with_optional_llm, review_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
+from .safety import check_file_edits
 from .scanner import scan_repository
 from .search import search_files
 from .validator import run_validation
@@ -83,6 +85,7 @@ def run_workflow(
         patch_proposal = propose_patch(task, hits)
         patch_proposal_metadata = PatchProposalMetadata(source="rules")
 
+    patch_proposal = _attach_safety_check(root, task, patch_proposal)
     patch_review = None
     if use_llm and llm_client is not None:
         patch_review = review_patch_with_optional_llm(
@@ -114,6 +117,22 @@ def run_workflow(
         llm_traces=llm_traces,
         validation=validation,
         summary=summary,
+    )
+
+
+def _attach_safety_check(repo_path: Path, task: str, proposal):
+    if proposal is None or not proposal.file_edits:
+        return proposal
+    safety_check = check_file_edits(
+        repo_path,
+        proposal.file_edits,
+        task=task,
+        allowed_paths=[file.path for file in proposal.files],
+    )
+    return replace(
+        proposal,
+        apply_ready=proposal.apply_ready and safety_check.ok,
+        safety_check=safety_check,
     )
 
 

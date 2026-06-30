@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from pathlib import Path
 from unittest.mock import patch
@@ -16,8 +17,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
+from repopilot_agent.models import FileEditProposal
 from repopilot_agent.repo_source import RepositorySource
 from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR
+from repopilot_agent.web_sessions import create_proposal_session
 
 
 class FakeLLMClient(LLMClient):
@@ -297,6 +300,46 @@ class WebServerTests(unittest.TestCase):
                 with self.assertRaises(Exception):
                     urlopen(request, timeout=5)
                 self.assertFalse((root / "log.md").exists())
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_returns_safety_findings_for_unapproved_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "other.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update approved file",
+                file_edits=[
+                    FileEditProposal(path="other.txt", new_content="new\n", rationale="Update other.")
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["approved.txt"],
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                apply_payload = json.dumps({"proposal_id": session.proposal_id}).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=5)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertFalse(data["safety_check"]["ok"])
+                self.assertTrue(
+                    any(finding["code"] == "path_not_in_proposal" for finding in data["safety_check"]["findings"])
+                )
+                self.assertEqual((root / "other.txt").read_text(encoding="utf-8"), "old\n")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

@@ -25,6 +25,7 @@ class ProposalSession:
     file_edits: list[FileEditProposal]
     validation_commands: list[str]
     created_at: str
+    allowed_paths: list[str] = field(default_factory=list)
     timeline: list[TimelineEvent] = field(default_factory=list)
     applied: bool = False
     validation: list[ValidationResult] = field(default_factory=list)
@@ -36,6 +37,7 @@ class ProposalSession:
             "task": self.task,
             "created_at": self.created_at,
             "applied": self.applied,
+            "allowed_paths": self.allowed_paths,
             "timeline": [asdict(event) for event in self.timeline],
             "validation": [asdict(result) for result in self.validation],
         }
@@ -50,6 +52,7 @@ def create_proposal_session(
     file_edits: list[FileEditProposal],
     validation_commands: list[str],
     timeline: list[TimelineEvent],
+    allowed_paths: list[str] | None = None,
 ) -> ProposalSession:
     proposal_id = uuid4().hex
     session = ProposalSession(
@@ -59,6 +62,7 @@ def create_proposal_session(
         file_edits=file_edits,
         validation_commands=validation_commands,
         created_at=datetime.now(timezone.utc).isoformat(),
+        allowed_paths=allowed_paths or [edit.path for edit in file_edits],
         timeline=timeline,
     )
     _SESSIONS[proposal_id] = session

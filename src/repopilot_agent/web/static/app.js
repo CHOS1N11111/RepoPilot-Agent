@@ -89,6 +89,10 @@ async function applyProposal() {
       proposal_id: state.proposalId,
     });
     if (result.error) {
+      if (result.safety_check) {
+        $("proposalList").innerHTML += renderSafetyCheck(result.safety_check);
+        renderTimeline(result.timeline || []);
+      }
       throw new Error(result.error);
     }
     $("diffOutput").textContent = result.diff || "No diff.";
@@ -239,7 +243,22 @@ function renderProposals(proposal) {
   const risks = proposal.risks
     .map((risk) => `<div class="item"><div class="item-title">Risk <span class="tag ${risk.level === "high" ? "danger" : "warn"}">${escapeHtml(risk.level)}</span></div><p>${escapeHtml(risk.message)}</p><p>${escapeHtml(risk.mitigation)}</p></div>`)
     .join("");
-  return `<div class="item"><div class="item-title">${escapeHtml(proposal.objective)}</div></div>${files}${risks}`;
+  return `<div class="item"><div class="item-title">${escapeHtml(proposal.objective)}</div></div>${files}${risks}${renderSafetyCheck(proposal.safety_check)}`;
+}
+
+function renderSafetyCheck(safety) {
+  if (!safety) {
+    return "";
+  }
+  const status = safety.ok ? "ok" : "danger";
+  const findings = safety.findings && safety.findings.length
+    ? safety.findings.map((finding) => `<li><strong>${escapeHtml(finding.code)}</strong>${finding.path ? ` (${escapeHtml(finding.path)})` : ""}: ${escapeHtml(finding.message)} ${escapeHtml(finding.mitigation)}</li>`).join("")
+    : "<li>No safety findings.</li>";
+  return `<div class="item">
+    <div class="item-title">Safety Check <span class="tag ${status}">${safety.ok ? "passed" : "blocked"}</span></div>
+    <p>Checked ${(safety.checked_files || []).length} file(s).</p>
+    <ul>${findings}</ul>
+  </div>`;
 }
 
 function renderValidation(results) {

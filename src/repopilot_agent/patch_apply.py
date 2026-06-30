@@ -8,9 +8,13 @@ from typing import Any
 
 from .git_tools import get_git_diff
 from .models import FileEditProposal
-
-BLOCKED_FILENAMES = {".env", ".env.local", "log.md"}
-BLOCKED_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv"}
+from .safety import (
+    BLOCKED_DIRS,
+    BLOCKED_FILENAMES,
+    SafetyCheckError,
+    SafetyCheckResult,
+    check_file_edits,
+)
 
 
 @dataclass(frozen=True)
@@ -19,17 +23,27 @@ class ApplyResult:
     changed_files: list[str]
     diff: str
     message: str
+    safety_check: SafetyCheckResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def apply_file_edits(repo_path: str | Path, edits: list[FileEditProposal]) -> ApplyResult:
+def apply_file_edits(
+    repo_path: str | Path,
+    edits: list[FileEditProposal],
+    task: str = "",
+    allowed_paths: list[str] | set[str] | None = None,
+) -> ApplyResult:
     root = Path(repo_path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise FileNotFoundError(f"Repository path does not exist: {root}")
     if not edits:
         return ApplyResult(applied=False, changed_files=[], diff=_safe_git_diff(root), message="No edits to apply.")
+
+    safety_check = check_file_edits(root, edits, task=task, allowed_paths=allowed_paths)
+    if not safety_check.ok:
+        raise SafetyCheckError(safety_check)
 
     changed_files: list[str] = []
     for edit in edits:
@@ -41,7 +55,13 @@ def apply_file_edits(repo_path: str | Path, edits: list[FileEditProposal]) -> Ap
             changed_files.append(edit.path)
 
     message = f"Applied {len(changed_files)} file edit(s)." if changed_files else "No file content changed."
-    return ApplyResult(applied=bool(changed_files), changed_files=changed_files, diff=_safe_git_diff(root), message=message)
+    return ApplyResult(
+        applied=bool(changed_files),
+        changed_files=changed_files,
+        diff=_safe_git_diff(root),
+        message=message,
+        safety_check=safety_check,
+    )
 
 
 def parse_file_edits(raw_edits: object) -> list[FileEditProposal]:

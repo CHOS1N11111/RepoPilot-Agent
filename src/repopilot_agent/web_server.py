@@ -19,6 +19,7 @@ from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
 from .patch_apply import apply_file_edits
 from .repo_source import resolve_repository_reference, sync_repository_reference
+from .safety import SafetyCheckError
 from .validator import run_validation
 from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
 from .workflow import run_workflow
@@ -152,7 +153,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Proposal has already been applied."}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            result = apply_file_edits(session.repo_path, session.file_edits)
+            result = apply_file_edits(
+                session.repo_path,
+                session.file_edits,
+                task=session.task,
+                allowed_paths=session.allowed_paths,
+            )
             session.applied = True
             append_timeline(session, "apply", "done", result.message)
             if session.validation_commands:
@@ -171,6 +177,17 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     append_timeline(session, "validation", "done", f"Ran {len(validation)} validation command(s).")
             else:
                 append_timeline(session, "validation", "skipped", "No validation command was configured.")
+        except SafetyCheckError as exc:
+            append_timeline(session, "safety", "blocked", "Pre-apply safety check blocked this proposal.")
+            self._send_json(
+                {
+                    "error": str(exc),
+                    "safety_check": exc.result.to_dict(),
+                    "timeline": session.to_public_dict()["timeline"],
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
         except (FileNotFoundError, ValueError) as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -269,13 +286,14 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         proposal_id = None
         timeline = build_report_timeline(report)
         proposal = report.patch_proposal
-        if proposal and proposal.file_edits:
+        if proposal and proposal.file_edits and proposal.apply_ready:
             session = create_proposal_session(
                 repo_path=report.repo_path,
                 task=task,
                 file_edits=proposal.file_edits,
                 validation_commands=validation,
                 timeline=timeline,
+                allowed_paths=[file.path for file in proposal.files],
             )
             proposal_id = session.proposal_id
             append_timeline(session, "approval", "pending", f"Waiting for approval on proposal {proposal_id}.")

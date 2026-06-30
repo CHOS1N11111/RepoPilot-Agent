@@ -95,6 +95,7 @@ class PatchProposal:
     file_edits: list[FileEditProposal] = field(default_factory=list)
     proposed_diff: str = ""
     apply_ready: bool = False
+    safety_check: Any | None = None
 
 
 @dataclass(frozen=True)
