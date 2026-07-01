@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..models import PlanStep
+from ..models import MemoryContextItem, PlanStep
 
 
 PLAN_SYSTEM_PROMPT = (
@@ -34,13 +34,21 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
 )
 
 
-def build_planner_prompt(task: str, context: str, context_summary: str = "") -> str:
+def build_planner_prompt(
+    task: str,
+    context: str,
+    context_summary: str = "",
+    memory_context: list[MemoryContextItem] | None = None,
+) -> str:
     return "\n".join(
         [
             f"Task: {task}",
             "",
             "Context budget summary:",
             context_summary or "No context budget summary was provided.",
+            "",
+            "Related memory:",
+            _format_memory_context(memory_context),
             "",
             "Relevant repository context:",
             context,
@@ -97,3 +105,27 @@ def build_patch_review_prompt(task: str, proposed_diff: str, validation_suggesti
             "Review whether the diff is focused, relevant, and safe enough for user-approved application.",
         ]
     )
+
+
+def _format_memory_context(memory_context: list[MemoryContextItem] | None) -> str:
+    if not memory_context:
+        return "No related memory was found."
+    lines = []
+    for item in memory_context[:3]:
+        status = "applied" if item.applied else "open"
+        reasons = "; ".join(item.reasons[:3]) or f"score {item.score}"
+        validation = "; ".join(item.validation[:3]) if item.validation else "no saved validation"
+        lines.append(
+            "- "
+            f"{item.task} ({item.mode}, {status}, score {item.score}). "
+            f"Reasons: {reasons}. "
+            f"Summary: {_clip(item.summary)} "
+            f"Validation: {validation}."
+        )
+    return "\n".join(lines)
+
+
+def _clip(text: str, limit: int = 500) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."

@@ -70,6 +70,19 @@ class ValidationPlan:
 
 
 @dataclass(frozen=True)
+class MemoryContextItem:
+    run_id: str
+    task: str
+    summary: str
+    mode: str
+    created_at: str
+    applied: bool
+    score: int
+    reasons: list[str]
+    validation: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class FileChangeProposal:
     path: str
     change_type: str
@@ -304,6 +317,7 @@ class WorkflowReport:
     patch_review: PatchReview | None = None
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
+    memory_context: list[MemoryContextItem] = field(default_factory=list)
     summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:

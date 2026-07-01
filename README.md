@@ -15,6 +15,7 @@ The project is designed around practical agent engineering: tool use, repository
 Task or GitHub issue
 -> repository scan
 -> relevant file search
+-> related memory lookup
 -> deterministic or LLM plan
 -> patch proposal
 -> LLM self-review
@@ -29,7 +30,8 @@ Task or GitHub issue
 flowchart LR
     A["GitHub issue or task"] --> B["Repository scan"]
     B --> C["Relevant file search"]
-    C --> D["Plan"]
+    C --> M["Related memory"]
+    M --> D["Plan"]
     D --> E["Patch proposal"]
     E --> F["LLM self-review"]
     F --> G["Proposed diff"]
@@ -47,6 +49,7 @@ flowchart LR
 - 🧠 Optional OpenAI-compatible LLM integration with deterministic fallback.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
+- 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
 - 🛡️ LLM self-review for proposed diffs before human approval.
 - 🔐 Server-side proposal sessions so the browser applies proposals by `proposal_id`, not raw edits.
 - 🧪 Validation command allowlist for safer test and lint execution.
@@ -63,6 +66,7 @@ flowchart LR
 | 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
+| 🧠 Memory              | Retrieves related local run history and feeds concise lessons into planning.                          |
 | 🖐️ Web approval      | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID.          |
 | 🧪 Validation          | Recommends narrow validation commands, runs allowlisted commands, and reports command results.        |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
@@ -84,6 +88,7 @@ src/repopilot_agent/
   workflow.py           end-to-end local workflow
   validator.py          allowlisted validation runner
   validation_planner.py recommended validation command planner
+  memory.py             SQLite history and related-run retrieval
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
   github_tools.py       GitHub REST API inspection
@@ -271,6 +276,14 @@ RepoPilot stores local web workflow history in SQLite under:
 
 The memory layer records run metadata, tasks, summaries, proposal metadata, proposed diffs, LLM traces, validation results, and timeline events. API keys are not stored. The web UI exposes this through the History tab, where previous runs can be inspected or reused as new tasks.
 
+RepoPilot also reuses memory during planning. Before a new run creates a plan, it searches recent local history for related tasks and summaries, then passes a compact memory context into the deterministic planner or LLM planner.
+
+Memory context is intentionally bounded and inspectable:
+
+- It includes task text, run summary, mode, applied/open status, match reasons, score, and saved validation command results.
+- It does not inject stored API keys, raw LLM outputs, raw prompts, stdout/stderr logs, or proposal diff bodies into the planner prompt.
+- If memory is missing or unavailable, RepoPilot falls back to the normal repository scan and retrieval workflow.
+
 ## Safety Model
 
 RepoPilot is intentionally approval-first:
@@ -302,7 +315,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
 - 🚀 Add GitHub pull request creation after explicit user approval.
-- 🧠 Reuse local memory from previous runs when planning related tasks.
+- 🧠 Add memory pinning, forgetting, and per-project memory controls.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
@@ -313,4 +326,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

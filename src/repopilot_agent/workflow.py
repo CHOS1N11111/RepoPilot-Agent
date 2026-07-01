@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 from .llm.base import LLMClient, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
-from .models import LLMCallTrace, PatchProposalMetadata, PlanMetadata, WorkflowReport
+from .memory import MemoryStore, default_memory_path
+from .models import LLMCallTrace, MemoryContextItem, PatchProposalMetadata, PlanMetadata, WorkflowReport
 from .patch_proposer import propose_patch, propose_patch_with_optional_llm, review_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
 from .safety import check_file_edits
@@ -26,11 +28,13 @@ def run_workflow(
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     allow_llm_fallback: bool = True,
+    memory_context: list[MemoryContextItem] | None = None,
 ) -> WorkflowReport:
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
     file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
+    related_memory = memory_context if memory_context is not None else _load_memory_context(root, task)
     llm_traces: list[LLMCallTrace] = []
     llm_creation_error: LLMError | None = None
     if use_llm:
@@ -41,7 +45,7 @@ def run_workflow(
                 if not allow_llm_fallback:
                     raise
                 llm_creation_error = exc
-                plan = create_plan(task, hits)
+                plan = create_plan(task, hits, memory_context=related_memory)
                 plan_metadata = PlanMetadata(source="rules", model=llm_model, fallback_used=True, error=str(exc))
             else:
                 plan, plan_metadata = create_plan_with_optional_llm(
@@ -50,6 +54,7 @@ def run_workflow(
                     llm_client=llm_client,
                     allow_fallback=allow_llm_fallback,
                     traces=llm_traces,
+                    memory_context=related_memory,
                 )
         else:
             plan, plan_metadata = create_plan_with_optional_llm(
@@ -58,9 +63,10 @@ def run_workflow(
                 llm_client=llm_client,
                 allow_fallback=allow_llm_fallback,
                 traces=llm_traces,
+                memory_context=related_memory,
             )
     else:
-        plan = create_plan(task, hits)
+        plan = create_plan(task, hits, memory_context=related_memory)
         plan_metadata = PlanMetadata(source="rules")
 
     if use_llm:
@@ -118,8 +124,16 @@ def run_workflow(
         patch_review=patch_review,
         llm_traces=llm_traces,
         validation=validation,
+        memory_context=related_memory,
         summary=summary,
     )
+
+
+def _load_memory_context(repo_path: Path, task: str) -> list[MemoryContextItem]:
+    try:
+        return MemoryStore(default_memory_path(repo_path)).find_related_runs(task)
+    except (OSError, sqlite3.Error):
+        return []
 
 
 def _attach_safety_check(repo_path: Path, task: str, proposal):

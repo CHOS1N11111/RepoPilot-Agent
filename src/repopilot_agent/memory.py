@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -10,6 +11,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from .models import MemoryContextItem
+
+
+_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+}
 
 
 def default_memory_path(repo_path: str | Path) -> Path:
@@ -187,6 +216,68 @@ class MemoryStore:
         data["validation"] = [_row_to_validation(row) for row in validation]
         return data
 
+    def find_related_runs(
+        self,
+        task: str,
+        limit: int = 3,
+        candidate_limit: int = 50,
+        exclude_run_id: str | None = None,
+    ) -> list[MemoryContextItem]:
+        query_tokens = _tokens(task)
+        if not query_tokens:
+            return []
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task, mode, created_at, summary, applied
+                FROM runs
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (candidate_limit,),
+            ).fetchall()
+            validation_by_run = {
+                row["id"]: _validation_summaries(
+                    conn.execute(
+                        """
+                        SELECT command, allowed, exit_code
+                        FROM validation_results
+                        WHERE run_id = ?
+                        ORDER BY rowid
+                        LIMIT 5
+                        """,
+                        (row["id"],),
+                    ).fetchall()
+                )
+                for row in rows
+            }
+
+        candidates: list[MemoryContextItem] = []
+        for row in rows:
+            if exclude_run_id and row["id"] == exclude_run_id:
+                continue
+            scored = _score_memory_row(row, query_tokens)
+            if scored is None:
+                continue
+            score, reasons = scored
+            candidates.append(
+                MemoryContextItem(
+                    run_id=row["id"],
+                    task=row["task"],
+                    summary=row["summary"],
+                    mode=row["mode"],
+                    created_at=row["created_at"],
+                    applied=bool(row["applied"]),
+                    score=score,
+                    reasons=reasons,
+                    validation=validation_by_run.get(row["id"], []),
+                )
+            )
+
+        candidates.sort(key=lambda item: (item.score, item.created_at), reverse=True)
+        return candidates[:limit]
+
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.executescript(
@@ -332,3 +423,46 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
     if any(row["name"] == column for row in rows):
         return
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", text.lower())
+    normalized: set[str] = set()
+    for word in words:
+        parts = word.split("_")
+        for part in parts:
+            if len(part) < 2 or part in _STOP_WORDS:
+                continue
+            normalized.add(part)
+    return normalized
+
+
+def _score_memory_row(row: sqlite3.Row, query_tokens: set[str]) -> tuple[int, list[str]] | None:
+    task_tokens = _tokens(row["task"])
+    summary_tokens = _tokens(row["summary"])
+    task_matches = sorted(query_tokens & task_tokens)
+    summary_matches = sorted((query_tokens & summary_tokens) - set(task_matches))
+    if not task_matches and not summary_matches:
+        return None
+
+    score = len(task_matches) * 4 + len(summary_matches) * 2
+    reasons = []
+    if task_matches:
+        reasons.append(f"task overlap: {', '.join(task_matches[:4])}")
+    if summary_matches:
+        reasons.append(f"summary overlap: {', '.join(summary_matches[:4])}")
+    if bool(row["applied"]):
+        score += 2
+        reasons.append("previous proposal was applied")
+    return score, reasons
+
+
+def _validation_summaries(rows: list[sqlite3.Row]) -> list[str]:
+    summaries: list[str] = []
+    for row in rows:
+        if not bool(row["allowed"]):
+            summaries.append(f"{row['command']}: rejected")
+            continue
+        exit_code = row["exit_code"]
+        summaries.append(f"{row['command']}: exit {'n/a' if exit_code is None else exit_code}")
+    return summaries

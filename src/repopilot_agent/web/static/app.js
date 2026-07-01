@@ -203,9 +203,10 @@ function renderReport(report, payload) {
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
   renderTimeline(report.timeline || []);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
-  $("proposalList").innerHTML = renderProposals(report.patch_proposal);
+  $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
     {
+      memory_context: report.memory_context,
       metadata: report.patch_proposal_metadata,
       proposal: report.patch_proposal,
     },
@@ -221,6 +222,32 @@ function renderReport(report, payload) {
   $("llmTraceList").innerHTML = renderLlmTraces(report.llm_traces || []);
   $("jsonOutput").textContent = JSON.stringify(report, null, 2);
   loadHistory().catch(() => {});
+}
+
+function renderMemoryContext(memory) {
+  if (!memory || memory.length === 0) {
+    return item("No related memory found for this task.");
+  }
+  const rows = memory
+    .map((entry) => {
+      const reasons = (entry.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("");
+      const validation = (entry.validation || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+      return `<div class="item">
+        <div class="item-title">${escapeHtml(entry.task)}
+          <span class="tag">${escapeHtml(entry.mode)}</span>
+          <span class="tag ${entry.applied ? "ok" : "warn"}">${entry.applied ? "applied" : "open"}</span>
+          <span class="tag">score ${escapeHtml(entry.score)}</span>
+        </div>
+        <p>${escapeHtml(entry.summary || "")}</p>
+        <p><small>${escapeHtml(entry.created_at || "")}</small></p>
+        <strong>Why matched</strong>
+        <ul>${reasons || "<li>No match reason saved.</li>"}</ul>
+        <strong>Saved validation</strong>
+        <ul>${validation || "<li>No validation saved.</li>"}</ul>
+      </div>`;
+    })
+    .join("");
+  return `<div class="item"><div class="item-title">Related Memory</div><p>${memory.length} previous run(s) may help this task.</p></div>${rows}`;
 }
 
 function renderProposals(proposal) {

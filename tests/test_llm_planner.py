@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.llm.base import LLMMessage
-from repopilot_agent.models import SearchHit
+from repopilot_agent.models import MemoryContextItem, SearchHit
 from repopilot_agent.patch_proposer import propose_patch_with_optional_llm
 from repopilot_agent.planner import create_plan_with_optional_llm
 from repopilot_agent.workflow import run_workflow
@@ -58,6 +58,37 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertTrue(traces[0].parsed)
         self.assertIn("Context budget summary", client.messages[1].content)
         self.assertIn("src/parser.py", traces[0].context_summary)
+
+    def test_create_plan_with_llm_includes_related_memory(self) -> None:
+        client = FakeLLMClient(
+            '{"steps":[{"title":"Reuse parser lesson","detail":"Check prior validation before editing."}]}'
+        )
+        memory = [
+            MemoryContextItem(
+                run_id="run-1",
+                task="fix parser validation failure",
+                summary="Previous parser fix used a focused parser test.",
+                mode="run",
+                created_at="2026-01-01T00:00:00+00:00",
+                applied=True,
+                score=8,
+                reasons=["task overlap: parser, failure"],
+                validation=["python -m unittest tests.test_parser: exit 0"],
+            )
+        ]
+
+        plan, metadata = create_plan_with_optional_llm(
+            "fix parser failure",
+            [],
+            client,
+            memory_context=memory,
+        )
+
+        self.assertEqual(metadata.source, "llm")
+        self.assertEqual(plan[0].title, "Reuse parser lesson")
+        self.assertIn("Related memory:", client.messages[1].content)
+        self.assertIn("fix parser validation failure", client.messages[1].content)
+        self.assertIn("python -m unittest tests.test_parser: exit 0", client.messages[1].content)
 
     def test_invalid_llm_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")

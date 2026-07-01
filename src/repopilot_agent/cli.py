@@ -168,6 +168,19 @@ def _print_report(report) -> None:
         print("- No relevant files found from the current query.")
     print()
 
+    print("Related memory")
+    if report.memory_context:
+        for memory in report.memory_context:
+            status = "applied" if memory.applied else "open"
+            print(f"- {memory.task} [{memory.mode}, {status}, score: {memory.score}]")
+            print(f"  Summary: {memory.summary}")
+            print(f"  Reasons: {', '.join(memory.reasons)}")
+            if memory.validation:
+                print(f"  Validation: {'; '.join(memory.validation)}")
+    else:
+        print("- No related previous runs found.")
+    print()
+
     print("Plan")
     for step in report.plan:
         print(f"{step.order}. {step.title}: {step.detail}")

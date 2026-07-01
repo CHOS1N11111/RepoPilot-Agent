@@ -8,7 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from repopilot_agent.models import SearchHit
+from repopilot_agent.memory import MemoryStore, default_memory_path
+from repopilot_agent.models import PlanMetadata, SearchHit, WorkflowReport
 from repopilot_agent.patch_proposer import propose_patch
 from repopilot_agent.scanner import scan_repository
 from repopilot_agent.search import search_files
@@ -126,6 +127,26 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             self.assertTrue(report.patch_proposal.ready_for_patch)
             self.assertIn("RepoPilot analyzed the task", report.summary)
             self.assertIn("Prepared file-level change proposals", report.summary)
+
+    def test_run_workflow_reuses_related_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
+            store = MemoryStore(default_memory_path(root))
+            history_report = WorkflowReport(
+                task="fix parser validation failure",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed a parser failure and recommended parser validation.",
+            )
+            store.create_run(tmp, "fix parser validation failure", "run", history_report)
+
+            report = run_workflow(root, "fix parser failure")
+
+            self.assertTrue(report.memory_context)
+            self.assertEqual(report.memory_context[0].task, "fix parser validation failure")
+            self.assertTrue(any(step.title == "Review related memory" for step in report.plan))
 
     def test_patch_proposal_describes_file_changes_and_risks(self) -> None:
         hits = [
