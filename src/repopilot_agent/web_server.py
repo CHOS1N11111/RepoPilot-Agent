@@ -287,11 +287,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         timeline = build_report_timeline(report)
         proposal = report.patch_proposal
         if proposal and proposal.file_edits and proposal.apply_ready:
+            validation_commands = validation or (proposal.validation_plan.commands if proposal.validation_plan else [])
             session = create_proposal_session(
                 repo_path=report.repo_path,
                 task=task,
                 file_edits=proposal.file_edits,
-                validation_commands=validation,
+                validation_commands=validation_commands,
                 timeline=timeline,
                 allowed_paths=[file.path for file in proposal.files],
             )

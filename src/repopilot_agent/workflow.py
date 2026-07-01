@@ -13,6 +13,7 @@ from .planner import create_plan, create_plan_with_optional_llm
 from .safety import check_file_edits
 from .scanner import scan_repository
 from .search import search_files
+from .validation_planner import build_validation_plan
 from .validator import run_validation
 
 
@@ -85,6 +86,7 @@ def run_workflow(
         patch_proposal = propose_patch(task, hits)
         patch_proposal_metadata = PatchProposalMetadata(source="rules")
 
+    patch_proposal = _attach_validation_plan(root, patch_proposal)
     patch_proposal = _attach_safety_check(root, task, patch_proposal)
     patch_review = None
     if use_llm and llm_client is not None:
@@ -134,6 +136,35 @@ def _attach_safety_check(repo_path: Path, task: str, proposal):
         apply_ready=proposal.apply_ready and safety_check.ok,
         safety_check=safety_check,
     )
+
+
+def _attach_validation_plan(repo_path: Path, proposal):
+    if proposal is None:
+        return proposal
+    changed_paths = [edit.path for edit in proposal.file_edits] or [file.path for file in proposal.files]
+    validation_plan = build_validation_plan(repo_path, changed_paths)
+    validation_suggestions = _merge_validation_suggestions(
+        proposal.validation_suggestions,
+        validation_plan.commands,
+        validation_plan.notes,
+    )
+    return replace(
+        proposal,
+        validation_plan=validation_plan,
+        validation_suggestions=validation_suggestions,
+    )
+
+
+def _merge_validation_suggestions(
+    existing: list[str],
+    commands: list[str],
+    notes: list[str],
+) -> list[str]:
+    merged: list[str] = []
+    for item in [*existing, *commands, *notes]:
+        if item and item not in merged:
+            merged.append(item)
+    return merged
 
 
 def _build_summary(

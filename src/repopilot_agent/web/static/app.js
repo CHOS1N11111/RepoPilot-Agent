@@ -243,7 +243,26 @@ function renderProposals(proposal) {
   const risks = proposal.risks
     .map((risk) => `<div class="item"><div class="item-title">Risk <span class="tag ${risk.level === "high" ? "danger" : "warn"}">${escapeHtml(risk.level)}</span></div><p>${escapeHtml(risk.message)}</p><p>${escapeHtml(risk.mitigation)}</p></div>`)
     .join("");
-  return `<div class="item"><div class="item-title">${escapeHtml(proposal.objective)}</div></div>${files}${risks}${renderSafetyCheck(proposal.safety_check)}`;
+  return `<div class="item"><div class="item-title">${escapeHtml(proposal.objective)}</div></div>${files}${risks}${renderValidationPlan(proposal.validation_plan)}${renderSafetyCheck(proposal.safety_check)}`;
+}
+
+function renderValidationPlan(plan) {
+  if (!plan) {
+    return "";
+  }
+  const commands = plan.commands && plan.commands.length
+    ? plan.commands.map((command) => `<li><code>${escapeHtml(command)}</code></li>`).join("")
+    : "<li>No command inferred.</li>";
+  const notes = plan.notes && plan.notes.length
+    ? plan.notes.map((note) => `<li>${escapeHtml(note)}</li>`).join("")
+    : "<li>No notes.</li>";
+  return `<div class="item">
+    <div class="item-title">Recommended Validation <span class="tag">${escapeHtml(plan.source || "rules")}</span></div>
+    <strong>Commands</strong>
+    <ul>${commands}</ul>
+    <strong>Notes</strong>
+    <ul>${notes}</ul>
+  </div>`;
 }
 
 function renderSafetyCheck(safety) {

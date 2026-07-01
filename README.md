@@ -64,7 +64,7 @@ flowchart LR
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
 | 🖐️ Web approval      | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID.          |
-| 🧪 Validation          | Runs allowlisted commands and reports stdout, stderr, exit code, and rejected commands.               |
+| 🧪 Validation          | Recommends narrow validation commands, runs allowlisted commands, and reports command results.        |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -83,6 +83,7 @@ src/repopilot_agent/
   safety.py             structured pre-apply safety checks
   workflow.py           end-to-end local workflow
   validator.py          allowlisted validation runner
+  validation_planner.py recommended validation command planner
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
   github_tools.py       GitHub REST API inspection
@@ -210,6 +211,17 @@ RepoPilot uses explainable local retrieval to decide which files should enter th
 - File previews can include multiple matching snippets instead of only the first match.
 - Source files and likely test files are paired so implementation and validation context travel together.
 
+## Validation Planning
+
+RepoPilot recommends validation before approved edits are applied.
+
+- Python test files get direct `python -m unittest module.path` commands.
+- Python source files prefer paired tests such as `tests/test_auth.py` when present.
+- Python changes fall back to `python -m unittest discover -s tests` when no narrow test is found.
+- JavaScript and TypeScript changes recommend `npm test` only when `package.json` exists.
+- Documentation-only changes produce manual review notes instead of unsafe commands.
+- Recommended commands are still run through the validation allowlist.
+
 ## Git And GitHub
 
 Inspect local Git state:
@@ -290,7 +302,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
 - 🚀 Add GitHub pull request creation after explicit user approval.
-- 🧪 Add a validation planner for narrow test and lint command suggestions.
+- 🧠 Reuse local memory from previous runs when planning related tasks.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
@@ -301,4 +313,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

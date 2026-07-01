@@ -345,6 +345,78 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_apply_api_runs_recommended_validation_when_user_omits_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "tests").mkdir()
+            (root / "src" / "auth.py").write_text("def login():\n    return False\n", encoding="utf-8")
+            (root / "tests" / "test_auth.py").write_text(
+                "import unittest\n\n"
+                "class AuthTests(unittest.TestCase):\n"
+                "    def test_placeholder(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with patch(
+                    "repopilot_agent.web_server.OpenAICompatibleClient",
+                    return_value=FakeLLMClient(
+                        [
+                            '{"steps":[{"title":"Inspect auth","detail":"Review src/auth.py."}]}',
+                            '{"objective":"Fix login","files":[{"path":"src/auth.py","change_type":"bugfix",'
+                            '"rationale":"src/auth.py contains login behavior.","suggested_actions":["Return true"],'
+                            '"confidence":"high"}],"risks":[],"validation_suggestions":[],"ready_for_patch":true,'
+                            '"file_edits":[{"path":"src/auth.py","new_content":"def login():\\n    return True\\n",'
+                            '"rationale":"Fix login behavior."}]}',
+                            '{"summary":"The diff is focused.","risk_level":"low","concerns":[],"suggested_tests":[],"approved_for_apply":true}',
+                        ]
+                    ),
+                ):
+                    propose_payload = json.dumps(
+                        {
+                            "repo": str(root),
+                            "task": "fix auth login behavior",
+                            "use_llm": True,
+                            "api_key": "test-key",
+                        }
+                    ).encode("utf-8")
+                    propose_request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/propose",
+                        data=propose_payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urlopen(propose_request, timeout=5) as response:
+                        proposal = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(
+                    proposal["patch_proposal"]["validation_plan"]["commands"],
+                    ["python -m unittest tests.test_auth"],
+                )
+                apply_payload = json.dumps({"proposal_id": proposal["proposal_id"]}).encode("utf-8")
+                apply_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(apply_request, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(data["applied"])
+                self.assertEqual(data["validation"][0]["command"], "python -m unittest tests.test_auth")
+                self.assertEqual(data["validation"][0]["exit_code"], 0)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
     def test_git_summary_api_returns_delivery_draft(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

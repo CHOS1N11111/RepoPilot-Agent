@@ -186,10 +186,25 @@ def _print_report(report) -> None:
             for risk in report.patch_proposal.risks:
                 print(f"- {risk.level}: {risk.message}")
                 print(f"  Mitigation: {risk.mitigation}")
-        if report.patch_proposal.validation_suggestions:
+        validation_plan_items = set()
+        if report.patch_proposal.validation_plan:
+            validation_plan_items.update(report.patch_proposal.validation_plan.commands)
+            validation_plan_items.update(report.patch_proposal.validation_plan.notes)
+        extra_suggestions = [
+            suggestion
+            for suggestion in report.patch_proposal.validation_suggestions
+            if suggestion not in validation_plan_items
+        ]
+        if extra_suggestions:
             print("Validation suggestions")
-            for suggestion in report.patch_proposal.validation_suggestions:
+            for suggestion in extra_suggestions:
                 print(f"- {suggestion}")
+        if report.patch_proposal.validation_plan:
+            print("Recommended validation")
+            for command in report.patch_proposal.validation_plan.commands:
+                print(f"- {command}")
+            for note in report.patch_proposal.validation_plan.notes:
+                print(f"- Note: {note}")
     else:
         print("- No patch proposal was prepared from the current query.")
     print()

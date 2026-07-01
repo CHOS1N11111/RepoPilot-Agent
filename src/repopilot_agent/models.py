@@ -63,6 +63,13 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
+class ValidationPlan:
+    commands: list[str]
+    notes: list[str]
+    source: str = "rules"
+
+
+@dataclass(frozen=True)
 class FileChangeProposal:
     path: str
     change_type: str
@@ -95,6 +102,7 @@ class PatchProposal:
     file_edits: list[FileEditProposal] = field(default_factory=list)
     proposed_diff: str = ""
     apply_ready: bool = False
+    validation_plan: ValidationPlan | None = None
     safety_check: Any | None = None
 
 
