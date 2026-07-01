@@ -28,13 +28,14 @@ def run_workflow(
     llm_client: LLMClient | None = None,
     llm_model: str | None = None,
     allow_llm_fallback: bool = True,
+    use_memory: bool = True,
     memory_context: list[MemoryContextItem] | None = None,
 ) -> WorkflowReport:
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
     file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
-    related_memory = memory_context if memory_context is not None else _load_memory_context(root, task)
+    related_memory = _resolve_memory_context(root, task, use_memory, memory_context)
     llm_traces: list[LLMCallTrace] = []
     llm_creation_error: LLMError | None = None
     if use_llm:
@@ -127,6 +128,19 @@ def run_workflow(
         memory_context=related_memory,
         summary=summary,
     )
+
+
+def _resolve_memory_context(
+    repo_path: Path,
+    task: str,
+    use_memory: bool,
+    memory_context: list[MemoryContextItem] | None,
+) -> list[MemoryContextItem]:
+    if memory_context is not None:
+        return memory_context
+    if not use_memory:
+        return []
+    return _load_memory_context(repo_path, task)
 
 
 def _load_memory_context(repo_path: Path, task: str) -> list[MemoryContextItem]:

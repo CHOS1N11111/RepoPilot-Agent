@@ -50,6 +50,7 @@ flowchart LR
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
+- 🧹 Memory controls for disabling lookup, deleting saved runs, and clearing local history.
 - 🛡️ LLM self-review for proposed diffs before human approval.
 - 🔐 Server-side proposal sessions so the browser applies proposals by `proposal_id`, not raw edits.
 - 🧪 Validation command allowlist for safer test and lint execution.
@@ -143,6 +144,7 @@ The web UI supports:
 - Repository source selection for local paths, GitHub URLs, or auto detection.
 - Repository sync controls for cached GitHub clones, branch checkout, latest commit display, and local-change protection.
 - 🧠 LLM model, API base URL, and API key inputs.
+- Memory lookup toggle for clean-context runs.
 - 📌 Task input and GitHub issue import.
 - 🚦 Workflow execution and standalone proposal generation.
 - 🔍 LLM input/output, self-review, and call trace inspection.
@@ -152,6 +154,7 @@ The web UI supports:
 - 📦 Delivery draft generation for commit message and PR body preparation.
 - 🔗 GitHub issue/PR/review/check display.
 - 🌿 Working tree and staged diff display.
+- History controls for opening, reusing, deleting, or clearing saved runs.
 
 API keys entered in the UI are sent only to the local server for that request and are not written to disk.
 
@@ -189,6 +192,12 @@ Disable deterministic fallback while debugging model output:
 
 ```bash
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --no-llm-fallback
+```
+
+Disable related memory lookup for a clean-context run:
+
+```bash
+python repopilot.py run --repo . --task "fix search relevance for login behavior" --no-memory
 ```
 
 Environment variables:
@@ -283,6 +292,8 @@ Memory context is intentionally bounded and inspectable:
 - It includes task text, run summary, mode, applied/open status, match reasons, score, and saved validation command results.
 - It does not inject stored API keys, raw LLM outputs, raw prompts, stdout/stderr logs, or proposal diff bodies into the planner prompt.
 - If memory is missing or unavailable, RepoPilot falls back to the normal repository scan and retrieval workflow.
+- Use `--no-memory` in the CLI or Disable memory in the web UI to skip related-memory lookup for a single run.
+- Use the History tab to delete one saved run or clear the current repository history.
 
 ## Safety Model
 
@@ -315,7 +326,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
 - 🚀 Add GitHub pull request creation after explicit user approval.
-- 🧠 Add memory pinning, forgetting, and per-project memory controls.
+- 🧠 Add pinned memory and per-project memory policies.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
@@ -326,4 +337,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

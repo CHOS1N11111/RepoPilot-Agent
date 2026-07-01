@@ -122,6 +122,15 @@ button.secondary:hover {
   background: #d6ebf0;
 }
 
+button.danger-button {
+  color: var(--danger);
+  background: #fdecec;
+}
+
+button.danger-button:hover {
+  background: #f8d7d4;
+}
+
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;

@@ -33,6 +33,11 @@ def main() -> int:
         action="store_true",
         help="Fail instead of falling back to the rule-based planner when LLM planning fails.",
     )
+    run_parser.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Disable related local memory lookup for this run.",
+    )
     run_parser.add_argument("--json", action="store_true", help="Print the workflow report as JSON.")
 
     git_parser = subparsers.add_parser("git", help="Inspect local Git workflow state.")
@@ -83,6 +88,7 @@ def main() -> int:
             use_llm=args.use_llm,
             llm_model=args.model,
             allow_llm_fallback=not args.no_llm_fallback,
+            use_memory=not args.no_memory,
         )
         if args.json:
             print(json.dumps(report.to_dict(), indent=2))

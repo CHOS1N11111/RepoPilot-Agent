@@ -148,6 +148,25 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             self.assertEqual(report.memory_context[0].task, "fix parser validation failure")
             self.assertTrue(any(step.title == "Review related memory" for step in report.plan))
 
+    def test_run_workflow_can_disable_related_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
+            store = MemoryStore(default_memory_path(root))
+            history_report = WorkflowReport(
+                task="fix parser validation failure",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed a parser failure and recommended parser validation.",
+            )
+            store.create_run(tmp, "fix parser validation failure", "run", history_report)
+
+            report = run_workflow(root, "fix parser failure", use_memory=False)
+
+            self.assertEqual(report.memory_context, [])
+            self.assertFalse(any(step.title == "Review related memory" for step in report.plan))
+
     def test_patch_proposal_describes_file_changes_and_risks(self) -> None:
         hits = [
             SearchHit(

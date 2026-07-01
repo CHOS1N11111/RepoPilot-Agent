@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
-from repopilot_agent.models import FileEditProposal
+from repopilot_agent.memory import MemoryStore, default_memory_path
+from repopilot_agent.models import FileEditProposal, PlanMetadata, WorkflowReport
 from repopilot_agent.repo_source import RepositorySource
 from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR
 from repopilot_agent.web_sessions import create_proposal_session
@@ -131,6 +132,47 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(data["repository_source"]["github_url"], "https://github.com/example/project")
                 self.assertEqual(data["repo_path"], str(root.resolve()))
                 self.assertEqual(data["relevant_files"][0]["path"], "main.py")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_run_api_can_disable_memory_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
+            store = MemoryStore(default_memory_path(root))
+            history_report = WorkflowReport(
+                task="fix parser validation failure",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed a parser failure and recommended parser validation.",
+            )
+            store.create_run(tmp, "fix parser validation failure", "run", history_report)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "task": "fix parser failure",
+                        "use_memory": False,
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/run",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["memory_context"], [])
+                self.assertFalse(any(step["title"] == "Review related memory" for step in data["plan"]))
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -488,6 +530,57 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(history["runs"][0]["id"], run_id)
                 self.assertEqual(detail["task"], "fix login behavior")
                 self.assertTrue(detail["timeline"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_history_delete_and_clear_api_manage_saved_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = MemoryStore(default_memory_path(root))
+            report = WorkflowReport(
+                task="fix parser behavior",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed parser behavior.",
+            )
+            first_id = store.create_run(tmp, "fix parser behavior", "run", report)
+            second_id = store.create_run(tmp, "fix parser validation", "run", report)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                delete_payload = json.dumps({"repo": str(root), "id": first_id}).encode("utf-8")
+                delete_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/history/delete",
+                    data=delete_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(delete_request, timeout=5) as response:
+                    deleted = json.loads(response.read().decode("utf-8"))
+
+                history_url = f"http://127.0.0.1:{server.server_port}/api/history?repo={root}&limit=5"
+                with urlopen(history_url, timeout=5) as response:
+                    history = json.loads(response.read().decode("utf-8"))
+
+                clear_payload = json.dumps({"repo": str(root)}).encode("utf-8")
+                clear_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/history/clear",
+                    data=clear_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(clear_request, timeout=5) as response:
+                    cleared = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(deleted["deleted"])
+                self.assertNotIn(first_id, [run["id"] for run in history["runs"]])
+                self.assertIn(second_id, [run["id"] for run in history["runs"]])
+                self.assertEqual(cleared["deleted"], 1)
+                self.assertEqual(store.list_runs(), [])
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

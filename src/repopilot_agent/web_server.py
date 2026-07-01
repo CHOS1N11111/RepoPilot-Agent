@@ -77,6 +77,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/repository/sync":
             self._handle_repository_sync()
             return
+        if parsed.path == "/api/history/delete":
+            self._handle_history_delete()
+            return
+        if parsed.path == "/api/history/clear":
+            self._handle_history_clear()
+            return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -119,6 +125,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_client=llm_client,
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+                use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -279,6 +286,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_client=llm_client,
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+                use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -388,6 +396,37 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(run)
 
+    def _handle_history_delete(self) -> None:
+        payload = self._read_json()
+        run_id = str(payload.get("id") or "").strip()
+        if not run_id:
+            self._send_json({"error": "id is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        repo_source = self._resolve_payload_repository_or_error(payload, clone_if_missing=False)
+        if repo_source is None:
+            return
+        try:
+            deleted = self._memory(repo_source.local_path).delete_run(run_id)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if not deleted:
+            self._send_json({"error": "Run not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_json({"deleted": True, "id": run_id, "repository_source": repo_source.to_dict()})
+
+    def _handle_history_clear(self) -> None:
+        payload = self._read_json()
+        repo_source = self._resolve_payload_repository_or_error(payload, clone_if_missing=False)
+        if repo_source is None:
+            return
+        try:
+            deleted_count = self._memory(repo_source.local_path).clear_runs()
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json({"deleted": deleted_count, "repository_source": repo_source.to_dict()})
+
     def _serve_static(self, path: str) -> None:
         target = "index.html" if path in {"", "/"} else path.lstrip("/")
         file_path = (STATIC_DIR / target).resolve()
@@ -420,20 +459,25 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
     def _memory(self, repo: str | Path) -> MemoryStore:
         return MemoryStore(default_memory_path(repo))
 
-    def _resolve_payload_repository_or_error(self, payload: dict[str, Any]) -> Any | None:
+    def _resolve_payload_repository_or_error(
+        self,
+        payload: dict[str, Any],
+        clone_if_missing: bool = True,
+    ) -> Any | None:
         try:
-            return self._resolve_payload_repository(payload)
+            return self._resolve_payload_repository(payload, clone_if_missing=clone_if_missing)
         except (ValueError, FileNotFoundError) as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
         return None
 
-    def _resolve_payload_repository(self, payload: dict[str, Any]) -> Any:
+    def _resolve_payload_repository(self, payload: dict[str, Any], clone_if_missing: bool = True) -> Any:
         return resolve_repository_reference(
             repo=payload.get("repo") or ".",
             repo_source=str(payload.get("repo_source") or "auto"),
             github_url=str(payload.get("github_url") or ""),
+            clone_if_missing=clone_if_missing,
         )
 
     def _resolve_query_repository(self, params: dict[str, list[str]], clone_if_missing: bool = True) -> Any:
@@ -448,6 +492,13 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 def _first(params: dict[str, list[str]], name: str, default: str) -> str:
     values = params.get(name)
     return values[0] if values else default
+
+
+def _payload_use_memory(payload: dict[str, Any]) -> bool:
+    value = payload.get("use_memory", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

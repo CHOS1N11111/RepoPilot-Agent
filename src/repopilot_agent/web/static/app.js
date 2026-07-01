@@ -29,6 +29,7 @@ $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
 $("generateDelivery").addEventListener("click", generateDelivery);
 $("loadHistory").addEventListener("click", loadHistory);
+$("clearHistory").addEventListener("click", clearHistory);
 $("refreshAll").addEventListener("click", async () => {
   await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
 });
@@ -120,6 +121,7 @@ function buildWorkflowPayload() {
     base_url: $("baseUrl").value.trim(),
     api_key: $("apiKey").value,
     no_llm_fallback: $("disableFallback").checked,
+    use_memory: !$("disableMemory").checked,
   };
 }
 
@@ -192,6 +194,47 @@ async function loadHistoryDetail(runId) {
     renderHistoryDetail(data);
   } catch (error) {
     $("historyDetail").innerHTML = item(`Run detail unavailable: ${escapeHtml(error.message)}`);
+  }
+}
+
+async function deleteHistoryRun(runId) {
+  const confirmed = window.confirm("Delete this saved run from local memory?");
+  if (!confirmed) {
+    return;
+  }
+  setStatus("Deleting saved run...");
+  try {
+    const data = await postJson("/api/history/delete", {
+      ...buildRepositoryPayload(),
+      id: runId,
+    });
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    $("historyDetail").innerHTML = "";
+    await loadHistory();
+    setStatus("Saved run deleted.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function clearHistory() {
+  const confirmed = window.confirm("Clear all saved runs for this repository?");
+  if (!confirmed) {
+    return;
+  }
+  setStatus("Clearing history...");
+  try {
+    const data = await postJson("/api/history/clear", buildRepositoryPayload());
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    $("historyDetail").innerHTML = "";
+    await loadHistory();
+    setStatus(`Cleared ${data.deleted || 0} saved run(s).`);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
   }
 }
 
@@ -381,6 +424,7 @@ function renderHistory(runs) {
       <div class="toolbar">
         <button class="secondary" data-history-id="${escapeHtml(run.id)}">Open</button>
         <button class="secondary" data-task="${escapeHtml(run.task)}">Use as task</button>
+        <button class="secondary danger-button" data-history-delete="${escapeHtml(run.id)}">Delete</button>
       </div>
     </div>`)
     .join("");
@@ -559,6 +603,10 @@ document.addEventListener("click", (event) => {
     setStatus("Task loaded into input.");
     return;
   }
+  if (target.matches("[data-history-delete]")) {
+    deleteHistoryRun(target.dataset.historyDelete || "");
+    return;
+  }
   if (target.matches("[data-history-id]")) {
     loadHistoryDetail(target.dataset.historyId || "");
   }
@@ -572,7 +620,7 @@ function buildLlmInputPreview(report, payload) {
     .slice(0, 5)
     .map((hit) => `Path: ${hit.path}\nScore: ${hit.score}\nReasons: ${hit.reasons.join(", ")}\nPreview:\n${hit.preview}`)
     .join("\n\n---\n\n");
-  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nModel: ${payload.model || "(default)"}\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
+  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nUse memory: ${payload.use_memory}\nModel: ${payload.model || "(default)"}\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
 }
 
 function buildLlmOutputPreview(report) {

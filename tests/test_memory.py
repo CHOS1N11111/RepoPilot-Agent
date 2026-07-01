@@ -101,6 +101,37 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertNotIn("SECRET_PROMPT", str(results[0]))
             self.assertNotIn("SECRET_OUTPUT", str(results[0]))
 
+    def test_delete_and_clear_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.sqlite3"
+            store = MemoryStore(db_path)
+            report = WorkflowReport(
+                task="fix parser behavior",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed parser behavior.",
+                validation=[
+                    ValidationResult(
+                        command="python -m unittest tests.test_parser",
+                        allowed=True,
+                        exit_code=0,
+                        stdout="ok",
+                        stderr="",
+                    )
+                ],
+            )
+
+            first_id = store.create_run(tmp, "fix parser behavior", "run", report)
+            second_id = store.create_run(tmp, "fix parser validation", "run", report)
+
+            self.assertTrue(store.delete_run(first_id))
+            self.assertIsNone(store.get_run(first_id))
+            self.assertIsNotNone(store.get_run(second_id))
+            self.assertFalse(store.delete_run("missing"))
+            self.assertEqual(store.clear_runs(), 1)
+            self.assertEqual(store.list_runs(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

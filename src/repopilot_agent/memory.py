@@ -216,6 +216,27 @@ class MemoryStore:
         data["validation"] = [_row_to_validation(row) for row in validation]
         return data
 
+    def delete_run(self, run_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return False
+            conn.execute("DELETE FROM validation_results WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM llm_traces WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM proposals WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        return True
+
+    def clear_runs(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM runs").fetchone()
+            count = int(row["count"] if row else 0)
+            conn.execute("DELETE FROM validation_results")
+            conn.execute("DELETE FROM llm_traces")
+            conn.execute("DELETE FROM proposals")
+            conn.execute("DELETE FROM runs")
+        return count
+
     def find_related_runs(
         self,
         task: str,
