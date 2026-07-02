@@ -263,6 +263,15 @@ When the proposal looks correct:
 
 RepoPilot does not commit, push, or open pull requests automatically.
 
+If you want to undo the applied proposal before committing:
+
+1. Click `Revert Applied Proposal`.
+2. Confirm the browser prompt.
+3. RepoPilot restores files from the internal pre-apply rollback snapshot.
+4. Open the Diff tab again to confirm the working tree returned to the expected state.
+
+Rollback is intentionally cautious. If a file was changed again after the proposal was applied, RepoPilot refuses to revert it so it does not overwrite your manual work.
+
 ## Step 10: Repair Failed Validation
 
 If validation fails, RepoPilot builds bounded validation feedback:
@@ -389,11 +398,13 @@ Use this sequence when you want to verify the project manually:
 
 7. Apply only if the diff is expected.
 
-8. Run validation and inspect the final Git diff.
+8. Test `Revert Applied Proposal` once on a low-risk documentation change.
 
-9. Generate delivery text.
+9. Run validation and inspect the final Git diff.
 
-10. Commit and push manually when you are satisfied.
+10. Generate delivery text.
+
+11. Commit and push manually when you are satisfied.
 
 ## Troubleshooting
 

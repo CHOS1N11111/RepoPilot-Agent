@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.models import FileEditProposal
-from repopilot_agent.patch_apply import apply_file_edits
+from repopilot_agent.patch_apply import apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from repopilot_agent.safety import SafetyCheckError, check_file_edits
 
 
@@ -105,6 +105,76 @@ class SafetyCheckTests(unittest.TestCase):
             self.assertTrue(result.applied)
             self.assertTrue(result.safety_check.ok)
             self.assertEqual(target.read_text(encoding="utf-8"), "new notes\n")
+
+    def test_rollback_restores_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "notes.txt"
+            target.write_text("old notes\n", encoding="utf-8")
+            edits = [FileEditProposal(path="notes.txt", new_content="new notes\n", rationale="Update notes.")]
+
+            snapshots = capture_file_snapshots(root, edits)
+            apply_file_edits(root, edits, task="update notes", allowed_paths=["notes.txt"])
+            result = revert_file_snapshots(root, snapshots)
+
+            self.assertTrue(result.reverted)
+            self.assertEqual(result.restored_files, ["notes.txt"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "old notes\n")
+
+    def test_rollback_deletes_file_created_by_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "notes.txt"
+            edits = [FileEditProposal(path="notes.txt", new_content="new notes\n", rationale="Add notes.")]
+
+            snapshots = capture_file_snapshots(root, edits)
+            apply_file_edits(root, edits, task="add notes", allowed_paths=["notes.txt"])
+            result = revert_file_snapshots(root, snapshots)
+
+            self.assertTrue(result.reverted)
+            self.assertEqual(result.deleted_files, ["notes.txt"])
+            self.assertFalse(target.exists())
+
+    def test_rollback_blocks_when_file_changed_after_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "notes.txt"
+            target.write_text("old notes\n", encoding="utf-8")
+            edits = [FileEditProposal(path="notes.txt", new_content="new notes\n", rationale="Update notes.")]
+
+            snapshots = capture_file_snapshots(root, edits)
+            apply_file_edits(root, edits, task="update notes", allowed_paths=["notes.txt"])
+            target.write_text("manual notes\n", encoding="utf-8")
+
+            with self.assertRaises(RuntimeError):
+                revert_file_snapshots(root, snapshots)
+            self.assertEqual(target.read_text(encoding="utf-8"), "manual notes\n")
+
+    def test_rollback_preflight_prevents_partial_revert(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            first.write_text("old first\n", encoding="utf-8")
+            second.write_text("old second\n", encoding="utf-8")
+            edits = [
+                FileEditProposal(path="first.txt", new_content="new first\n", rationale="Update first."),
+                FileEditProposal(path="second.txt", new_content="new second\n", rationale="Update second."),
+            ]
+
+            snapshots = capture_file_snapshots(root, edits)
+            apply_file_edits(
+                root,
+                edits,
+                task="update first second",
+                allowed_paths=["first.txt", "second.txt"],
+            )
+            second.write_text("manual second\n", encoding="utf-8")
+
+            with self.assertRaises(RuntimeError):
+                revert_file_snapshots(root, snapshots)
+            self.assertEqual(first.read_text(encoding="utf-8"), "new first\n")
+            self.assertEqual(second.read_text(encoding="utf-8"), "manual second\n")
 
 
 if __name__ == "__main__":

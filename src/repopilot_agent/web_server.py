@@ -17,7 +17,7 @@ from .github_tools import inspect_github_repository
 from .llm.base import LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
-from .patch_apply import apply_file_edits
+from .patch_apply import apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from .repo_source import resolve_repository_reference, sync_repository_reference
 from .safety import SafetyCheckError
 from .validation_feedback import build_validation_feedback
@@ -71,6 +71,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/apply":
             self._handle_apply()
+            return
+        if parsed.path == "/api/revert":
+            self._handle_revert()
             return
         if parsed.path == "/api/repair/propose":
             self._handle_repair_propose()
@@ -167,6 +170,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Proposal has already been applied."}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
+            rollback_snapshot = capture_file_snapshots(session.repo_path, session.file_edits)
             result = apply_file_edits(
                 session.repo_path,
                 session.file_edits,
@@ -174,7 +178,16 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 allowed_paths=session.allowed_paths,
             )
             session.applied = True
+            session.reverted = False
+            session.rollback_snapshot = rollback_snapshot if result.applied else []
             append_timeline(session, "apply", "done", result.message)
+            if session.rollback_snapshot:
+                append_timeline(
+                    session,
+                    "rollback",
+                    "ready",
+                    f"Rollback snapshot captured for {len(session.rollback_snapshot)} file(s).",
+                )
             if session.validation_commands:
                 validation = run_validation(session.repo_path, session.validation_commands)
                 session.validation = validation
@@ -221,13 +234,66 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["validation_feedback"] = (
             asdict(session.validation_feedback) if session.validation_feedback else None
         )
-        data["timeline"] = session.to_public_dict()["timeline"]
+        public_session = session.to_public_dict()
+        data["timeline"] = public_session["timeline"]
+        data["rollback_available"] = public_session["rollback_available"]
+        data["reverted"] = public_session["reverted"]
         try:
             self._memory(session.repo_path).mark_proposal_applied(
                 proposal_id,
                 session.validation,
                 data["timeline"],
             )
+        except Exception as exc:
+            data["memory_error"] = str(exc)
+        self._send_json(data)
+
+    def _handle_revert(self) -> None:
+        payload = self._read_json()
+        proposal_id = str(payload.get("proposal_id") or "").strip()
+        if not proposal_id:
+            self._send_json({"error": "proposal_id is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        session = get_proposal_session(proposal_id)
+        if session is None:
+            self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not session.applied:
+            self._send_json({"error": "Proposal is not currently applied."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if session.reverted or not session.rollback_snapshot:
+            self._send_json({"error": "No rollback snapshot is available."}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            result = revert_file_snapshots(session.repo_path, session.rollback_snapshot)
+            session.applied = False
+            session.reverted = True
+            session.validation_feedback = None
+            append_timeline(session, "rollback", "done", result.message)
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            append_timeline(session, "rollback", "blocked", str(exc))
+            self._send_json(
+                {
+                    "error": str(exc),
+                    "timeline": session.to_public_dict()["timeline"],
+                    "rollback_available": session.to_public_dict()["rollback_available"],
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        data = result.to_dict()
+        public_session = session.to_public_dict()
+        data["proposal_id"] = proposal_id
+        data["timeline"] = public_session["timeline"]
+        data["rollback_available"] = public_session["rollback_available"]
+        data["reverted"] = public_session["reverted"]
+        try:
+            self._memory(session.repo_path).mark_proposal_reverted(proposal_id, data["timeline"])
         except Exception as exc:
             data["memory_error"] = str(exc)
         self._send_json(data)
@@ -241,6 +307,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         session = get_proposal_session(proposal_id)
         if session is None:
             self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if session.reverted:
+            self._send_json({"error": "Proposal has been reverted."}, status=HTTPStatus.BAD_REQUEST)
             return
         if session.validation_feedback is None:
             self._send_json({"error": "No validation feedback is available for this proposal."}, status=HTTPStatus.BAD_REQUEST)

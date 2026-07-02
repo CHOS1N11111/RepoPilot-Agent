@@ -58,6 +58,7 @@ flowchart LR
 - 📌 Pinned memory so users can prioritize important prior runs during planning.
 - 🛡️ LLM self-review for proposed diffs before human approval.
 - 🔐 Server-side proposal sessions so the browser applies proposals by `proposal_id`, not raw edits.
+- 🧯 Rollback snapshots for reverting applied proposal edits without using destructive Git commands.
 - 🧪 Validation command allowlist for safer test and lint execution.
 - 🛠️ Validation feedback loop for failed tests, suspected files, and repair proposals.
 - 🌿 Git workflow awareness for branch state, remotes, changes, diff stats, commit messages, and PR drafts.
@@ -74,7 +75,7 @@ flowchart LR
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
 | 🧠 Memory              | Retrieves related and pinned local run history and feeds concise lessons into planning.                |
-| 🖐️ Web approval      | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID.          |
+| 🖐️ Web approval      | Stores proposals server-side, previews diffs, applies approved proposals, and supports rollback.      |
 | 🧪 Validation          | Recommends commands, runs allowlisted checks, analyzes failures, and prepares repair context.         |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
@@ -90,7 +91,7 @@ src/repopilot_agent/
   search.py             lightweight relevance search
   planner.py            deterministic and LLM planning
   patch_proposer.py     patch proposal and LLM patch review
-  patch_apply.py        protected file edit application
+  patch_apply.py        protected file edit application and rollback snapshots
   safety.py             structured pre-apply safety checks
   workflow.py           end-to-end local workflow
   validator.py          allowlisted validation runner
@@ -160,6 +161,7 @@ The web UI supports:
 - 🕒 Agent timeline showing scan, search, plan, proposal, review, approval, apply, and validation events.
 - 🧾 Proposed diff preview before file writes.
 - 🖐️ Human-approved patch application by server-side `proposal_id`.
+- Rollback controls for reverting applied proposal edits from an internal pre-apply snapshot.
 - Validation feedback panel with suspected files, bounded failure excerpts, repair steps, and repair proposal generation.
 - 📦 Delivery draft generation for commit message and PR body preparation.
 - 🔗 GitHub issue/PR/review/check display.
@@ -322,6 +324,7 @@ RepoPilot is intentionally approval-first:
 
 - ✅ It previews proposed diffs before writing files.
 - 🔐 It applies only server-stored proposal edits by `proposal_id`.
+- 🧯 It captures pre-apply rollback snapshots and refuses rollback if files changed again after apply.
 - 🚧 It blocks repository escapes and sensitive paths such as `.git`, `.env`, and `log.md`.
 - 🛡️ It runs structured safety checks for duplicate edits, unapproved paths, empty overwrites, large deletions, repeated generated content, and weak task relevance.
 - 🧪 It runs validation commands only through an allowlist.
@@ -359,4 +362,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, validation feedback and repair proposal generation, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, rollback snapshots, validation planning, validation runner, validation feedback and repair proposal generation, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

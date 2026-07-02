@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from .models import FileEditProposal, ValidationFeedback, ValidationResult
+from .patch_apply import FileRollbackSnapshot
 
 
 @dataclass(frozen=True)
@@ -28,16 +29,21 @@ class ProposalSession:
     allowed_paths: list[str] = field(default_factory=list)
     timeline: list[TimelineEvent] = field(default_factory=list)
     applied: bool = False
+    reverted: bool = False
+    rollback_snapshot: list[FileRollbackSnapshot] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
+        rollback_available = bool(self.applied and not self.reverted and self.rollback_snapshot)
         return {
             "proposal_id": self.proposal_id,
             "repo_path": self.repo_path,
             "task": self.task,
             "created_at": self.created_at,
             "applied": self.applied,
+            "reverted": self.reverted,
+            "rollback_available": rollback_available,
             "allowed_paths": self.allowed_paths,
             "timeline": [asdict(event) for event in self.timeline],
             "validation": [asdict(result) for result in self.validation],

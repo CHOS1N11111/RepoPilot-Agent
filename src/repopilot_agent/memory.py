@@ -178,6 +178,18 @@ class MemoryStore:
                     ),
                 )
 
+    def mark_proposal_reverted(
+        self,
+        proposal_id: str,
+        timeline: list[dict[str, Any]],
+    ) -> None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT run_id FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
+            if row is None:
+                return
+            run_id = str(row["run_id"])
+            conn.execute("UPDATE runs SET applied = 0, timeline_json = ? WHERE id = ?", (_json(timeline), run_id))
+
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

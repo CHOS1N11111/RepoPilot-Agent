@@ -3,6 +3,7 @@ const state = {
   github: null,
   proposalId: null,
   repairParentId: null,
+  rollbackAvailable: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -24,6 +25,7 @@ $("repoSource").addEventListener("change", updateRepositorySourceUi);
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
 $("applyProposal").addEventListener("click", applyProposal);
+$("revertProposal").addEventListener("click", revertProposal);
 $("syncRepository").addEventListener("click", syncRepository);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
@@ -102,10 +104,52 @@ async function applyProposal() {
     $("validationList").innerHTML = renderValidation(result.validation || []);
     $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback);
     state.repairParentId = result.validation_feedback ? state.proposalId : null;
+    state.rollbackAvailable = Boolean(result.rollback_available);
     $("generateRepairProposal").disabled = !state.repairParentId;
+    $("revertProposal").disabled = !state.rollbackAvailable;
+    $("rollbackStatus").textContent = state.rollbackAvailable
+      ? "Rollback snapshot available for this applied proposal."
+      : "No rollback snapshot available.";
     renderTimeline(result.timeline || []);
     $("applyProposal").disabled = true;
     setStatus(result.message || "Proposal applied.");
+    await loadDiff(false);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function revertProposal() {
+  if (!state.proposalId || !state.rollbackAvailable) {
+    setStatus("No applied proposal can be reverted.");
+    return;
+  }
+  const confirmed = window.confirm(`Revert applied proposal ${state.proposalId} from its rollback snapshot?`);
+  if (!confirmed) {
+    return;
+  }
+
+  setStatus("Reverting applied proposal...");
+  try {
+    const result = await postJson("/api/revert", {
+      proposal_id: state.proposalId,
+    });
+    if (result.error) {
+      if (result.timeline) {
+        renderTimeline(result.timeline);
+      }
+      throw new Error(result.error);
+    }
+    $("diffOutput").textContent = result.diff || "No diff.";
+    state.rollbackAvailable = Boolean(result.rollback_available);
+    state.repairParentId = null;
+    $("revertProposal").disabled = true;
+    $("generateRepairProposal").disabled = true;
+    $("applyProposal").disabled = !state.proposalId || !state.lastReport?.patch_proposal?.apply_ready || !(state.lastReport?.patch_proposal?.file_edits || []).length;
+    $("rollbackStatus").textContent = "Applied proposal was reverted from its rollback snapshot.";
+    $("validationFeedbackList").innerHTML = renderValidationFeedback(null);
+    renderTimeline(result.timeline || []);
+    setStatus(result.message || "Proposal reverted.");
     await loadDiff(false);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
@@ -286,6 +330,7 @@ async function clearHistory() {
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
   state.repairParentId = report.validation_feedback && state.proposalId ? state.proposalId : null;
+  state.rollbackAvailable = Boolean(report.rollback_available);
   updateRepositorySourceStatus(report.repository_source);
   $("filesScanned").textContent = report.files_scanned;
   $("planSource").textContent = sourceLabel(report.plan_metadata);
@@ -304,6 +349,10 @@ function renderReport(report, payload) {
   );
   $("proposedDiffOutput").textContent = report.patch_proposal?.proposed_diff || "No proposed diff. Use LLM proposal generation for apply-ready edits.";
   $("applyProposal").disabled = !state.proposalId || !report.patch_proposal?.apply_ready || !(report.patch_proposal.file_edits || []).length;
+  $("revertProposal").disabled = !state.rollbackAvailable;
+  $("rollbackStatus").textContent = state.proposalId
+    ? "Proposal is stored server-side; rollback becomes available after apply."
+    : "No rollback snapshot available.";
   $("validationList").innerHTML = renderValidation(report.validation);
   $("validationFeedbackList").innerHTML = renderValidationFeedback(report.validation_feedback);
   $("generateRepairProposal").disabled = !state.repairParentId;

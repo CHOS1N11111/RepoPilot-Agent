@@ -285,8 +285,60 @@ class WebServerTests(unittest.TestCase):
                 self.assertTrue(data["applied"])
                 self.assertEqual(data["changed_files"], ["notes.txt"])
                 self.assertEqual(data["validation"][0]["command"], "python -m unittest discover -s tests")
+                self.assertTrue(data["rollback_available"])
                 self.assertTrue(any(event["step"] == "apply" for event in data["timeline"]))
+                self.assertTrue(any(event["step"] == "rollback" and event["status"] == "ready" for event in data["timeline"]))
                 self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "new\n")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_revert_api_restores_applied_proposal_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[
+                    FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                apply_payload = json.dumps({"proposal_id": session.proposal_id}).encode("utf-8")
+                apply_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(apply_request, timeout=5) as response:
+                    applied = json.loads(response.read().decode("utf-8"))
+
+                revert_payload = json.dumps({"proposal_id": session.proposal_id}).encode("utf-8")
+                revert_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/revert",
+                    data=revert_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(revert_request, timeout=5) as response:
+                    reverted = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(applied["rollback_available"])
+                self.assertTrue(reverted["reverted"])
+                self.assertFalse(reverted["rollback_available"])
+                self.assertEqual(reverted["restored_files"], ["notes.txt"])
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "old\n")
+                self.assertTrue(any(event["step"] == "rollback" and event["status"] == "done" for event in reverted["timeline"]))
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
