@@ -243,6 +243,18 @@ def _print_report(report) -> None:
         print("- No validation commands were provided.")
     print()
 
+    print("Validation feedback")
+    if report.validation_feedback:
+        feedback = report.validation_feedback
+        print(feedback.summary)
+        if feedback.suspected_files:
+            print(f"Suspected files: {', '.join(feedback.suspected_files)}")
+        for step in feedback.repair_steps:
+            print(f"- {step}")
+    else:
+        print("- No validation failures detected.")
+    print()
+
     print("Summary")
     print(report.summary)
 

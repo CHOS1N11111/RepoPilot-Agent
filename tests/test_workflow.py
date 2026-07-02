@@ -128,6 +128,25 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             self.assertIn("RepoPilot analyzed the task", report.summary)
             self.assertIn("Prepared file-level change proposals", report.summary)
 
+    def test_run_workflow_returns_validation_feedback_for_failed_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def login():\n    return False\n", encoding="utf-8")
+            (root / "test_fail.py").write_text(
+                "import unittest\n\n"
+                "class LoginTests(unittest.TestCase):\n"
+                "    def test_login(self):\n"
+                "        self.assertTrue(False)\n",
+                encoding="utf-8",
+            )
+
+            report = run_workflow(root, "fix login behavior", validation_commands=["python -m unittest test_fail"])
+
+            self.assertIsNotNone(report.validation_feedback)
+            self.assertIn("1 validation command", report.validation_feedback.summary)
+            self.assertIn("test_fail.py", report.validation_feedback.suspected_files)
+            self.assertIn("Repair the repository", report.validation_feedback.repair_task)
+
     def test_run_workflow_reuses_related_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

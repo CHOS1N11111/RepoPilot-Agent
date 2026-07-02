@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from .models import FileEditProposal, ValidationResult
+from .models import FileEditProposal, ValidationFeedback, ValidationResult
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ class ProposalSession:
     timeline: list[TimelineEvent] = field(default_factory=list)
     applied: bool = False
     validation: list[ValidationResult] = field(default_factory=list)
+    validation_feedback: ValidationFeedback | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +41,7 @@ class ProposalSession:
             "allowed_paths": self.allowed_paths,
             "timeline": [asdict(event) for event in self.timeline],
             "validation": [asdict(result) for result in self.validation],
+            "validation_feedback": asdict(self.validation_feedback) if self.validation_feedback else None,
         }
 
 

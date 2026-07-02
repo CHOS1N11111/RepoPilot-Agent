@@ -70,6 +70,25 @@ class ValidationPlan:
 
 
 @dataclass(frozen=True)
+class ValidationFailureDetail:
+    command: str
+    exit_code: int | None
+    output_excerpt: str
+    suspected_files: list[str]
+    signals: list[str]
+
+
+@dataclass(frozen=True)
+class ValidationFeedback:
+    summary: str
+    failures: list[ValidationFailureDetail]
+    suspected_files: list[str]
+    repair_steps: list[str]
+    repair_task: str
+    source: str = "rules"
+
+
+@dataclass(frozen=True)
 class MemoryContextItem:
     run_id: str
     task: str
@@ -318,6 +337,7 @@ class WorkflowReport:
     patch_review: PatchReview | None = None
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
+    validation_feedback: ValidationFeedback | None = None
     memory_context: list[MemoryContextItem] = field(default_factory=list)
     summary: str = ""
 

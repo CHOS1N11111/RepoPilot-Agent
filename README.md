@@ -23,6 +23,7 @@ Task or GitHub issue
 -> human approval
 -> protected file application
 -> validation rerun
+-> validation feedback and repair proposal
 -> Git diff and PR draft support
 ```
 
@@ -39,7 +40,10 @@ flowchart LR
     H -->|Approve| I["Protected apply"]
     H -->|Reject| E
     I --> J["Validation rerun"]
-    J --> K["Git diff and PR draft"]
+    J --> L{"Validation passed?"}
+    L -->|No| R["Repair proposal"]
+    R --> G
+    L -->|Yes| K["Git diff and PR draft"]
 ```
 
 ## Highlights
@@ -55,6 +59,7 @@ flowchart LR
 - 🛡️ LLM self-review for proposed diffs before human approval.
 - 🔐 Server-side proposal sessions so the browser applies proposals by `proposal_id`, not raw edits.
 - 🧪 Validation command allowlist for safer test and lint execution.
+- 🛠️ Validation feedback loop for failed tests, suspected files, and repair proposals.
 - 🌿 Git workflow awareness for branch state, remotes, changes, diff stats, commit messages, and PR drafts.
 - 🔗 GitHub awareness for open issues, pull requests, reviews, and CI/check status.
 - 📦 Delivery draft panel for suggested commit messages, validation notes, and PR-ready text.
@@ -70,7 +75,7 @@ flowchart LR
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
 | 🧠 Memory              | Retrieves related and pinned local run history and feeds concise lessons into planning.                |
 | 🖐️ Web approval      | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID.          |
-| 🧪 Validation          | Recommends narrow validation commands, runs allowlisted commands, and reports command results.        |
+| 🧪 Validation          | Recommends commands, runs allowlisted checks, analyzes failures, and prepares repair context.         |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -90,6 +95,7 @@ src/repopilot_agent/
   workflow.py           end-to-end local workflow
   validator.py          allowlisted validation runner
   validation_planner.py recommended validation command planner
+  validation_feedback.py validation failure analysis and repair task builder
   memory.py             SQLite history and related-run retrieval
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
@@ -152,6 +158,7 @@ The web UI supports:
 - 🕒 Agent timeline showing scan, search, plan, proposal, review, approval, apply, and validation events.
 - 🧾 Proposed diff preview before file writes.
 - 🖐️ Human-approved patch application by server-side `proposal_id`.
+- Validation feedback panel with suspected files, bounded failure excerpts, repair steps, and repair proposal generation.
 - 📦 Delivery draft generation for commit message and PR body preparation.
 - 🔗 GitHub issue/PR/review/check display.
 - 🌿 Working tree and staged diff display.
@@ -236,6 +243,16 @@ RepoPilot recommends validation before approved edits are applied.
 - JavaScript and TypeScript changes recommend `npm test` only when `package.json` exists.
 - Documentation-only changes produce manual review notes instead of unsafe commands.
 - Recommended commands are still run through the validation allowlist.
+
+## Validation Feedback Loop
+
+When validation fails, RepoPilot builds a bounded failure context instead of passing full logs around.
+
+- Failed commands are summarized with exit code, extracted signals, and truncated output excerpts.
+- Python and JavaScript-like file paths are extracted from tracebacks and command targets.
+- Repair steps are generated from common signals such as assertion failures, import failures, syntax errors, and rejected commands.
+- The web UI can generate a follow-up repair proposal from the failed validation context.
+- Repair proposals still require human approval and use the same protected apply path as normal proposals.
 
 ## Git And GitHub
 
@@ -327,6 +344,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
+- 🛠️ Add multi-attempt repair policies with explicit retry budgets.
 - 🚀 Add GitHub pull request creation after explicit user approval.
 - 🧠 Add per-project memory policies and richer forgetting controls.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
@@ -339,4 +357,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, validation feedback and repair proposal generation, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

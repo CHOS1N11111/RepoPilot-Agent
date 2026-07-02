@@ -15,6 +15,7 @@ from .planner import create_plan, create_plan_with_optional_llm
 from .safety import check_file_edits
 from .scanner import scan_repository
 from .search import search_files
+from .validation_feedback import build_validation_feedback
 from .validation_planner import build_validation_plan
 from .validator import run_validation
 
@@ -106,6 +107,7 @@ def run_workflow(
         )
 
     validation = run_validation(root, validation_commands or [])
+    validation_feedback = build_validation_feedback(validation, task=task, repo_path=root)
     summary = _build_summary(
         task,
         files_scanned=len(files),
@@ -125,6 +127,7 @@ def run_workflow(
         patch_review=patch_review,
         llm_traces=llm_traces,
         validation=validation,
+        validation_feedback=validation_feedback,
         memory_context=related_memory,
         summary=summary,
     )

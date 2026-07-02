@@ -2,6 +2,7 @@ const state = {
   lastReport: null,
   github: null,
   proposalId: null,
+  repairParentId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +29,7 @@ $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
 $("generateDelivery").addEventListener("click", generateDelivery);
+$("generateRepairProposal").addEventListener("click", generateRepairProposal);
 $("loadHistory").addEventListener("click", loadHistory);
 $("clearHistory").addEventListener("click", clearHistory);
 $("refreshAll").addEventListener("click", async () => {
@@ -98,10 +100,35 @@ async function applyProposal() {
     }
     $("diffOutput").textContent = result.diff || "No diff.";
     $("validationList").innerHTML = renderValidation(result.validation || []);
+    $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback);
+    state.repairParentId = result.validation_feedback ? state.proposalId : null;
+    $("generateRepairProposal").disabled = !state.repairParentId;
     renderTimeline(result.timeline || []);
     $("applyProposal").disabled = true;
     setStatus(result.message || "Proposal applied.");
     await loadDiff(false);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function generateRepairProposal() {
+  if (!state.repairParentId) {
+    setStatus("No validation feedback is available for repair.");
+    return;
+  }
+  setStatus("Generating repair proposal...");
+  try {
+    const report = await postJson("/api/repair/propose", {
+      ...buildWorkflowPayload(),
+      proposal_id: state.repairParentId,
+    });
+    if (report.error) {
+      throw new Error(report.error);
+    }
+    state.lastReport = report;
+    renderReport(report, buildWorkflowPayload());
+    setStatus("Repair proposal ready for review.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -258,6 +285,7 @@ async function clearHistory() {
 
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
+  state.repairParentId = report.validation_feedback && state.proposalId ? state.proposalId : null;
   updateRepositorySourceStatus(report.repository_source);
   $("filesScanned").textContent = report.files_scanned;
   $("planSource").textContent = sourceLabel(report.plan_metadata);
@@ -277,6 +305,8 @@ function renderReport(report, payload) {
   $("proposedDiffOutput").textContent = report.patch_proposal?.proposed_diff || "No proposed diff. Use LLM proposal generation for apply-ready edits.";
   $("applyProposal").disabled = !state.proposalId || !report.patch_proposal?.apply_ready || !(report.patch_proposal.file_edits || []).length;
   $("validationList").innerHTML = renderValidation(report.validation);
+  $("validationFeedbackList").innerHTML = renderValidationFeedback(report.validation_feedback);
+  $("generateRepairProposal").disabled = !state.repairParentId;
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);
   $("llmReview").textContent = JSON.stringify(report.patch_review || {}, null, 2);
@@ -379,6 +409,33 @@ function renderValidation(results) {
       <pre>${escapeHtml(result.stdout || result.stderr || "")}</pre>
     </div>`)
     .join("");
+}
+
+function renderValidationFeedback(feedback) {
+  if (!feedback) {
+    return item("No validation failures detected.");
+  }
+  const files = feedback.suspected_files && feedback.suspected_files.length
+    ? feedback.suspected_files.map((path) => `<li>${escapeHtml(path)}</li>`).join("")
+    : "<li>No specific file extracted.</li>";
+  const steps = (feedback.repair_steps || []).map((step) => `<li>${escapeHtml(step)}</li>`).join("");
+  const failures = (feedback.failures || [])
+    .map((failure) => `<div class="item">
+      <div class="item-title">${escapeHtml(failure.command)}
+        <span class="tag danger">${escapeHtml(failure.exit_code ?? "rejected")}</span>
+      </div>
+      <p>${escapeHtml((failure.signals || []).join(", ") || "No signals extracted.")}</p>
+      <pre>${escapeHtml(failure.output_excerpt || "")}</pre>
+    </div>`)
+    .join("");
+  return `<div class="item">
+    <div class="item-title">Failure Analysis <span class="tag danger">repair available</span></div>
+    <p>${escapeHtml(feedback.summary || "")}</p>
+    <strong>Suspected Files</strong>
+    <ul>${files}</ul>
+    <strong>Repair Steps</strong>
+    <ul>${steps || "<li>No repair steps available.</li>"}</ul>
+  </div>${failures}`;
 }
 
 function renderDelivery(data) {

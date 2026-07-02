@@ -20,6 +20,7 @@ from .memory import MemoryStore, default_memory_path
 from .patch_apply import apply_file_edits
 from .repo_source import resolve_repository_reference, sync_repository_reference
 from .safety import SafetyCheckError
+from .validation_feedback import build_validation_feedback
 from .validator import run_validation
 from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
 from .workflow import run_workflow
@@ -70,6 +71,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/apply":
             self._handle_apply()
+            return
+        if parsed.path == "/api/repair/propose":
+            self._handle_repair_propose()
             return
         if parsed.path == "/api/git/summary":
             self._handle_git_summary()
@@ -174,6 +178,11 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             if session.validation_commands:
                 validation = run_validation(session.repo_path, session.validation_commands)
                 session.validation = validation
+                session.validation_feedback = build_validation_feedback(
+                    validation,
+                    task=session.task,
+                    repo_path=session.repo_path,
+                )
                 failed = [item for item in validation if item.exit_code not in (0, None)]
                 rejected = [item for item in validation if not item.allowed]
                 if failed or rejected:
@@ -183,6 +192,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                         "warning",
                         f"Validation completed with {len(failed)} failed and {len(rejected)} rejected command(s).",
                     )
+                    if session.validation_feedback:
+                        append_timeline(session, "repair", "available", session.validation_feedback.summary)
                 else:
                     append_timeline(session, "validation", "done", f"Ran {len(validation)} validation command(s).")
             else:
@@ -207,12 +218,100 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data = result.to_dict()
         data["proposal_id"] = proposal_id
         data["validation"] = [asdict(item) for item in session.validation]
+        data["validation_feedback"] = (
+            asdict(session.validation_feedback) if session.validation_feedback else None
+        )
         data["timeline"] = session.to_public_dict()["timeline"]
         try:
             self._memory(session.repo_path).mark_proposal_applied(
                 proposal_id,
                 session.validation,
                 data["timeline"],
+            )
+        except Exception as exc:
+            data["memory_error"] = str(exc)
+        self._send_json(data)
+
+    def _handle_repair_propose(self) -> None:
+        payload = self._read_json()
+        proposal_id = str(payload.get("proposal_id") or "").strip()
+        if not proposal_id:
+            self._send_json({"error": "proposal_id is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        session = get_proposal_session(proposal_id)
+        if session is None:
+            self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if session.validation_feedback is None:
+            self._send_json({"error": "No validation feedback is available for this proposal."}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        use_llm = bool(payload.get("use_llm"))
+        llm_client = None
+        if use_llm and payload.get("api_key"):
+            try:
+                llm_client = OpenAICompatibleClient(
+                    api_key=str(payload.get("api_key")),
+                    base_url=str(payload.get("base_url") or "") or None,
+                    model=str(payload.get("model") or "") or None,
+                )
+            except LLMError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+        repair_task = session.validation_feedback.repair_task
+        try:
+            report = run_workflow(
+                session.repo_path,
+                repair_task,
+                validation_commands=[],
+                use_llm=use_llm,
+                llm_client=llm_client,
+                llm_model=str(payload.get("model") or "") or None,
+                allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+                use_memory=_payload_use_memory(payload),
+            )
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        repair_proposal_id = None
+        timeline = build_report_timeline(report)
+        proposal = report.patch_proposal
+        if proposal and proposal.file_edits and proposal.apply_ready:
+            validation_commands = session.validation_commands or (
+                proposal.validation_plan.commands if proposal.validation_plan else []
+            )
+            repair_session = create_proposal_session(
+                repo_path=report.repo_path,
+                task=repair_task,
+                file_edits=proposal.file_edits,
+                validation_commands=validation_commands,
+                timeline=timeline,
+                allowed_paths=[file.path for file in proposal.files],
+            )
+            repair_proposal_id = repair_session.proposal_id
+            append_timeline(
+                repair_session,
+                "approval",
+                "pending",
+                f"Waiting for approval on repair proposal {repair_proposal_id}.",
+            )
+            timeline = repair_session.timeline
+
+        data = report.to_dict()
+        data["proposal_id"] = repair_proposal_id
+        data["parent_proposal_id"] = proposal_id
+        data["repair_task"] = repair_task
+        data["timeline"] = [asdict(event) for event in timeline]
+        try:
+            data["run_id"] = self._memory(report.repo_path).create_run(
+                repo_path=report.repo_path,
+                task=repair_task,
+                mode="repair",
+                report=report,
+                proposal_id=repair_proposal_id,
+                timeline=data["timeline"],
             )
         except Exception as exc:
             data["memory_error"] = str(exc)
