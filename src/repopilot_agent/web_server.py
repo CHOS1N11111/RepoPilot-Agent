@@ -83,6 +83,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history/clear":
             self._handle_history_clear()
             return
+        if parsed.path == "/api/history/pin":
+            self._handle_history_pin()
+            return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -427,6 +430,26 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"deleted": deleted_count, "repository_source": repo_source.to_dict()})
 
+    def _handle_history_pin(self) -> None:
+        payload = self._read_json()
+        run_id = str(payload.get("id") or "").strip()
+        if not run_id:
+            self._send_json({"error": "id is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        pinned = _payload_bool(payload.get("pinned"), default=True)
+        repo_source = self._resolve_payload_repository_or_error(payload, clone_if_missing=False)
+        if repo_source is None:
+            return
+        try:
+            updated = self._memory(repo_source.local_path).set_run_pinned(run_id, pinned)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if not updated:
+            self._send_json({"error": "Run not found."}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_json({"id": run_id, "pinned": pinned, "repository_source": repo_source.to_dict()})
+
     def _serve_static(self, path: str) -> None:
         target = "index.html" if path in {"", "/"} else path.lstrip("/")
         file_path = (STATIC_DIR / target).resolve()
@@ -495,7 +518,12 @@ def _first(params: dict[str, list[str]], name: str, default: str) -> str:
 
 
 def _payload_use_memory(payload: dict[str, Any]) -> bool:
-    value = payload.get("use_memory", True)
+    return _payload_bool(payload.get("use_memory"), default=True)
+
+
+def _payload_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)

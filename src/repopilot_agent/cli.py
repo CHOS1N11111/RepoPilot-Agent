@@ -177,7 +177,11 @@ def _print_report(report) -> None:
     print("Related memory")
     if report.memory_context:
         for memory in report.memory_context:
-            status = "applied" if memory.applied else "open"
+            status_parts = []
+            if memory.pinned:
+                status_parts.append("pinned")
+            status_parts.append("applied" if memory.applied else "open")
+            status = ", ".join(status_parts)
             print(f"- {memory.task} [{memory.mode}, {status}, score: {memory.score}]")
             print(f"  Summary: {memory.summary}")
             print(f"  Reasons: {', '.join(memory.reasons)}")

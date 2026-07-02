@@ -49,9 +49,11 @@ class MemoryStoreTests(unittest.TestCase):
 
             self.assertEqual(runs[0]["id"], run_id)
             self.assertEqual(runs[0]["task"], "fix parser behavior")
+            self.assertFalse(runs[0]["pinned"])
             self.assertEqual(detail["llm_traces"][0]["name"], "planner")
             self.assertIn("Budget: 9000", detail["llm_traces"][0]["context_summary"])
             self.assertEqual(detail["timeline"][0]["step"], "scan")
+            self.assertFalse(detail["pinned"])
 
     def test_find_related_runs_returns_bounded_memory_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +102,33 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(results[0].validation[0], "python -m unittest tests.test_parser: exit 0")
             self.assertNotIn("SECRET_PROMPT", str(results[0]))
             self.assertNotIn("SECRET_OUTPUT", str(results[0]))
+
+    def test_pinned_runs_are_returned_before_related_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.sqlite3"
+            store = MemoryStore(db_path)
+            report = WorkflowReport(
+                task="update docs",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed documentation updates.",
+            )
+            pinned_id = store.create_run(tmp, "document release checklist", "run", report)
+            related_id = store.create_run(tmp, "fix parser validation failure", "run", report)
+
+            self.assertTrue(store.set_run_pinned(pinned_id, True))
+            self.assertFalse(store.set_run_pinned("missing", True))
+
+            pinned = store.list_pinned_runs()
+            results = store.find_related_runs("fix parser failure", limit=2)
+
+            self.assertEqual(pinned[0].run_id, pinned_id)
+            self.assertTrue(pinned[0].pinned)
+            self.assertEqual(results[0].run_id, pinned_id)
+            self.assertTrue(results[0].pinned)
+            self.assertEqual(results[1].run_id, related_id)
+            self.assertFalse(results[1].pinned)
 
     def test_delete_and_clear_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

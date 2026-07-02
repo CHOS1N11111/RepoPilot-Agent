@@ -79,6 +79,7 @@ class MemoryContextItem:
     applied: bool
     score: int
     reasons: list[str]
+    pinned: bool = False
     validation: list[str] = field(default_factory=list)
 
 

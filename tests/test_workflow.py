@@ -146,7 +146,28 @@ class RepoPilotWorkflowTests(unittest.TestCase):
 
             self.assertTrue(report.memory_context)
             self.assertEqual(report.memory_context[0].task, "fix parser validation failure")
-            self.assertTrue(any(step.title == "Review related memory" for step in report.plan))
+            self.assertTrue(any(step.title == "Review pinned and related memory" for step in report.plan))
+
+    def test_run_workflow_prioritizes_pinned_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
+            store = MemoryStore(default_memory_path(root))
+            history_report = WorkflowReport(
+                task="document release checklist",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed release documentation.",
+            )
+            pinned_id = store.create_run(tmp, "document release checklist", "run", history_report)
+            store.set_run_pinned(pinned_id, True)
+
+            report = run_workflow(root, "fix parser failure")
+
+            self.assertTrue(report.memory_context)
+            self.assertEqual(report.memory_context[0].run_id, pinned_id)
+            self.assertTrue(report.memory_context[0].pinned)
 
     def test_run_workflow_can_disable_related_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -165,7 +186,7 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             report = run_workflow(root, "fix parser failure", use_memory=False)
 
             self.assertEqual(report.memory_context, [])
-            self.assertFalse(any(step.title == "Review related memory" for step in report.plan))
+            self.assertFalse(any(step.title == "Review pinned and related memory" for step in report.plan))
 
     def test_patch_proposal_describes_file_changes_and_risks(self) -> None:
         hits = [

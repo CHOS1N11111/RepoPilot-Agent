@@ -27,12 +27,12 @@ def create_plan(
     append_step("Inspect relevant context", f"Review likely relevant files and surrounding code: {focus}.")
     if related_memory:
         memory_summary = "; ".join(
-            f"{item.task} ({'applied' if item.applied else 'open'}, score {item.score})"
+            f"{item.task} ({'pinned, ' if item.pinned else ''}{'applied' if item.applied else 'open'}, score {item.score})"
             for item in related_memory[:3]
         )
         append_step(
-            "Review related memory",
-            f"Compare against previous related runs before changing code: {memory_summary}.",
+            "Review pinned and related memory",
+            f"Compare against selected previous runs before changing code: {memory_summary}.",
         )
 
     if any(keyword in task_lower for keyword in ("bug", "fix", "error", "fail", "broken")):

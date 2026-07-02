@@ -219,6 +219,24 @@ async function deleteHistoryRun(runId) {
   }
 }
 
+async function toggleHistoryPin(runId, pinned) {
+  setStatus(pinned ? "Pinning saved run..." : "Unpinning saved run...");
+  try {
+    const data = await postJson("/api/history/pin", {
+      ...buildRepositoryPayload(),
+      id: runId,
+      pinned,
+    });
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    await loadHistory();
+    setStatus(pinned ? "Saved run pinned." : "Saved run unpinned.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
 async function clearHistory() {
   const confirmed = window.confirm("Clear all saved runs for this repository?");
   if (!confirmed) {
@@ -278,6 +296,7 @@ function renderMemoryContext(memory) {
       return `<div class="item">
         <div class="item-title">${escapeHtml(entry.task)}
           <span class="tag">${escapeHtml(entry.mode)}</span>
+          ${entry.pinned ? '<span class="tag ok">pinned</span>' : ""}
           <span class="tag ${entry.applied ? "ok" : "warn"}">${entry.applied ? "applied" : "open"}</span>
           <span class="tag">score ${escapeHtml(entry.score)}</span>
         </div>
@@ -417,6 +436,7 @@ function renderHistory(runs) {
     .map((run) => `<div class="item">
       <div class="item-title">${escapeHtml(run.task)}
         <span class="tag">${escapeHtml(run.mode)}</span>
+        ${run.pinned ? '<span class="tag ok">pinned</span>' : ""}
         <span class="tag ${run.applied ? "ok" : "warn"}">${run.applied ? "applied" : "open"}</span>
       </div>
       <p><small>${escapeHtml(run.created_at)}</small></p>
@@ -424,6 +444,7 @@ function renderHistory(runs) {
       <div class="toolbar">
         <button class="secondary" data-history-id="${escapeHtml(run.id)}">Open</button>
         <button class="secondary" data-task="${escapeHtml(run.task)}">Use as task</button>
+        <button class="secondary" data-history-pin="${escapeHtml(run.id)}" data-history-pinned="${run.pinned ? "false" : "true"}">${run.pinned ? "Unpin" : "Pin"}</button>
         <button class="secondary danger-button" data-history-delete="${escapeHtml(run.id)}">Delete</button>
       </div>
     </div>`)
@@ -438,9 +459,10 @@ function renderHistoryDetail(run) {
     .map((result) => `<li>${escapeHtml(result.command)}: ${result.allowed ? `exit ${result.exit_code}` : "rejected"}</li>`)
     .join("");
   const traceCount = (run.llm_traces || []).length;
+  const pinnedTag = run.pinned ? ' <span class="tag ok">pinned</span>' : "";
   $("historyDetail").innerHTML = `
     <div class="item">
-      <div class="item-title">${escapeHtml(run.task)}</div>
+      <div class="item-title">${escapeHtml(run.task)}${pinnedTag}</div>
       <p>${escapeHtml(run.summary || "")}</p>
       <p><small>${escapeHtml(run.created_at)} | ${escapeHtml(run.mode)} | ${escapeHtml(run.id)}</small></p>
     </div>
@@ -605,6 +627,10 @@ document.addEventListener("click", (event) => {
   }
   if (target.matches("[data-history-delete]")) {
     deleteHistoryRun(target.dataset.historyDelete || "");
+    return;
+  }
+  if (target.matches("[data-history-pin]")) {
+    toggleHistoryPin(target.dataset.historyPin || "", target.dataset.historyPinned === "true");
     return;
   }
   if (target.matches("[data-history-id]")) {

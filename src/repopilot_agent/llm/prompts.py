@@ -47,8 +47,14 @@ def build_planner_prompt(
             "Context budget summary:",
             context_summary or "No context budget summary was provided.",
             "",
+            "Pinned memory:",
+            _format_memory_context(_filter_memory(memory_context, pinned=True), "No pinned memory was selected."),
+            "",
             "Related memory:",
-            _format_memory_context(memory_context),
+            _format_memory_context(
+                _filter_memory(memory_context, pinned=False),
+                "No related memory was found.",
+            ),
             "",
             "Relevant repository context:",
             context,
@@ -107,12 +113,20 @@ def build_patch_review_prompt(task: str, proposed_diff: str, validation_suggesti
     )
 
 
-def _format_memory_context(memory_context: list[MemoryContextItem] | None) -> str:
+def _filter_memory(memory_context: list[MemoryContextItem] | None, pinned: bool) -> list[MemoryContextItem]:
+    return [item for item in memory_context or [] if item.pinned is pinned]
+
+
+def _format_memory_context(memory_context: list[MemoryContextItem] | None, empty_message: str) -> str:
     if not memory_context:
-        return "No related memory was found."
+        return empty_message
     lines = []
     for item in memory_context[:3]:
-        status = "applied" if item.applied else "open"
+        status_parts = []
+        if item.pinned:
+            status_parts.append("pinned")
+        status_parts.append("applied" if item.applied else "open")
+        status = ", ".join(status_parts)
         reasons = "; ".join(item.reasons[:3]) or f"score {item.score}"
         validation = "; ".join(item.validation[:3]) if item.validation else "no saved validation"
         lines.append(

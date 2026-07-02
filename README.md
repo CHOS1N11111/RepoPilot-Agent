@@ -51,6 +51,7 @@ flowchart LR
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
 - 🧹 Memory controls for disabling lookup, deleting saved runs, and clearing local history.
+- 📌 Pinned memory so users can prioritize important prior runs during planning.
 - 🛡️ LLM self-review for proposed diffs before human approval.
 - 🔐 Server-side proposal sessions so the browser applies proposals by `proposal_id`, not raw edits.
 - 🧪 Validation command allowlist for safer test and lint execution.
@@ -67,7 +68,7 @@ flowchart LR
 | 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
-| 🧠 Memory              | Retrieves related local run history and feeds concise lessons into planning.                          |
+| 🧠 Memory              | Retrieves related and pinned local run history and feeds concise lessons into planning.                |
 | 🖐️ Web approval      | Stores proposals server-side, previews proposed diffs, and applies approved proposals by ID.          |
 | 🧪 Validation          | Recommends narrow validation commands, runs allowlisted commands, and reports command results.        |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
@@ -154,7 +155,7 @@ The web UI supports:
 - 📦 Delivery draft generation for commit message and PR body preparation.
 - 🔗 GitHub issue/PR/review/check display.
 - 🌿 Working tree and staged diff display.
-- History controls for opening, reusing, deleting, or clearing saved runs.
+- History controls for opening, reusing, pinning, deleting, or clearing saved runs.
 
 API keys entered in the UI are sent only to the local server for that request and are not written to disk.
 
@@ -285,15 +286,16 @@ RepoPilot stores local web workflow history in SQLite under:
 
 The memory layer records run metadata, tasks, summaries, proposal metadata, proposed diffs, LLM traces, validation results, and timeline events. API keys are not stored. The web UI exposes this through the History tab, where previous runs can be inspected or reused as new tasks.
 
-RepoPilot also reuses memory during planning. Before a new run creates a plan, it searches recent local history for related tasks and summaries, then passes a compact memory context into the deterministic planner or LLM planner.
+RepoPilot also reuses memory during planning. Before a new run creates a plan, it searches recent local history for related tasks and summaries, includes pinned runs selected by the user, then passes a compact memory context into the deterministic planner or LLM planner.
 
 Memory context is intentionally bounded and inspectable:
 
 - It includes task text, run summary, mode, applied/open status, match reasons, score, and saved validation command results.
 - It does not inject stored API keys, raw LLM outputs, raw prompts, stdout/stderr logs, or proposal diff bodies into the planner prompt.
+- Pinned runs are prioritized before ordinary related memory and appear in a separate planner prompt section.
 - If memory is missing or unavailable, RepoPilot falls back to the normal repository scan and retrieval workflow.
 - Use `--no-memory` in the CLI or Disable memory in the web UI to skip related-memory lookup for a single run.
-- Use the History tab to delete one saved run or clear the current repository history.
+- Use the History tab to pin/unpin important runs, delete one saved run, or clear the current repository history.
 
 ## Safety Model
 
@@ -326,7 +328,7 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 - 💾 Persist proposal sessions and trace history in SQLite.
 - 🧩 Add per-file approval controls before applying proposals.
 - 🚀 Add GitHub pull request creation after explicit user approval.
-- 🧠 Add pinned memory and per-project memory policies.
+- 🧠 Add per-project memory policies and richer forgetting controls.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
 - 🧪 Add benchmark tasks from real open-source issues.
@@ -337,4 +339,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, validation planning, validation runner, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

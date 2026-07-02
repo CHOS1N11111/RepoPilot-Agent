@@ -69,8 +69,8 @@ class MemoryStore:
                 """
                 INSERT INTO runs (
                     id, repo_path, task, mode, created_at, summary, proposal_id,
-                    plan_source, proposal_source, review_source, applied, timeline_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    plan_source, proposal_source, review_source, applied, pinned, timeline_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -83,6 +83,7 @@ class MemoryStore:
                     report.plan_metadata.source,
                     report.patch_proposal_metadata.source,
                     review.source if review else None,
+                    0,
                     0,
                     _json(timeline or []),
                 ),
@@ -182,7 +183,7 @@ class MemoryStore:
             rows = conn.execute(
                 """
                 SELECT id, repo_path, task, mode, created_at, summary, proposal_id,
-                       plan_source, proposal_source, review_source, applied, timeline_json
+                       plan_source, proposal_source, review_source, applied, pinned, timeline_json
                 FROM runs
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -196,7 +197,7 @@ class MemoryStore:
             run_row = conn.execute(
                 """
                 SELECT id, repo_path, task, mode, created_at, summary, proposal_id,
-                       plan_source, proposal_source, review_source, applied, timeline_json
+                       plan_source, proposal_source, review_source, applied, pinned, timeline_json
                 FROM runs
                 WHERE id = ?
                 """,
@@ -227,6 +228,14 @@ class MemoryStore:
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         return True
 
+    def set_run_pinned(self, run_id: str, pinned: bool) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return False
+            conn.execute("UPDATE runs SET pinned = ? WHERE id = ?", (int(pinned), run_id))
+        return True
+
     def clear_runs(self) -> int:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM runs").fetchone()
@@ -237,11 +246,33 @@ class MemoryStore:
             conn.execute("DELETE FROM runs")
         return count
 
+    def list_pinned_runs(self, limit: int = 5, exclude_run_id: str | None = None) -> list[MemoryContextItem]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, task, mode, created_at, summary, applied, pinned
+                FROM runs
+                WHERE pinned = 1
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            validation_by_run = _validation_by_run(conn, rows)
+
+        items: list[MemoryContextItem] = []
+        for row in rows:
+            if exclude_run_id and row["id"] == exclude_run_id:
+                continue
+            items.append(_row_to_memory_context(row, 100, ["pinned memory"], validation_by_run))
+        return items
+
     def find_related_runs(
         self,
         task: str,
         limit: int = 3,
         candidate_limit: int = 50,
+        pinned_limit: int = 3,
         exclude_run_id: str | None = None,
     ) -> list[MemoryContextItem]:
         query_tokens = _tokens(task)
@@ -249,54 +280,42 @@ class MemoryStore:
             return []
 
         with self._connect() as conn:
-            rows = conn.execute(
+            pinned_rows = conn.execute(
                 """
-                SELECT id, task, mode, created_at, summary, applied
+                SELECT id, task, mode, created_at, summary, applied, pinned
+                FROM runs
+                WHERE pinned = 1
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (pinned_limit,),
+            ).fetchall()
+            recent_rows = conn.execute(
+                """
+                SELECT id, task, mode, created_at, summary, applied, pinned
                 FROM runs
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
                 (candidate_limit,),
             ).fetchall()
-            validation_by_run = {
-                row["id"]: _validation_summaries(
-                    conn.execute(
-                        """
-                        SELECT command, allowed, exit_code
-                        FROM validation_results
-                        WHERE run_id = ?
-                        ORDER BY rowid
-                        LIMIT 5
-                        """,
-                        (row["id"],),
-                    ).fetchall()
-                )
-                for row in rows
-            }
+            rows = _dedupe_rows([*pinned_rows, *recent_rows])
+            validation_by_run = _validation_by_run(conn, rows)
 
         candidates: list[MemoryContextItem] = []
         for row in rows:
             if exclude_run_id and row["id"] == exclude_run_id:
                 continue
             scored = _score_memory_row(row, query_tokens)
-            if scored is None:
+            if scored is None and not bool(row["pinned"]):
                 continue
-            score, reasons = scored
-            candidates.append(
-                MemoryContextItem(
-                    run_id=row["id"],
-                    task=row["task"],
-                    summary=row["summary"],
-                    mode=row["mode"],
-                    created_at=row["created_at"],
-                    applied=bool(row["applied"]),
-                    score=score,
-                    reasons=reasons,
-                    validation=validation_by_run.get(row["id"], []),
-                )
-            )
+            score, reasons = scored or (0, [])
+            if bool(row["pinned"]):
+                score += 100
+                reasons = ["pinned memory", *reasons]
+            candidates.append(_row_to_memory_context(row, score, reasons, validation_by_run))
 
-        candidates.sort(key=lambda item: (item.score, item.created_at), reverse=True)
+        candidates.sort(key=lambda item: (item.pinned, item.score, item.created_at), reverse=True)
         return candidates[:limit]
 
     def _initialize(self) -> None:
@@ -315,6 +334,7 @@ class MemoryStore:
                     proposal_source TEXT,
                     review_source TEXT,
                     applied INTEGER NOT NULL DEFAULT 0,
+                    pinned INTEGER NOT NULL DEFAULT 0,
                     timeline_json TEXT NOT NULL
                 );
 
@@ -358,6 +378,7 @@ class MemoryStore:
                 """
             )
             _ensure_column(conn, "llm_traces", "context_summary", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "runs", "pinned", "INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _connect(self):
@@ -383,6 +404,7 @@ def _row_to_run(row: sqlite3.Row) -> dict[str, Any]:
         "proposal_source": row["proposal_source"],
         "review_source": row["review_source"],
         "applied": bool(row["applied"]),
+        "pinned": bool(row["pinned"]),
         "timeline": _loads(row["timeline_json"], []),
     }
 
@@ -444,6 +466,56 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
     if any(row["name"] == column for row in rows):
         return
     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _dedupe_rows(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
+    seen: set[str] = set()
+    unique: list[sqlite3.Row] = []
+    for row in rows:
+        run_id = str(row["id"])
+        if run_id in seen:
+            continue
+        seen.add(run_id)
+        unique.append(row)
+    return unique
+
+
+def _validation_by_run(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> dict[str, list[str]]:
+    return {
+        row["id"]: _validation_summaries(
+            conn.execute(
+                """
+                SELECT command, allowed, exit_code
+                FROM validation_results
+                WHERE run_id = ?
+                ORDER BY rowid
+                LIMIT 5
+                """,
+                (row["id"],),
+            ).fetchall()
+        )
+        for row in rows
+    }
+
+
+def _row_to_memory_context(
+    row: sqlite3.Row,
+    score: int,
+    reasons: list[str],
+    validation_by_run: dict[str, list[str]],
+) -> MemoryContextItem:
+    return MemoryContextItem(
+        run_id=row["id"],
+        task=row["task"],
+        summary=row["summary"],
+        mode=row["mode"],
+        created_at=row["created_at"],
+        applied=bool(row["applied"]),
+        score=score,
+        reasons=reasons,
+        pinned=bool(row["pinned"]),
+        validation=validation_by_run.get(row["id"], []),
+    )
 
 
 def _tokens(text: str) -> set[str]:

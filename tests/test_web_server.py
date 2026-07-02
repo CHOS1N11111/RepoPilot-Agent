@@ -535,6 +535,55 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_history_pin_api_updates_saved_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = MemoryStore(default_memory_path(root))
+            report = WorkflowReport(
+                task="fix parser behavior",
+                repo_path=tmp,
+                files_scanned=1,
+                plan_metadata=PlanMetadata(source="rules"),
+                summary="RepoPilot analyzed parser behavior.",
+            )
+            run_id = store.create_run(tmp, "fix parser behavior", "run", report)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                pin_payload = json.dumps({"repo": str(root), "id": run_id, "pinned": True}).encode("utf-8")
+                pin_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/history/pin",
+                    data=pin_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(pin_request, timeout=5) as response:
+                    pinned = json.loads(response.read().decode("utf-8"))
+
+                detail_url = f"http://127.0.0.1:{server.server_port}/api/history/run?repo={root}&id={run_id}"
+                with urlopen(detail_url, timeout=5) as response:
+                    detail = json.loads(response.read().decode("utf-8"))
+
+                unpin_payload = json.dumps({"repo": str(root), "id": run_id, "pinned": False}).encode("utf-8")
+                unpin_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/history/pin",
+                    data=unpin_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(unpin_request, timeout=5) as response:
+                    unpinned = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(pinned["pinned"])
+                self.assertTrue(detail["pinned"])
+                self.assertFalse(unpinned["pinned"])
+                self.assertFalse(store.get_run(run_id)["pinned"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
     def test_history_delete_and_clear_api_manage_saved_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

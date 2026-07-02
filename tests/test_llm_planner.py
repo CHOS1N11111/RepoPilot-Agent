@@ -90,6 +90,42 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("fix parser validation failure", client.messages[1].content)
         self.assertIn("python -m unittest tests.test_parser: exit 0", client.messages[1].content)
 
+    def test_create_plan_with_llm_separates_pinned_memory(self) -> None:
+        client = FakeLLMClient(
+            '{"steps":[{"title":"Use pinned lesson","detail":"Check pinned memory before changing code."}]}'
+        )
+        memory = [
+            MemoryContextItem(
+                run_id="run-1",
+                task="document release checklist",
+                summary="Pinned release workflow lesson.",
+                mode="run",
+                created_at="2026-01-01T00:00:00+00:00",
+                applied=False,
+                score=100,
+                reasons=["pinned memory"],
+                pinned=True,
+            ),
+            MemoryContextItem(
+                run_id="run-2",
+                task="fix parser validation failure",
+                summary="Related parser lesson.",
+                mode="run",
+                created_at="2026-01-02T00:00:00+00:00",
+                applied=True,
+                score=8,
+                reasons=["task overlap: parser"],
+            ),
+        ]
+
+        create_plan_with_optional_llm("fix parser failure", [], client, memory_context=memory)
+
+        prompt = client.messages[1].content
+        self.assertIn("Pinned memory:", prompt)
+        self.assertIn("document release checklist", prompt)
+        self.assertIn("Related memory:", prompt)
+        self.assertIn("fix parser validation failure", prompt)
+
     def test_invalid_llm_json_falls_back_to_rules(self) -> None:
         client = FakeLLMClient("not json")
 
