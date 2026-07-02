@@ -132,6 +132,8 @@ Print JSON output:
 python repopilot.py run --repo . --task "inspect validation workflow" --json
 ```
 
+For a complete walkthrough covering CLI usage, LLM setup, the web UI, GitHub URLs, diff review, validation repair, memory, and delivery drafts, see [docs/tutorial.md](docs/tutorial.md).
+
 ## Web UI
 
 Start the local web UI:
