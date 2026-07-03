@@ -153,8 +153,9 @@ The web UI supports:
 
 - Repository source selection for local paths, GitHub URLs, or auto detection.
 - Repository sync controls for cached GitHub clones, branch checkout, latest commit display, and local-change protection.
-- 🧠 LLM model, API base URL, and API key inputs.
+- 🧠 LLM model, API endpoint URL, and API key inputs.
 - Automatic JSON mode compatibility retry for providers that do not support `response_format`.
+- LLM connection testing before running the full workflow.
 - Memory lookup toggle for clean-context runs.
 - 📌 Task input and GitHub issue import.
 - 🚦 Workflow execution and standalone proposal generation.
@@ -169,7 +170,7 @@ The web UI supports:
 - 🌿 Working tree and staged diff display.
 - History controls for opening, reusing, pinning, deleting, or clearing saved runs.
 
-API keys entered in the UI are sent only to the local server for that request and are not written to disk.
+API keys entered in the UI are sent only to the local server for that request and are not written to disk. LLM provider error previews redact the configured API key before showing diagnostics.
 
 ## Repository Sources
 
@@ -207,7 +208,7 @@ Disable deterministic fallback while debugging model output:
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --no-llm-fallback
 ```
 
-RepoPilot sends OpenAI JSON mode by default. If a compatible provider rejects `response_format`, RepoPilot automatically retries once without it. You can also disable provider-side JSON mode manually for debugging:
+RepoPilot sends OpenAI JSON mode by default. If a compatible provider rejects `response_format`, RepoPilot automatically retries once without it. If the provider still returns a non-JSON response, RepoPilot reports the HTTP status, content type, and a short redacted body preview so you can diagnose gateway or endpoint issues. You can also disable provider-side JSON mode manually for debugging:
 
 ```bash
 python repopilot.py run --repo . --task "inspect project docs" --use-llm --no-json-mode
@@ -222,9 +223,12 @@ python repopilot.py run --repo . --task "fix search relevance for login behavior
 Environment variables:
 
 - `OPENAI_API_KEY`: API key for the OpenAI-compatible provider.
-- `OPENAI_BASE_URL`: Optional API base URL. Defaults to `https://api.openai.com/v1`.
+- `OPENAI_API_URL`: Optional complete Chat Completions endpoint URL. Defaults to `https://api.openai.com/v1/chat/completions`.
+- `OPENAI_BASE_URL`: Backward-compatible alias for the complete endpoint URL.
 - `REPOPILOT_MODEL`: Optional default model name.
 - `REPOPILOT_DISABLE_JSON_MODE`: Set to `1`, `true`, `yes`, or `on` to omit `response_format` for providers such as some API gateways.
+
+RepoPilot uses the configured endpoint URL exactly as provided. It does not append `/chat/completions` to the value.
 
 ## LLM Context Management
 

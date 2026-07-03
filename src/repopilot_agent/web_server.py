@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 from .git_tools import get_git_diff, inspect_repository
 from .git_summary import build_git_workflow_summary
 from .github_tools import inspect_github_repository
-from .llm.base import LLMError
+from .llm.base import LLMError, LLMMessage
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
 from .patch_apply import apply_file_edits, capture_file_snapshots, revert_file_snapshots
@@ -92,6 +92,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/history/pin":
             self._handle_history_pin()
+            return
+        if parsed.path == "/api/llm/test":
+            self._handle_llm_test()
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -389,6 +392,39 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             data["memory_error"] = str(exc)
         self._send_json(data)
+
+    def _handle_llm_test(self) -> None:
+        payload = self._read_json()
+        try:
+            client = OpenAICompatibleClient(
+                api_key=str(payload.get("api_key") or "") or None,
+                base_url=str(payload.get("base_url") or "") or None,
+                model=str(payload.get("model") or "") or None,
+                json_mode=_payload_json_mode(payload),
+            )
+            response = client.complete(
+                [
+                    LLMMessage(
+                        role="system",
+                        content='Return only JSON with this shape: {"ok": true, "message": "ready"}.',
+                    ),
+                    LLMMessage(role="user", content="Test the RepoPilot LLM connection."),
+                ]
+            )
+        except LLMError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json(
+            {
+                "ok": True,
+                "model": getattr(client, "model", ""),
+                "base_url": getattr(client, "base_url", ""),
+                "response_preview": _text_preview(response),
+            }
+        )
 
     def _handle_git_summary(self) -> None:
         payload = self._read_json()
@@ -707,6 +743,13 @@ def _payload_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)
+
+
+def _text_preview(value: str, limit: int = 600) -> str:
+    text = value.strip()
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

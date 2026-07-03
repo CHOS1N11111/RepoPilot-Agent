@@ -316,4 +316,10 @@ def _run_git_command(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _run_raw_git(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], text=True, capture_output=True)
+    return subprocess.run(
+        ["git", *args],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )

@@ -78,13 +78,17 @@
           <input id="customModel" placeholder="provider-model-name" />
         </label>
         <label>
-          API base URL
-          <input id="baseUrl" placeholder="https://api.openai.com/v1" />
+          API endpoint URL
+          <input id="baseUrl" placeholder="https://api.openai.com/v1/chat/completions" />
         </label>
         <label>
           API key
           <input id="apiKey" type="password" placeholder="Only sent to this local server for this run" />
         </label>
+        <div class="button-row">
+          <button id="testLlm" class="secondary" type="button">Test LLM Connection</button>
+        </div>
+        <p id="llmTestLine" class="status-line">LLM connection not tested.</p>
 
         <div class="button-row">
           <button id="runWorkflow">Run RepoPilot</button>
@@ -135,14 +139,28 @@
         </section>
 
         <section id="llmTab" class="tab-content">
-          <h2>LLM Input</h2>
-          <pre id="llmInput" class="code-block"></pre>
-          <h2>LLM Output</h2>
-          <pre id="llmOutput" class="code-block"></pre>
-          <h2>LLM Review</h2>
-          <pre id="llmReview" class="code-block compact"></pre>
-          <h2>LLM Trace</h2>
-          <div id="llmTraceList" class="stack"></div>
+          <div class="subtabs" aria-label="LLM output sections">
+            <button class="subtab active" data-llm-panel="input" type="button">Input</button>
+            <button class="subtab" data-llm-panel="output" type="button">Output</button>
+            <button class="subtab" data-llm-panel="review" type="button">Review</button>
+            <button class="subtab" data-llm-panel="trace" type="button">Trace</button>
+          </div>
+          <section id="llmInputPanel" class="llm-panel active">
+            <h2>LLM Input</h2>
+            <pre id="llmInput" class="code-block tall"></pre>
+          </section>
+          <section id="llmOutputPanel" class="llm-panel">
+            <h2>LLM Output</h2>
+            <pre id="llmOutput" class="code-block tall"></pre>
+          </section>
+          <section id="llmReviewPanel" class="llm-panel">
+            <h2>LLM Review</h2>
+            <pre id="llmReview" class="code-block tall"></pre>
+          </section>
+          <section id="llmTracePanel" class="llm-panel">
+            <h2>LLM Trace</h2>
+            <div id="llmTraceList" class="stack"></div>
+          </section>
         </section>
 
         <section id="githubTab" class="tab-content">

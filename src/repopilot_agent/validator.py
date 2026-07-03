@@ -39,6 +39,8 @@ def run_validation(repo_path: str | Path, commands: list[str]) -> list[Validatio
             cwd=Path(repo_path),
             shell=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=120,
         )

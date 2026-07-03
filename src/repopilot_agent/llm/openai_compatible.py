@@ -9,9 +9,10 @@ import urllib.request
 
 from .base import LLMClient, LLMError, LLMMessage
 
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_API_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
 DISABLE_JSON_MODE_ENV = "REPOPILOT_DISABLE_JSON_MODE"
+MAX_RESPONSE_PREVIEW_CHARS = 600
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -24,7 +25,8 @@ class OpenAICompatibleClient(LLMClient):
         timeout_seconds: int = 60,
     ) -> None:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = (base_url or os.getenv("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        configured_url = base_url or os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_BASE_URL") or DEFAULT_API_URL
+        self.base_url = configured_url.strip()
         self.model = model or os.getenv("REPOPILOT_MODEL") or DEFAULT_MODEL
         self.json_mode = _resolve_json_mode(json_mode)
         self.timeout_seconds = timeout_seconds
@@ -55,7 +57,7 @@ class OpenAICompatibleClient(LLMClient):
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
+            self.base_url,
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -66,16 +68,27 @@ class OpenAICompatibleClient(LLMClient):
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                status_code = str(getattr(response, "status", "unknown"))
+                headers = getattr(response, "headers", None)
+                content_type = headers.get("Content-Type", "unknown") if headers else "unknown"
+                raw_body = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise ProviderHTTPError(exc.code, body) from exc
+            raise ProviderHTTPError(exc.code, _safe_response_excerpt(body, self.api_key)) from exc
         except urllib.error.URLError as exc:
             raise LLMError(f"LLM request failed: {exc.reason}") from exc
         except TimeoutError as exc:
             raise LLMError("LLM request timed out.") from exc
+
+        try:
+            data = json.loads(raw_body)
         except json.JSONDecodeError as exc:
-            raise ProviderJSONDecodeError(f"LLM response was not valid JSON: {exc}") from exc
+            preview = _safe_response_excerpt(raw_body, self.api_key)
+            raise ProviderJSONDecodeError(
+                "LLM response was not valid JSON "
+                f"(HTTP {status_code}, Content-Type: {content_type}). "
+                f"Body preview: {preview}. JSON error: {exc}"
+            ) from exc
 
         try:
             return data["choices"][0]["message"]["content"]
@@ -112,3 +125,15 @@ def _should_retry_without_json_mode(exc: LLMError) -> bool:
     if "response_format" in body or "json_object" in body:
         return True
     return exc.status_code in {400, 404, 422, 500, 502, 503}
+
+
+def _safe_response_excerpt(body: str, api_key: str | None = None) -> str:
+    text = body or ""
+    if api_key:
+        text = text.replace(api_key, "[REDACTED_API_KEY]")
+    text = text.strip()
+    if not text:
+        return "<empty>"
+    if len(text) > MAX_RESPONSE_PREVIEW_CHARS:
+        return text[:MAX_RESPONSE_PREVIEW_CHARS] + "..."
+    return text

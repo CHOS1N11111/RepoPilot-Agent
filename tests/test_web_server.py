@@ -224,6 +224,43 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_llm_test_api_uses_configured_client_without_exposing_key(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch(
+                "repopilot_agent.web_server.OpenAICompatibleClient",
+                return_value=FakeLLMClient(['{"ok": true, "message": "ready"}']),
+            ) as client_cls:
+                payload = json.dumps(
+                    {
+                        "api_key": "test-key",
+                        "base_url": "https://sub2api.example/v1/chat/completions",
+                        "model": "gpt-5.5",
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/llm/test",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+            self.assertTrue(data["ok"])
+            self.assertEqual(data["model"], "fake-web")
+            self.assertNotIn("api_key", data)
+            self.assertNotIn("test-key", json.dumps(data))
+            self.assertEqual(client_cls.call_args.kwargs["base_url"], "https://sub2api.example/v1/chat/completions")
+            self.assertEqual(client_cls.call_args.kwargs["model"], "gpt-5.5")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_repository_sync_api_returns_branch_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -79,6 +79,8 @@ def _run_raw_git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str
     return subprocess.run(
         ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
     )
 

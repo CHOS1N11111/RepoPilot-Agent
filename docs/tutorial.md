@@ -131,7 +131,7 @@ If the model call fails or returns invalid JSON, RepoPilot falls back to determi
 --no-llm-fallback
 ```
 
-Some OpenAI-compatible gateways do not support `response_format`. RepoPilot uses JSON mode by default and automatically retries once without it when a provider rejects or mishandles that option.
+Some OpenAI-compatible gateways do not support `response_format`. RepoPilot uses JSON mode by default and automatically retries once without it when a provider rejects or mishandles that option. If the provider still returns a non-JSON response, RepoPilot shows the HTTP status, content type, and a short redacted body preview to help diagnose endpoint, model, or gateway issues.
 
 You can still disable provider-side JSON mode manually for debugging:
 
@@ -181,6 +181,8 @@ The web UI is local. It gives you the full workflow in tabs:
 - Diff: current working tree diff or staged diff.
 - Delivery: suggested commit message and pull request draft.
 - History: saved local runs, memory reuse, pinning, deletion, and clearing.
+
+Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, and API key fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
 ## Step 5: Choose A Repository Source
 

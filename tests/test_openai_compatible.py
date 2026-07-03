@@ -12,7 +12,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from repopilot_agent.llm.base import LLMMessage
+from repopilot_agent.llm.base import LLMError, LLMMessage
 from repopilot_agent.llm.openai_compatible import OpenAICompatibleClient
 
 
@@ -31,6 +31,20 @@ class FakeResponse:
 
 
 class OpenAICompatibleClientTests(unittest.TestCase):
+    def test_configured_endpoint_url_is_used_exactly(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            return FakeResponse()
+
+        endpoint = "https://sub2api.example/v1/chat/completions/"
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client = OpenAICompatibleClient(api_key="test-key", base_url=endpoint, model="test-model")
+            client.complete([LLMMessage(role="user", content="Return JSON.")])
+
+        self.assertEqual(captured["url"], endpoint)
+
     def test_json_mode_adds_response_format(self) -> None:
         captured = {}
 
@@ -114,6 +128,20 @@ class OpenAICompatibleClientTests(unittest.TestCase):
         self.assertEqual(len(payloads), 2)
         self.assertIn("response_format", payloads[0])
         self.assertNotIn("response_format", payloads[1])
+
+    def test_non_json_response_error_includes_safe_preview(self) -> None:
+        def fake_urlopen(request, timeout):
+            return FakeResponse(b"<html>gateway rejected test-key</html>")
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client = OpenAICompatibleClient(api_key="test-key", model="test-model", json_mode=False)
+            with self.assertRaises(LLMError) as context:
+                client.complete([LLMMessage(role="user", content="Return JSON.")])
+
+        message = str(context.exception)
+        self.assertIn("Body preview: <html>gateway rejected [REDACTED_API_KEY]</html>", message)
+        self.assertIn("Content-Type: unknown", message)
+        self.assertNotIn("test-key", message)
 
 
 if __name__ == "__main__":

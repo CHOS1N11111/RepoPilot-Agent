@@ -193,6 +193,33 @@ button:disabled:hover {
   display: block;
 }
 
+.subtabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.subtab {
+  min-height: 38px;
+  color: var(--muted);
+  background: #eef3f7;
+}
+
+.subtab:hover,
+.subtab.active {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.llm-panel {
+  display: none;
+}
+
+.llm-panel.active {
+  display: block;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, 1fr));
@@ -303,6 +330,30 @@ button:disabled:hover {
   margin-bottom: 20px;
 }
 
+.code-block.tall {
+  min-height: 640px;
+}
+
+.trace-details {
+  margin-top: 10px;
+}
+
+.trace-details summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.trace-details pre {
+  max-height: 420px;
+  overflow: auto;
+  border-radius: 8px;
+  padding: 12px;
+  color: #e5e7eb;
+  background: var(--code);
+  white-space: pre-wrap;
+}
+
 .hidden {
   display: none;
 }
@@ -318,5 +369,9 @@ button:disabled:hover {
 
   .timeline-event {
     grid-template-columns: 1fr;
+  }
+
+  .subtabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

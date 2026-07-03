@@ -17,6 +17,15 @@ document.querySelectorAll(".tab").forEach((button) => {
   });
 });
 
+document.querySelectorAll(".subtab").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll(".subtab").forEach((tab) => tab.classList.remove("active"));
+    document.querySelectorAll(".llm-panel").forEach((panel) => panel.classList.remove("active"));
+    button.classList.add("active");
+    $(`llm${capitalize(button.dataset.llmPanel || "input")}Panel`).classList.add("active");
+  });
+});
+
 $("modelSelect").addEventListener("change", () => {
   $("customModelWrap").classList.toggle("hidden", $("modelSelect").value !== "custom");
 });
@@ -24,6 +33,7 @@ $("repoSource").addEventListener("change", updateRepositorySourceUi);
 
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
+$("testLlm").addEventListener("click", testLlmConnection);
 $("applyProposal").addEventListener("click", applyProposal);
 $("revertProposal").addEventListener("click", revertProposal);
 $("syncRepository").addEventListener("click", syncRepository);
@@ -72,6 +82,24 @@ async function generateProposal() {
     renderReport(report, payload);
     setStatus("Proposal ready for review.");
   } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function testLlmConnection() {
+  setStatus("Testing LLM connection...");
+  $("llmTestLine").textContent = "Testing model endpoint...";
+  try {
+    const data = await postJson("/api/llm/test", buildLlmPayload());
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    const model = data.model || selectedModel() || "configured model";
+    const preview = data.response_preview ? ` Response: ${data.response_preview}` : "";
+    $("llmTestLine").textContent = `OK: ${model} responded.${preview}`;
+    setStatus("LLM connection OK.");
+  } catch (error) {
+    $("llmTestLine").textContent = `LLM test failed: ${error.message}`;
     setStatus(`Error: ${error.message}`);
   }
 }
@@ -188,11 +216,17 @@ function buildWorkflowPayload() {
     task: $("taskInput").value.trim(),
     validation: validation ? [validation] : [],
     use_llm: $("useLlm").checked,
+    ...buildLlmPayload(),
+    no_llm_fallback: $("disableFallback").checked,
+    use_memory: !$("disableMemory").checked,
+  };
+}
+
+function buildLlmPayload() {
+  return {
     model: selectedModel(),
     base_url: $("baseUrl").value.trim(),
     api_key: $("apiKey").value,
-    no_llm_fallback: $("disableFallback").checked,
-    use_memory: !$("disableMemory").checked,
   };
 }
 
@@ -609,17 +643,21 @@ function renderLlmTraces(traces) {
     return item("No LLM calls were recorded for this run.");
   }
   return traces
-    .map((trace) => `<div class="item">
+    .map((trace, index) => `<div class="item">
       <div class="item-title">${escapeHtml(trace.name)}
         <span class="tag">${escapeHtml(trace.model)}</span>
         <span class="tag ${trace.parsed ? "ok" : "danger"}">${trace.parsed ? "parsed" : "failed"}</span>
       </div>
       <p>${escapeHtml(trace.error || `Latency: ${trace.latency_ms ?? 0} ms`)}</p>
       ${trace.context_summary ? `<strong>Context Budget</strong><p>${escapeHtml(trace.context_summary)}</p>` : ""}
-      <strong>Prompt</strong>
-      <pre>${escapeHtml(trace.prompt_preview || "")}</pre>
-      <strong>Raw Output</strong>
-      <pre>${escapeHtml(trace.raw_output || "")}</pre>
+      <details class="trace-details">
+        <summary>Prompt ${index + 1}</summary>
+        <pre>${escapeHtml(trace.prompt_preview || "")}</pre>
+      </details>
+      <details class="trace-details">
+        <summary>Raw Output ${index + 1}</summary>
+        <pre>${escapeHtml(trace.raw_output || "")}</pre>
+      </details>
     </div>`)
     .join("");
 }
@@ -866,6 +904,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function capitalize(value) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
 loadGithub().catch((error) => {
