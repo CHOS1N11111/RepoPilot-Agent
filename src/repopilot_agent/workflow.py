@@ -30,6 +30,7 @@ def run_workflow(
     llm_model: str | None = None,
     allow_llm_fallback: bool = True,
     llm_json_mode: bool | None = None,
+    llm_timeout_seconds: int | None = None,
     use_memory: bool = True,
     memory_context: list[MemoryContextItem] | None = None,
 ) -> WorkflowReport:
@@ -43,7 +44,11 @@ def run_workflow(
     if use_llm:
         if llm_client is None:
             try:
-                llm_client = OpenAICompatibleClient(model=llm_model, json_mode=llm_json_mode)
+                llm_client = OpenAICompatibleClient(
+                    model=llm_model,
+                    json_mode=llm_json_mode,
+                    timeout_seconds=llm_timeout_seconds,
+                )
             except LLMError as exc:
                 if not allow_llm_fallback:
                     raise

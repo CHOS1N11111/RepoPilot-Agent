@@ -85,6 +85,10 @@
           API key
           <input id="apiKey" type="password" placeholder="Only sent to this local server for this run" />
         </label>
+        <label>
+          LLM timeout seconds
+          <input id="timeoutSeconds" type="number" min="1" step="1" value="120" />
+        </label>
         <div class="button-row">
           <button id="testLlm" class="secondary" type="button">Test LLM Connection</button>
         </div>

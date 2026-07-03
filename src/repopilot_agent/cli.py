@@ -29,6 +29,11 @@ def main() -> int:
     run_parser.add_argument("--use-llm", action="store_true", help="Use an LLM for planning when configured.")
     run_parser.add_argument("--model", help="Override the model used by the LLM planner.")
     run_parser.add_argument(
+        "--llm-timeout",
+        type=int,
+        help="LLM request timeout in seconds. Defaults to REPOPILOT_LLM_TIMEOUT_SECONDS or 120.",
+    )
+    run_parser.add_argument(
         "--no-json-mode",
         action="store_true",
         help="Do not send response_format=json_object to the OpenAI-compatible provider.",
@@ -94,6 +99,7 @@ def main() -> int:
             llm_model=args.model,
             allow_llm_fallback=not args.no_llm_fallback,
             llm_json_mode=False if args.no_json_mode else None,
+            llm_timeout_seconds=args.llm_timeout,
             use_memory=not args.no_memory,
         )
         if args.json:

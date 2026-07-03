@@ -45,6 +45,38 @@ class OpenAICompatibleClientTests(unittest.TestCase):
 
         self.assertEqual(captured["url"], endpoint)
 
+    def test_default_timeout_is_120_seconds(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch.dict(os.environ, {"REPOPILOT_LLM_TIMEOUT_SECONDS": ""}), patch(
+            "urllib.request.urlopen",
+            fake_urlopen,
+        ):
+            client = OpenAICompatibleClient(api_key="test-key", model="test-model")
+            client.complete([LLMMessage(role="user", content="Return JSON.")])
+
+        self.assertEqual(captured["timeout"], 120)
+
+    def test_timeout_can_be_configured_by_environment(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch.dict(os.environ, {"REPOPILOT_LLM_TIMEOUT_SECONDS": "180"}), patch(
+            "urllib.request.urlopen",
+            fake_urlopen,
+        ):
+            client = OpenAICompatibleClient(api_key="test-key", model="test-model")
+            client.complete([LLMMessage(role="user", content="Return JSON.")])
+
+        self.assertEqual(captured["timeout"], 180)
+
     def test_json_mode_adds_response_format(self) -> None:
         captured = {}
 

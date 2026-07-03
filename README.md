@@ -214,6 +214,12 @@ RepoPilot sends OpenAI JSON mode by default. If a compatible provider rejects `r
 python repopilot.py run --repo . --task "inspect project docs" --use-llm --no-json-mode
 ```
 
+Large patch-proposal prompts can take longer on API gateways. The default LLM request timeout is 120 seconds. Increase it from the CLI when needed:
+
+```bash
+python repopilot.py run --repo . --task "inspect project docs" --use-llm --llm-timeout 240
+```
+
 Disable related memory lookup for a clean-context run:
 
 ```bash
@@ -227,6 +233,7 @@ Environment variables:
 - `OPENAI_BASE_URL`: Backward-compatible alias for the complete endpoint URL.
 - `REPOPILOT_MODEL`: Optional default model name.
 - `REPOPILOT_DISABLE_JSON_MODE`: Set to `1`, `true`, `yes`, or `on` to omit `response_format` for providers such as some API gateways.
+- `REPOPILOT_LLM_TIMEOUT_SECONDS`: Optional LLM request timeout. Defaults to `120`.
 
 RepoPilot uses the configured endpoint URL exactly as provided. It does not append `/chat/completions` to the value.
 

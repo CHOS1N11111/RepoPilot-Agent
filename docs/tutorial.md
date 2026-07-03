@@ -145,6 +145,18 @@ You can also set:
 $env:REPOPILOT_DISABLE_JSON_MODE = "1"
 ```
 
+If a large patch proposal times out, increase the timeout:
+
+```powershell
+$env:REPOPILOT_LLM_TIMEOUT_SECONDS = "240"
+```
+
+or pass it per CLI run:
+
+```bash
+python repopilot.py run --repo . --task "inspect LLM trace fields" --use-llm --llm-timeout 240
+```
+
 Use JSON output when you want to inspect structured fields:
 
 ```bash
@@ -182,7 +194,7 @@ The web UI is local. It gives you the full workflow in tabs:
 - Delivery: suggested commit message and pull request draft.
 - History: saved local runs, memory reuse, pinning, deletion, and clearing.
 
-Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, and API key fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
+Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
 ## Step 5: Choose A Repository Source
 

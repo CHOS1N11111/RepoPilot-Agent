@@ -205,6 +205,7 @@ class WebServerTests(unittest.TestCase):
                             "use_llm": True,
                             "api_key": "test-key",
                             "json_mode": False,
+                            "timeout_seconds": 180,
                         }
                     ).encode("utf-8")
                     request = Request(
@@ -219,6 +220,7 @@ class WebServerTests(unittest.TestCase):
 
                 self.assertEqual(data["plan_metadata"]["source"], "llm")
                 self.assertFalse(client_cls.call_args.kwargs["json_mode"])
+                self.assertEqual(client_cls.call_args.kwargs["timeout_seconds"], 180)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -238,6 +240,7 @@ class WebServerTests(unittest.TestCase):
                         "api_key": "test-key",
                         "base_url": "https://sub2api.example/v1/chat/completions",
                         "model": "gpt-5.5",
+                        "timeout_seconds": 240,
                     }
                 ).encode("utf-8")
                 request = Request(
@@ -256,6 +259,7 @@ class WebServerTests(unittest.TestCase):
             self.assertNotIn("test-key", json.dumps(data))
             self.assertEqual(client_cls.call_args.kwargs["base_url"], "https://sub2api.example/v1/chat/completions")
             self.assertEqual(client_cls.call_args.kwargs["model"], "gpt-5.5")
+            self.assertEqual(client_cls.call_args.kwargs["timeout_seconds"], 240)
         finally:
             server.shutdown()
             thread.join(timeout=5)

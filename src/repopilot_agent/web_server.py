@@ -125,6 +125,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     base_url=str(payload.get("base_url") or "") or None,
                     model=str(payload.get("model") or "") or None,
                     json_mode=_payload_json_mode(payload),
+                    timeout_seconds=_payload_llm_timeout_seconds(payload),
                 )
             except LLMError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -140,6 +141,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
+                llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -329,6 +331,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     base_url=str(payload.get("base_url") or "") or None,
                     model=str(payload.get("model") or "") or None,
                     json_mode=_payload_json_mode(payload),
+                    timeout_seconds=_payload_llm_timeout_seconds(payload),
                 )
             except LLMError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -345,6 +348,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
+                llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -401,6 +405,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 base_url=str(payload.get("base_url") or "") or None,
                 model=str(payload.get("model") or "") or None,
                 json_mode=_payload_json_mode(payload),
+                timeout_seconds=_payload_llm_timeout_seconds(payload),
             )
             response = client.complete(
                 [
@@ -484,6 +489,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     base_url=str(payload.get("base_url") or "") or None,
                     model=str(payload.get("model") or "") or None,
                     json_mode=_payload_json_mode(payload),
+                    timeout_seconds=_payload_llm_timeout_seconds(payload),
                 )
             except LLMError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -499,6 +505,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
+                llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -735,6 +742,19 @@ def _payload_json_mode(payload: dict[str, Any]) -> bool | None:
     if payload.get("json_mode") is None:
         return None
     return _payload_bool(payload.get("json_mode"), default=True)
+
+
+def _payload_llm_timeout_seconds(payload: dict[str, Any]) -> int | None:
+    raw = payload.get("timeout_seconds")
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise LLMError("LLM timeout must be an integer number of seconds.") from exc
+    if value <= 0:
+        raise LLMError("LLM timeout must be greater than 0 seconds.")
+    return value
 
 
 def _payload_bool(value: Any, default: bool = False) -> bool:

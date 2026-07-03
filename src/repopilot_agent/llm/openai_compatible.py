@@ -11,7 +11,9 @@ from .base import LLMClient, LLMError, LLMMessage
 
 DEFAULT_API_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_TIMEOUT_SECONDS = 120
 DISABLE_JSON_MODE_ENV = "REPOPILOT_DISABLE_JSON_MODE"
+TIMEOUT_SECONDS_ENV = "REPOPILOT_LLM_TIMEOUT_SECONDS"
 MAX_RESPONSE_PREVIEW_CHARS = 600
 
 
@@ -22,14 +24,14 @@ class OpenAICompatibleClient(LLMClient):
         base_url: str | None = None,
         model: str | None = None,
         json_mode: bool | None = None,
-        timeout_seconds: int = 60,
+        timeout_seconds: int | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         configured_url = base_url or os.getenv("OPENAI_API_URL") or os.getenv("OPENAI_BASE_URL") or DEFAULT_API_URL
         self.base_url = configured_url.strip()
         self.model = model or os.getenv("REPOPILOT_MODEL") or DEFAULT_MODEL
         self.json_mode = _resolve_json_mode(json_mode)
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = _resolve_timeout_seconds(timeout_seconds)
         if not self.api_key:
             raise LLMError("OPENAI_API_KEY is not configured.")
 
@@ -112,6 +114,23 @@ def _resolve_json_mode(value: bool | None) -> bool:
         return value
     raw = os.getenv(DISABLE_JSON_MODE_ENV, "")
     return raw.strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _resolve_timeout_seconds(value: int | None) -> int:
+    if value is not None:
+        if value <= 0:
+            raise LLMError("LLM timeout must be greater than 0 seconds.")
+        return value
+    raw = os.getenv(TIMEOUT_SECONDS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        parsed = int(raw)
+    except ValueError as exc:
+        raise LLMError(f"{TIMEOUT_SECONDS_ENV} must be an integer.") from exc
+    if parsed <= 0:
+        raise LLMError(f"{TIMEOUT_SECONDS_ENV} must be greater than 0 seconds.")
+    return parsed
 
 
 def _should_retry_without_json_mode(exc: LLMError) -> bool:
