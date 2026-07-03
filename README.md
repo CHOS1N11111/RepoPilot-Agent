@@ -154,6 +154,7 @@ The web UI supports:
 - Repository source selection for local paths, GitHub URLs, or auto detection.
 - Repository sync controls for cached GitHub clones, branch checkout, latest commit display, and local-change protection.
 - 🧠 LLM model, API base URL, and API key inputs.
+- Automatic JSON mode compatibility retry for providers that do not support `response_format`.
 - Memory lookup toggle for clean-context runs.
 - 📌 Task input and GitHub issue import.
 - 🚦 Workflow execution and standalone proposal generation.
@@ -206,6 +207,12 @@ Disable deterministic fallback while debugging model output:
 python repopilot.py run --repo . --task "fix search relevance for login behavior" --use-llm --no-llm-fallback
 ```
 
+RepoPilot sends OpenAI JSON mode by default. If a compatible provider rejects `response_format`, RepoPilot automatically retries once without it. You can also disable provider-side JSON mode manually for debugging:
+
+```bash
+python repopilot.py run --repo . --task "inspect project docs" --use-llm --no-json-mode
+```
+
 Disable related memory lookup for a clean-context run:
 
 ```bash
@@ -217,6 +224,7 @@ Environment variables:
 - `OPENAI_API_KEY`: API key for the OpenAI-compatible provider.
 - `OPENAI_BASE_URL`: Optional API base URL. Defaults to `https://api.openai.com/v1`.
 - `REPOPILOT_MODEL`: Optional default model name.
+- `REPOPILOT_DISABLE_JSON_MODE`: Set to `1`, `true`, `yes`, or `on` to omit `response_format` for providers such as some API gateways.
 
 ## LLM Context Management
 

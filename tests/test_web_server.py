@@ -178,6 +178,52 @@ class WebServerTests(unittest.TestCase):
                 thread.join(timeout=5)
                 server.server_close()
 
+    def test_run_api_passes_json_mode_toggle_to_llm_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("RepoPilot test project\n", encoding="utf-8")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with patch(
+                    "repopilot_agent.web_server.OpenAICompatibleClient",
+                    return_value=FakeLLMClient(
+                        [
+                            '{"steps":[{"title":"Inspect README","detail":"Review README.md."}]}',
+                            '{"objective":"Explain project","files":[{"path":"README.md","change_type":"documentation",'
+                            '"rationale":"README.md describes the project.","suggested_actions":["Summarize the project"],'
+                            '"confidence":"high"}],"risks":[],"validation_suggestions":[],"ready_for_patch":true,'
+                            '"file_edits":[]}',
+                        ]
+                    ),
+                ) as client_cls:
+                    payload = json.dumps(
+                        {
+                            "repo": str(root),
+                            "task": "explain what this project does",
+                            "use_llm": True,
+                            "api_key": "test-key",
+                            "json_mode": False,
+                        }
+                    ).encode("utf-8")
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/run",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["plan_metadata"]["source"], "llm")
+                self.assertFalse(client_cls.call_args.kwargs["json_mode"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
     def test_repository_sync_api_returns_branch_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

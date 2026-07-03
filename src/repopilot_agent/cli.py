@@ -29,6 +29,11 @@ def main() -> int:
     run_parser.add_argument("--use-llm", action="store_true", help="Use an LLM for planning when configured.")
     run_parser.add_argument("--model", help="Override the model used by the LLM planner.")
     run_parser.add_argument(
+        "--no-json-mode",
+        action="store_true",
+        help="Do not send response_format=json_object to the OpenAI-compatible provider.",
+    )
+    run_parser.add_argument(
         "--no-llm-fallback",
         action="store_true",
         help="Fail instead of falling back to the rule-based planner when LLM planning fails.",
@@ -88,6 +93,7 @@ def main() -> int:
             use_llm=args.use_llm,
             llm_model=args.model,
             allow_llm_fallback=not args.no_llm_fallback,
+            llm_json_mode=False if args.no_json_mode else None,
             use_memory=not args.no_memory,
         )
         if args.json:

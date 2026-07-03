@@ -131,6 +131,20 @@ If the model call fails or returns invalid JSON, RepoPilot falls back to determi
 --no-llm-fallback
 ```
 
+Some OpenAI-compatible gateways do not support `response_format`. RepoPilot uses JSON mode by default and automatically retries once without it when a provider rejects or mishandles that option.
+
+You can still disable provider-side JSON mode manually for debugging:
+
+```bash
+python repopilot.py run --repo . --task "inspect LLM trace fields" --use-llm --no-json-mode
+```
+
+You can also set:
+
+```powershell
+$env:REPOPILOT_DISABLE_JSON_MODE = "1"
+```
+
 Use JSON output when you want to inspect structured fields:
 
 ```bash

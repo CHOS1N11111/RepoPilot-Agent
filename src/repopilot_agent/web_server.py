@@ -121,6 +121,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     api_key=str(payload.get("api_key")),
                     base_url=str(payload.get("base_url") or "") or None,
                     model=str(payload.get("model") or "") or None,
+                    json_mode=_payload_json_mode(payload),
                 )
             except LLMError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -135,6 +136,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_client=llm_client,
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+                llm_json_mode=_payload_json_mode(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -323,6 +325,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     api_key=str(payload.get("api_key")),
                     base_url=str(payload.get("base_url") or "") or None,
                     model=str(payload.get("model") or "") or None,
+                    json_mode=_payload_json_mode(payload),
                 )
             except LLMError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -338,6 +341,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_client=llm_client,
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+                llm_json_mode=_payload_json_mode(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -443,6 +447,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     api_key=str(payload.get("api_key")),
                     base_url=str(payload.get("base_url") or "") or None,
                     model=str(payload.get("model") or "") or None,
+                    json_mode=_payload_json_mode(payload),
                 )
             except LLMError as exc:
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -457,6 +462,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 llm_client=llm_client,
                 llm_model=str(payload.get("model") or "") or None,
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+                llm_json_mode=_payload_json_mode(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -687,6 +693,12 @@ def _first(params: dict[str, list[str]], name: str, default: str) -> str:
 
 def _payload_use_memory(payload: dict[str, Any]) -> bool:
     return _payload_bool(payload.get("use_memory"), default=True)
+
+
+def _payload_json_mode(payload: dict[str, Any]) -> bool | None:
+    if payload.get("json_mode") is None:
+        return None
+    return _payload_bool(payload.get("json_mode"), default=True)
 
 
 def _payload_bool(value: Any, default: bool = False) -> bool:
