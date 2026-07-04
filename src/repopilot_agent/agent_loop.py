@@ -155,7 +155,7 @@ def _execute_action(
             f"  Preview: {_single_line(hit.preview)}"
             for hit in hits
         ]
-        return "\n".join(lines), action.query, [hit.path for hit in hits]
+        return "\n".join(lines), action.query, []
 
     if action.action == "read_file":
         repo_file = by_path.get(action.path)

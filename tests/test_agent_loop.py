@@ -67,6 +67,8 @@ class AgentLoopTests(unittest.TestCase):
             )
 
         self.assertEqual([step.action for step in result.steps], ["search_files", "read_file", "finish"])
+        self.assertEqual(result.steps[0].selected_paths, [])
+        self.assertEqual(result.steps[1].selected_paths, ["main.py"])
         self.assertEqual(result.selected_paths, ["main.py"])
         self.assertIn("parser behavior", result.summary)
         self.assertEqual(len(client.calls), 3)

@@ -40,6 +40,9 @@ AGENT_SYSTEM_PROMPT = (
     '"query":"search query if action is search_files","path":"repo-relative path if action is read_file",'
     '"selected_paths":["repo-relative paths useful for the final proposal"],"summary":"brief finish summary"}. '
     "Use only read-only actions. Do not propose file edits here. "
+    "For normal code, documentation, or explanation tasks, start by searching or reading files. "
+    "Use inspect_git_status only when the task is about Git state, diffs, branches, delivery, or local changes. "
+    "Treat search results as candidates; read important files before selecting them. "
     "Use finish once enough context has been gathered."
 )
 
@@ -138,7 +141,7 @@ def build_agent_prompt(
             "Available read-only actions:",
             "- search_files: find repo files by task-focused query.",
             "- read_file: inspect one repo-relative file returned by search or initial context.",
-            "- inspect_git_status: inspect local branch, changes, and diff stats.",
+            "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
             "- finish: stop exploration and select the files most useful for planning/proposal.",
             "",
             "Initial ranked context:",
@@ -148,6 +151,7 @@ def build_agent_prompt(
             observations or "No previous observations.",
             "",
             "Choose the single next action that will most improve repository understanding. "
+            "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "
             "Prefer finish if the useful files are already known.",
         ]
     )
