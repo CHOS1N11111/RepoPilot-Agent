@@ -51,6 +51,7 @@ flowchart LR
 - 🧭 Dependency-light Python implementation using the standard library for the current MVP.
 - 🖥️ Local web UI for task input, LLM settings, proposal review, timelines, GitHub state, and diffs.
 - 🧠 Optional OpenAI-compatible LLM integration with deterministic fallback.
+- Read-only iterative agent mode for multi-step search, file reading, Git inspection, and context selection.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
@@ -71,6 +72,7 @@ flowchart LR
 | ---------------------- | ----------------------------------------------------------------------------------------------------- |
 | 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths.           |
 | 🔎 Retrieval           | Scores files with task terms, path intent, symbols, multi-snippets, and source/test pairing.          |
+| Iterative agent        | Lets an LLM choose bounded read-only search/read/Git-inspection steps before planning.                |
 | 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
@@ -89,6 +91,7 @@ repopilot.py
 src/repopilot_agent/
   scanner.py            repository file scanning
   search.py             lightweight relevance search
+  agent_loop.py         read-only iterative LLM exploration loop
   planner.py            deterministic and LLM planning
   patch_proposer.py     patch proposal and LLM patch review
   patch_apply.py        protected file edit application and rollback snapshots
@@ -220,6 +223,14 @@ Large patch-proposal prompts can take longer on API gateways. The default LLM re
 python repopilot.py run --repo . --task "inspect project docs" --use-llm --llm-timeout 240
 ```
 
+Enable read-only iterative agent mode when you want Codex-like multi-step exploration before planning and proposal generation:
+
+```bash
+python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
+```
+
+In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, and `inspect_git_status`. It still cannot write files directly; approved edits continue to flow through patch proposals and human review.
+
 Disable related memory lookup for a clean-context run:
 
 ```bash
@@ -242,6 +253,7 @@ RepoPilot uses the configured endpoint URL exactly as provided. It does not appe
 RepoPilot builds explicit context packets before each LLM call. Planning receives compact ranked file previews, while patch proposal receives bounded file content for the most relevant files.
 
 - Context packets have per-call character and file-count budgets.
+- Iterative agent mode can run several smaller read-only LLM calls before patch proposal, then prioritize the files discovered during those steps.
 - LLM traces include a context budget summary showing included, truncated, omitted, and edit-eligible files.
 - Direct `file_edits` are accepted only for files whose full content fit into the patch context packet.
 - If a file is too large and only a snippet was provided, RepoPilot keeps the model's file-level recommendation but blocks apply-ready edits for that file.
@@ -381,4 +393,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, rollback snapshots, validation planning, validation runner, validation feedback and repair proposal generation, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, rollback snapshots, validation planning, validation runner, validation feedback and repair proposal generation, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, proposal sessions, timeline events, root launcher, and unit tests.

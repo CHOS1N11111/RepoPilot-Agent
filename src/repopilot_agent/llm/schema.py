@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from .base import LLMError
 from .json_utils import parse_json_object
 from ..models import (
+    AgentAction,
     FileChangeProposal,
     FileEditProposal,
     PatchReview,
@@ -17,6 +18,7 @@ from ..models import (
 ALLOWED_CHANGE_TYPES = {"bugfix", "feature", "test", "documentation", "refinement"}
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_RISK_LEVELS = {"high", "medium", "low"}
+ALLOWED_AGENT_ACTIONS = {"search_files", "read_file", "inspect_git_status", "finish"}
 
 
 def parse_plan_steps_json(response: str) -> list[PlanStep]:
@@ -37,6 +39,42 @@ def parse_plan_steps_json(response: str) -> list[PlanStep]:
             raise LLMError("Each LLM plan step must include a non-empty detail.")
         steps.append(PlanStep(order=index, title=title.strip(), detail=detail.strip()))
     return steps
+
+
+def parse_agent_action_json(response: str) -> AgentAction:
+    data = parse_json_object(response)
+    thought = data.get("thought")
+    action = data.get("action")
+    if not isinstance(thought, str) or not thought.strip():
+        raise LLMError("Agent action JSON must include a non-empty thought.")
+    if action not in ALLOWED_AGENT_ACTIONS:
+        raise LLMError(f"Invalid agent action: {action}")
+
+    query = data.get("query", "")
+    path = data.get("path", "")
+    summary = data.get("summary", "")
+    selected_paths = data.get("selected_paths", [])
+    if not isinstance(query, str):
+        raise LLMError("Agent action query must be a string when provided.")
+    if not isinstance(path, str):
+        raise LLMError("Agent action path must be a string when provided.")
+    if not isinstance(summary, str):
+        raise LLMError("Agent action summary must be a string when provided.")
+    if not isinstance(selected_paths, list) or not all(isinstance(item, str) for item in selected_paths):
+        raise LLMError("Agent action selected_paths must be a list of strings.")
+    if action == "search_files" and not query.strip():
+        raise LLMError("search_files action requires a non-empty query.")
+    if action == "read_file" and not path.strip():
+        raise LLMError("read_file action requires a non-empty path.")
+
+    return AgentAction(
+        thought=thought.strip(),
+        action=action,
+        query=query.strip(),
+        path=path.strip(),
+        summary=summary.strip(),
+        selected_paths=[item.strip() for item in selected_paths if item.strip()],
+    )
 
 
 def parse_patch_proposal_json(response: str) -> dict:

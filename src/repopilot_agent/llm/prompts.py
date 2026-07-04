@@ -33,6 +33,16 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
     "Do not approve if the diff appears unrelated, unsafe, or unsupported by context."
 )
 
+AGENT_SYSTEM_PROMPT = (
+    "You are RepoPilot Agent's read-only repository exploration loop. "
+    "Choose exactly one next action and return only JSON with this shape: "
+    '{"thought":"why this action is useful","action":"search_files|read_file|inspect_git_status|finish",'
+    '"query":"search query if action is search_files","path":"repo-relative path if action is read_file",'
+    '"selected_paths":["repo-relative paths useful for the final proposal"],"summary":"brief finish summary"}. '
+    "Use only read-only actions. Do not propose file edits here. "
+    "Use finish once enough context has been gathered."
+)
+
 
 def build_planner_prompt(
     task: str,
@@ -109,6 +119,36 @@ def build_patch_review_prompt(task: str, proposed_diff: str, validation_suggesti
             "\n".join(f"- {item}" for item in validation_suggestions) or "No validation suggestions.",
             "",
             "Review whether the diff is focused, relevant, and safe enough for user-approved application.",
+        ]
+    )
+
+
+def build_agent_prompt(
+    task: str,
+    initial_context: str,
+    observations: str,
+    step_number: int,
+    max_steps: int,
+) -> str:
+    return "\n".join(
+        [
+            f"Task: {task}",
+            f"Step: {step_number} of {max_steps}",
+            "",
+            "Available read-only actions:",
+            "- search_files: find repo files by task-focused query.",
+            "- read_file: inspect one repo-relative file returned by search or initial context.",
+            "- inspect_git_status: inspect local branch, changes, and diff stats.",
+            "- finish: stop exploration and select the files most useful for planning/proposal.",
+            "",
+            "Initial ranked context:",
+            initial_context or "No initial context was selected.",
+            "",
+            "Previous observations:",
+            observations or "No previous observations.",
+            "",
+            "Choose the single next action that will most improve repository understanding. "
+            "Prefer finish if the useful files are already known.",
         ]
     )
 

@@ -85,9 +85,18 @@ def build_report_timeline(report: Any, proposal_id: str | None = None) -> list[T
     events = [
         TimelineEvent("scan", "done", f"Scanned {report.files_scanned} text file(s)."),
         TimelineEvent("search", "done", f"Selected {len(report.relevant_files)} relevant file(s)."),
-        TimelineEvent("plan", "done", f"Plan source: {report.plan_metadata.source}."),
-        TimelineEvent("proposal", "done", f"Proposal source: {report.patch_proposal_metadata.source}."),
     ]
+    agent_steps = getattr(report, "agent_steps", [])
+    if agent_steps:
+        events.append(TimelineEvent("agent", "done", f"Completed {len(agent_steps)} read-only exploration step(s)."))
+    else:
+        events.append(TimelineEvent("agent", "skipped", "Iterative agent was not run."))
+    events.extend(
+        [
+            TimelineEvent("plan", "done", f"Plan source: {report.plan_metadata.source}."),
+            TimelineEvent("proposal", "done", f"Proposal source: {report.patch_proposal_metadata.source}."),
+        ]
+    )
     proposal = report.patch_proposal
     if proposal and proposal.proposed_diff:
         events.append(TimelineEvent("diff", "done", "Prepared a proposed diff for review."))

@@ -62,6 +62,10 @@
             <input id="disableMemory" type="checkbox" />
             Disable memory
           </label>
+          <label class="checkbox">
+            <input id="iterativeAgent" type="checkbox" />
+            Iterative agent
+          </label>
         </div>
 
         <label>
@@ -88,6 +92,10 @@
         <label>
           LLM timeout seconds
           <input id="timeoutSeconds" type="number" min="1" step="1" value="120" />
+        </label>
+        <label>
+          Agent max steps
+          <input id="agentMaxSteps" type="number" min="1" max="12" step="1" value="6" />
         </label>
         <div class="button-row">
           <button id="testLlm" class="secondary" type="button">Test LLM Connection</button>
@@ -120,6 +128,8 @@
           </div>
           <h2>Timeline</h2>
           <div id="timelineList" class="timeline"></div>
+          <h2>Agent Steps</h2>
+          <div id="agentStepList" class="stack"></div>
           <h2>Plan</h2>
           <ol id="planList" class="stack"></ol>
           <h2>Proposed Changes</h2>

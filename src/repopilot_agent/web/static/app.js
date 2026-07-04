@@ -219,6 +219,8 @@ function buildWorkflowPayload() {
     ...buildLlmPayload(),
     no_llm_fallback: $("disableFallback").checked,
     use_memory: !$("disableMemory").checked,
+    iterative_agent: $("iterativeAgent").checked,
+    agent_max_steps: $("agentMaxSteps").value.trim(),
   };
 }
 
@@ -371,6 +373,7 @@ function renderReport(report, payload) {
   $("planSource").textContent = sourceLabel(report.plan_metadata);
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
   renderTimeline(report.timeline || []);
+  $("agentStepList").innerHTML = renderAgentSteps(report.agent_steps || []);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
@@ -424,6 +427,21 @@ function renderMemoryContext(memory) {
     })
     .join("");
   return `<div class="item"><div class="item-title">Related Memory</div><p>${memory.length} previous run(s) may help this task.</p></div>${rows}`;
+}
+
+function renderAgentSteps(steps) {
+  if (!steps || steps.length === 0) {
+    return item("Iterative agent was not run for this workflow.");
+  }
+  return steps
+    .map((step) => `<div class="item">
+      <div class="item-title">Step ${escapeHtml(step.order)}: ${escapeHtml(step.action)}</div>
+      <p>${escapeHtml(step.thought || "")}</p>
+      <p><small>Input: ${escapeHtml(step.tool_input || "(none)")}</small></p>
+      <pre>${escapeHtml(step.observation || "")}</pre>
+      ${(step.selected_paths || []).length ? `<p><small>Selected: ${escapeHtml(step.selected_paths.join(", "))}</small></p>` : ""}
+    </div>`)
+    .join("");
 }
 
 function renderProposals(proposal) {
@@ -791,7 +809,7 @@ function buildLlmInputPreview(report, payload) {
     .slice(0, 5)
     .map((hit) => `Path: ${hit.path}\nScore: ${hit.score}\nReasons: ${hit.reasons.join(", ")}\nPreview:\n${hit.preview}`)
     .join("\n\n---\n\n");
-  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nUse memory: ${payload.use_memory}\nModel: ${payload.model || "(default)"}\nTimeout: ${payload.timeout_seconds || "(default)"} seconds\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
+  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nUse memory: ${payload.use_memory}\nIterative agent: ${payload.iterative_agent}\nAgent max steps: ${payload.agent_max_steps || "(default)"}\nModel: ${payload.model || "(default)"}\nTimeout: ${payload.timeout_seconds || "(default)"} seconds\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
 }
 
 function buildLlmOutputPreview(report) {

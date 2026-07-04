@@ -142,6 +142,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
                 llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
+                iterative_agent=_payload_iterative_agent(payload),
+                agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -349,6 +351,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
                 llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
+                iterative_agent=_payload_iterative_agent(payload),
+                agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -506,6 +510,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
                 llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
+                iterative_agent=_payload_iterative_agent(payload),
+                agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
             )
         except Exception as exc:
@@ -755,6 +761,23 @@ def _payload_llm_timeout_seconds(payload: dict[str, Any]) -> int | None:
     if value <= 0:
         raise LLMError("LLM timeout must be greater than 0 seconds.")
     return value
+
+
+def _payload_iterative_agent(payload: dict[str, Any]) -> bool:
+    return _payload_bool(payload.get("iterative_agent"), default=False)
+
+
+def _payload_agent_max_steps(payload: dict[str, Any]) -> int:
+    raw = payload.get("agent_max_steps")
+    if raw is None or raw == "":
+        return 6
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise LLMError("Agent max steps must be an integer.") from exc
+    if value <= 0:
+        raise LLMError("Agent max steps must be greater than 0.")
+    return min(value, 12)
 
 
 def _payload_bool(value: Any, default: bool = False) -> bool:

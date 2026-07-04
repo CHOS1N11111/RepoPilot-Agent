@@ -34,6 +34,17 @@ def main() -> int:
         help="LLM request timeout in seconds. Defaults to REPOPILOT_LLM_TIMEOUT_SECONDS or 120.",
     )
     run_parser.add_argument(
+        "--iterative-agent",
+        action="store_true",
+        help="Run a read-only multi-step LLM exploration loop before planning and proposal.",
+    )
+    run_parser.add_argument(
+        "--agent-max-steps",
+        type=int,
+        default=6,
+        help="Maximum read-only iterative agent steps when --iterative-agent is enabled.",
+    )
+    run_parser.add_argument(
         "--no-json-mode",
         action="store_true",
         help="Do not send response_format=json_object to the OpenAI-compatible provider.",
@@ -100,6 +111,8 @@ def main() -> int:
             allow_llm_fallback=not args.no_llm_fallback,
             llm_json_mode=False if args.no_json_mode else None,
             llm_timeout_seconds=args.llm_timeout,
+            iterative_agent=args.iterative_agent,
+            agent_max_steps=args.agent_max_steps,
             use_memory=not args.no_memory,
         )
         if args.json:
@@ -201,6 +214,18 @@ def _print_report(report) -> None:
                 print(f"  Validation: {'; '.join(memory.validation)}")
     else:
         print("- No related previous runs found.")
+    print()
+
+    print("Agent steps")
+    if report.agent_steps:
+        for step in report.agent_steps:
+            print(f"{step.order}. {step.action}: {step.thought}")
+            if step.tool_input:
+                print(f"  Input: {step.tool_input}")
+            if step.selected_paths:
+                print(f"  Selected: {', '.join(step.selected_paths)}")
+    else:
+        print("- Iterative agent was not run.")
     print()
 
     print("Plan")

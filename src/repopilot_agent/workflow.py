@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
+from .agent_loop import AgentLoopResult, run_agent_loop, select_agent_hits
 from .llm.base import LLMClient, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
@@ -33,6 +34,8 @@ def run_workflow(
     llm_timeout_seconds: int | None = None,
     use_memory: bool = True,
     memory_context: list[MemoryContextItem] | None = None,
+    iterative_agent: bool = False,
+    agent_max_steps: int = 6,
 ) -> WorkflowReport:
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
@@ -41,6 +44,7 @@ def run_workflow(
     related_memory = _resolve_memory_context(root, task, use_memory, memory_context)
     llm_traces: list[LLMCallTrace] = []
     llm_creation_error: LLMError | None = None
+    agent_result: AgentLoopResult | None = None
     if use_llm:
         if llm_client is None:
             try:
@@ -55,16 +59,22 @@ def run_workflow(
                 llm_creation_error = exc
                 plan = create_plan(task, hits, memory_context=related_memory)
                 plan_metadata = PlanMetadata(source="rules", model=llm_model, fallback_used=True, error=str(exc))
-            else:
-                plan, plan_metadata = create_plan_with_optional_llm(
-                    task,
-                    hits,
-                    llm_client=llm_client,
-                    allow_fallback=allow_llm_fallback,
-                    traces=llm_traces,
-                    memory_context=related_memory,
-                )
-        else:
+        if llm_client is not None:
+            if iterative_agent:
+                try:
+                    agent_result = run_agent_loop(
+                        task,
+                        root,
+                        files,
+                        hits,
+                        llm_client,
+                        traces=llm_traces,
+                        max_steps=agent_max_steps,
+                    )
+                    hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
+                except LLMError:
+                    if not allow_llm_fallback:
+                        raise
             plan, plan_metadata = create_plan_with_optional_llm(
                 task,
                 hits,
@@ -131,6 +141,7 @@ def run_workflow(
         patch_proposal=patch_proposal,
         patch_proposal_metadata=patch_proposal_metadata,
         patch_review=patch_review,
+        agent_steps=agent_result.steps if agent_result else [],
         llm_traces=llm_traces,
         validation=validation,
         validation_feedback=validation_feedback,

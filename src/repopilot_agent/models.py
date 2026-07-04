@@ -54,6 +54,26 @@ class LLMCallTrace:
 
 
 @dataclass(frozen=True)
+class AgentAction:
+    thought: str
+    action: str
+    query: str = ""
+    path: str = ""
+    selected_paths: list[str] = field(default_factory=list)
+    summary: str = ""
+
+
+@dataclass(frozen=True)
+class AgentStep:
+    order: int
+    action: str
+    thought: str
+    tool_input: str
+    observation: str
+    selected_paths: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class ValidationResult:
     command: str
     allowed: bool
@@ -335,6 +355,7 @@ class WorkflowReport:
         default_factory=lambda: PatchProposalMetadata(source="rules")
     )
     patch_review: PatchReview | None = None
+    agent_steps: list[AgentStep] = field(default_factory=list)
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None

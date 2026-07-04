@@ -313,6 +313,46 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual([trace.name for trace in report.llm_traces], ["planner", "patch_proposal", "patch_review"])
         self.assertEqual(len(client.calls), 3)
 
+    def test_workflow_iterative_agent_runs_before_plan_and_proposal(self) -> None:
+        client = FakeLLMClient(
+            [
+                '{"thought":"Find parser files.","action":"search_files","query":"parse","path":"",'
+                '"selected_paths":[],"summary":""}',
+                '{"thought":"Read the implementation.","action":"read_file","query":"","path":"main.py",'
+                '"selected_paths":[],"summary":""}',
+                '{"thought":"Enough context is available.","action":"finish","query":"","path":"",'
+                '"selected_paths":["main.py"],"summary":"main.py is the implementation target."}',
+                '{"steps":[{"title":"Inspect parser","detail":"Review main.py parser behavior."}]}',
+                '{"objective":"Fix parser failure safely","files":[{"path":"main.py","change_type":"bugfix",'
+                '"rationale":"main.py contains the selected parser behavior.","suggested_actions":["Guard invalid input"],'
+                '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest discover -s tests"],'
+                '"ready_for_patch":true,"file_edits":[]}',
+            ],
+            model="fake-iterative",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
+            (root / "README.md").write_text("General project docs\n", encoding="utf-8")
+            report = run_workflow(
+                root,
+                "fix parse failure",
+                use_llm=True,
+                llm_client=client,
+                iterative_agent=True,
+                agent_max_steps=3,
+            )
+
+        self.assertEqual([step.action for step in report.agent_steps], ["search_files", "read_file", "finish"])
+        self.assertEqual(report.relevant_files[0].path, "main.py")
+        self.assertEqual(report.plan_metadata.source, "llm")
+        self.assertEqual(report.patch_proposal_metadata.source, "llm")
+        self.assertEqual(
+            [trace.name for trace in report.llm_traces],
+            ["agent_step_1", "agent_step_2", "agent_step_3", "planner", "patch_proposal"],
+        )
+        self.assertEqual(len(client.calls), 5)
+
 
 if __name__ == "__main__":
     unittest.main()
