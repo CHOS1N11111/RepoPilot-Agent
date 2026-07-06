@@ -137,6 +137,7 @@ async function applyProposal() {
   setStatus("Applying proposal...");
   try {
     const result = await postJson("/api/apply", {
+      ...buildRepositoryPayload(),
       proposal_id: state.proposalId,
       approved_paths: approvedPaths,
     });
@@ -181,6 +182,7 @@ async function revertProposal() {
   setStatus("Reverting applied proposal...");
   try {
     const result = await postJson("/api/revert", {
+      ...buildRepositoryPayload(),
       proposal_id: state.proposalId,
     });
     if (result.error) {
@@ -683,7 +685,7 @@ function renderHistoryDetail(run) {
   const validation = (run.validation || [])
     .map((result) => `<li>${escapeHtml(result.command)}: ${result.allowed ? `exit ${result.exit_code}` : "rejected"}</li>`)
     .join("");
-  const traceCount = (run.llm_traces || []).length;
+  const traces = (run.llm_traces || []).map(renderSavedTrace).join("");
   const pinnedTag = run.pinned ? ' <span class="tag ok">pinned</span>' : "";
   $("historyDetail").innerHTML = `
     <div class="item">
@@ -700,14 +702,26 @@ function renderHistoryDetail(run) {
       <pre>${escapeHtml(run.proposal?.proposed_diff || "No proposed diff saved.")}</pre>
     </div>
     <div class="item">
-      <div class="item-title">LLM Traces</div>
-      <p>${traceCount} trace record(s) saved.</p>
+      <div class="item-title">LLM Trace History</div>
+      ${traces || "<p>No LLM traces saved.</p>"}
     </div>
     <div class="item">
       <div class="item-title">Validation</div>
       <ul>${validation || "<li>No validation saved.</li>"}</ul>
     </div>
   `;
+}
+
+function renderSavedTrace(trace) {
+  return `<details class="trace-details">
+    <summary>${escapeHtml(trace.name || "trace")} ${trace.model ? `<span class="tag">${escapeHtml(trace.model)}</span>` : ""} <span class="tag ${trace.parsed ? "ok" : "danger"}">${trace.parsed ? "parsed" : "failed"}</span></summary>
+    <p>${escapeHtml(trace.error || `Latency: ${trace.latency_ms ?? 0} ms`)}</p>
+    ${trace.context_summary ? `<strong>Context Budget</strong><p>${escapeHtml(trace.context_summary)}</p>` : ""}
+    <strong>Prompt</strong>
+    <pre>${escapeHtml(trace.prompt_preview || "")}</pre>
+    <strong>Raw Output</strong>
+    <pre>${escapeHtml(trace.raw_output || "")}</pre>
+  </details>`;
 }
 
 function buildValidationNotes() {

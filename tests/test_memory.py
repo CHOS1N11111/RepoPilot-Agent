@@ -13,6 +13,50 @@ from repopilot_agent.models import LLMCallTrace, PlanMetadata, ValidationResult,
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_save_and_read_proposal_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "memory.sqlite3"
+            store = MemoryStore(db_path)
+            session = {
+                "proposal_id": "proposal-1",
+                "repo_path": tmp,
+                "task": "update notes",
+                "file_edits": [
+                    {"path": "notes.txt", "new_content": "new\n", "rationale": "Update notes."}
+                ],
+                "validation_commands": ["python -m unittest discover -s tests"],
+                "created_at": "2026-07-06T00:00:00+00:00",
+                "allowed_paths": ["notes.txt"],
+                "approved_paths": ["notes.txt"],
+                "applied_paths": ["notes.txt"],
+                "timeline": [{"step": "apply", "status": "done", "detail": "Applied 1 file."}],
+                "applied": True,
+                "reverted": False,
+                "rollback_snapshot": [
+                    {
+                        "path": "notes.txt",
+                        "existed": True,
+                        "original_content": "old\n",
+                        "applied_content": "new\n",
+                    }
+                ],
+                "validation": [],
+                "validation_feedback": None,
+            }
+
+            store.save_proposal_session(session)
+            loaded = store.get_proposal_session("proposal-1")
+
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["approved_paths"], ["notes.txt"])
+            self.assertEqual(loaded["rollback_snapshot"][0]["original_content"], "old\n")
+
+            session["reverted"] = True
+            store.save_proposal_session(session)
+            updated = store.get_proposal_session("proposal-1")
+
+            self.assertTrue(updated["reverted"])
+
     def test_create_and_read_run_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "memory.sqlite3"

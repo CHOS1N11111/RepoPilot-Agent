@@ -23,7 +23,15 @@ from .repo_source import resolve_repository_reference, sync_repository_reference
 from .safety import SafetyCheckError
 from .validation_feedback import build_validation_feedback
 from .validator import run_validation
-from .web_sessions import append_timeline, build_report_timeline, create_proposal_session, get_proposal_session
+from .web_sessions import (
+    ProposalSession,
+    append_timeline,
+    build_report_timeline,
+    create_proposal_session,
+    get_proposal_session,
+    proposal_session_from_record,
+    proposal_session_to_record,
+)
 from .workflow import run_workflow
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
@@ -172,7 +180,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if not proposal_id:
             self._send_json({"error": "proposal_id is required."}, status=HTTPStatus.BAD_REQUEST)
             return
-        session = get_proposal_session(proposal_id)
+        session = self._get_session_or_restore(proposal_id, payload)
         if session is None:
             self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -235,6 +243,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 append_timeline(session, "validation", "skipped", "No validation command was configured.")
         except SafetyCheckError as exc:
             append_timeline(session, "safety", "blocked", "Pre-apply safety check blocked this proposal.")
+            self._persist_session(session)
             self._send_json(
                 {
                     "error": str(exc),
@@ -262,6 +271,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["reverted"] = public_session["reverted"]
         data["approved_paths"] = public_session["approved_paths"]
         data["applied_paths"] = public_session["applied_paths"]
+        self._persist_session(session)
         try:
             self._memory(session.repo_path).mark_proposal_applied(
                 proposal_id,
@@ -278,7 +288,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if not proposal_id:
             self._send_json({"error": "proposal_id is required."}, status=HTTPStatus.BAD_REQUEST)
             return
-        session = get_proposal_session(proposal_id)
+        session = self._get_session_or_restore(proposal_id, payload)
         if session is None:
             self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -295,8 +305,10 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             session.reverted = True
             session.validation_feedback = None
             append_timeline(session, "rollback", "done", result.message)
+            self._persist_session(session)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             append_timeline(session, "rollback", "blocked", str(exc))
+            self._persist_session(session)
             self._send_json(
                 {
                     "error": str(exc),
@@ -328,7 +340,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if not proposal_id:
             self._send_json({"error": "proposal_id is required."}, status=HTTPStatus.BAD_REQUEST)
             return
-        session = get_proposal_session(proposal_id)
+        session = self._get_session_or_restore(proposal_id, payload)
         if session is None:
             self._send_json({"error": "Unknown proposal_id."}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -396,6 +408,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 "pending",
                 f"Waiting for approval on repair proposal {repair_proposal_id}.",
             )
+            self._persist_session(repair_session)
             timeline = repair_session.timeline
 
         data = report.to_dict()
@@ -547,6 +560,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             )
             proposal_id = session.proposal_id
             append_timeline(session, "approval", "pending", f"Waiting for approval on proposal {proposal_id}.")
+            self._persist_session(session)
             timeline = session.timeline
         data = report.to_dict()
         data["repository_source"] = repo_source.to_dict()
@@ -719,6 +733,22 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _memory(self, repo: str | Path) -> MemoryStore:
         return MemoryStore(default_memory_path(repo))
+
+    def _get_session_or_restore(self, proposal_id: str, payload: dict[str, Any]) -> ProposalSession | None:
+        session = get_proposal_session(proposal_id)
+        if session is not None:
+            return session
+        try:
+            repo_source = self._resolve_payload_repository(payload, clone_if_missing=False)
+            record = self._memory(repo_source.local_path).get_proposal_session(proposal_id)
+        except Exception:
+            return None
+        if not record:
+            return None
+        return proposal_session_from_record(record)
+
+    def _persist_session(self, session: ProposalSession) -> None:
+        self._memory(session.repo_path).save_proposal_session(proposal_session_to_record(session))
 
     def _resolve_payload_repository_or_error(
         self,

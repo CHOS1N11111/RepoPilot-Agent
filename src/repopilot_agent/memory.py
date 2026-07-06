@@ -190,6 +190,36 @@ class MemoryStore:
             run_id = str(row["run_id"])
             conn.execute("UPDATE runs SET applied = 0, timeline_json = ? WHERE id = ?", (_json(timeline), run_id))
 
+    def save_proposal_session(self, session: dict[str, Any]) -> None:
+        proposal_id = str(session.get("proposal_id") or "").strip()
+        repo_path = str(session.get("repo_path") or "").strip()
+        if not proposal_id:
+            raise ValueError("proposal_id is required to save a proposal session.")
+        if not repo_path:
+            raise ValueError("repo_path is required to save a proposal session.")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO proposal_sessions (id, repo_path, updated_at, data_json)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    repo_path = excluded.repo_path,
+                    updated_at = excluded.updated_at,
+                    data_json = excluded.data_json
+                """,
+                (proposal_id, repo_path, _now(), _json(session)),
+            )
+
+    def get_proposal_session(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT data_json FROM proposal_sessions WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _loads(row["data_json"], None)
+
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -218,6 +248,12 @@ class MemoryStore:
             if run_row is None:
                 return None
             proposal = conn.execute("SELECT * FROM proposals WHERE run_id = ?", (run_id,)).fetchone()
+            proposal_session = None
+            if proposal:
+                proposal_session = conn.execute(
+                    "SELECT data_json FROM proposal_sessions WHERE id = ?",
+                    (proposal["id"],),
+                ).fetchone()
             traces = conn.execute("SELECT * FROM llm_traces WHERE run_id = ? ORDER BY rowid", (run_id,)).fetchall()
             validation = conn.execute(
                 "SELECT * FROM validation_results WHERE run_id = ? ORDER BY rowid",
@@ -225,6 +261,7 @@ class MemoryStore:
             ).fetchall()
         data = _row_to_run(run_row)
         data["proposal"] = _row_to_proposal(proposal) if proposal else None
+        data["proposal_session"] = _loads(proposal_session["data_json"], None) if proposal_session else None
         data["llm_traces"] = [_row_to_trace(row) for row in traces]
         data["validation"] = [_row_to_validation(row) for row in validation]
         return data
@@ -236,6 +273,9 @@ class MemoryStore:
                 return False
             conn.execute("DELETE FROM validation_results WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM llm_traces WHERE run_id = ?", (run_id,))
+            proposal_rows = conn.execute("SELECT id FROM proposals WHERE run_id = ?", (run_id,)).fetchall()
+            for proposal_row in proposal_rows:
+                conn.execute("DELETE FROM proposal_sessions WHERE id = ?", (proposal_row["id"],))
             conn.execute("DELETE FROM proposals WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
         return True
@@ -254,6 +294,7 @@ class MemoryStore:
             count = int(row["count"] if row else 0)
             conn.execute("DELETE FROM validation_results")
             conn.execute("DELETE FROM llm_traces")
+            conn.execute("DELETE FROM proposal_sessions")
             conn.execute("DELETE FROM proposals")
             conn.execute("DELETE FROM runs")
         return count
@@ -386,6 +427,13 @@ class MemoryStore:
                     stdout TEXT NOT NULL,
                     stderr TEXT NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES runs(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS proposal_sessions (
+                    id TEXT PRIMARY KEY,
+                    repo_path TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    data_json TEXT NOT NULL
                 );
                 """
             )

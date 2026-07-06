@@ -21,7 +21,7 @@ from repopilot_agent.memory import MemoryStore, default_memory_path
 from repopilot_agent.models import FileEditProposal, PlanMetadata, WorkflowReport
 from repopilot_agent.repo_source import RepositorySource
 from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR, _payload_approved_paths
-from repopilot_agent.web_sessions import create_proposal_session
+from repopilot_agent.web_sessions import clear_proposal_sessions, create_proposal_session, proposal_session_to_record
 
 
 class FakeLLMClient(LLMClient):
@@ -454,6 +454,9 @@ class WebServerTests(unittest.TestCase):
                         proposal = json.loads(response.read().decode("utf-8"))
 
                 self.assertIsNotNone(proposal["proposal_id"])
+                stored_session = MemoryStore(default_memory_path(root)).get_proposal_session(proposal["proposal_id"])
+                self.assertIsNotNone(stored_session)
+                self.assertEqual(stored_session["file_edits"][0]["path"], "notes.txt")
                 apply_payload = json.dumps({"proposal_id": proposal["proposal_id"]}).encode("utf-8")
                 apply_request = Request(
                     f"http://127.0.0.1:{server.server_port}/api/apply",
@@ -526,6 +529,74 @@ class WebServerTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
                 server.server_close()
+
+    def test_apply_and_revert_restore_persisted_session_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[
+                    FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            MemoryStore(default_memory_path(root)).save_proposal_session(proposal_session_to_record(session))
+            clear_proposal_sessions()
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                apply_payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "repo_source": "local",
+                        "proposal_id": session.proposal_id,
+                        "approved_paths": ["notes.txt"],
+                    }
+                ).encode("utf-8")
+                apply_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(apply_request, timeout=5) as response:
+                    applied = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(applied["applied"])
+                self.assertTrue(applied["rollback_available"])
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "new\n")
+
+                clear_proposal_sessions()
+                revert_payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "repo_source": "local",
+                        "proposal_id": session.proposal_id,
+                    }
+                ).encode("utf-8")
+                revert_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/revert",
+                    data=revert_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(revert_request, timeout=5) as response:
+                    reverted = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(reverted["reverted"])
+                self.assertFalse(reverted["rollback_available"])
+                self.assertEqual(reverted["restored_files"], ["notes.txt"])
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "old\n")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_proposal_sessions()
 
     def test_apply_api_writes_only_approved_file_edits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

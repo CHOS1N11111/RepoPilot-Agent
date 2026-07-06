@@ -276,7 +276,7 @@ In the web UI:
 4. Click `Generate Proposal`.
 5. Inspect the Summary tab and proposed diff.
 
-The proposal is stored server-side with a `proposal_id`. The browser cannot submit arbitrary file edits for apply; it can only ask the local server to apply selected file edits from a known proposal.
+The proposal is stored server-side with a `proposal_id`. The browser cannot submit arbitrary file edits for apply; it can only ask the local server to apply selected file edits from a known proposal. Proposal sessions are also saved in `.repopilot/memory.sqlite3`, so the web server can restore a generated proposal after restart when the request includes the same repository input.
 
 ## Step 8: Review Safety And Diff
 
@@ -312,6 +312,8 @@ If you want to undo the applied proposal before committing:
 4. Open the Diff tab again to confirm the working tree returned to the expected state.
 
 Rollback is intentionally cautious. If a file was changed again after the proposal was applied, RepoPilot refuses to revert it so it does not overwrite your manual work.
+
+Rollback snapshots are persisted with the proposal session. If the web server restarts after apply, `Revert Applied Proposal` can still restore the approved files as long as those files have not changed again after apply.
 
 ## Step 10: Repair Failed Validation
 
@@ -390,10 +392,12 @@ RepoPilot saves local workflow history in:
 ```
 
 Memory helps later runs by reusing compact summaries, validation outcomes, and task metadata. It does not store API keys.
+It also stores proposal sessions, rollback metadata, and LLM trace history for local inspection.
 
 In the web UI:
 
 - Open History to inspect saved runs.
+- Open saved run details to inspect persisted LLM trace history.
 - Pin important runs so they are prioritized in future planning.
 - Delete one run when it is no longer useful.
 - Clear history for the current repository.
