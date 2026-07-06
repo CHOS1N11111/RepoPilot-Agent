@@ -20,7 +20,7 @@ from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
 from repopilot_agent.models import FileEditProposal, PlanMetadata, WorkflowReport
 from repopilot_agent.repo_source import RepositorySource
-from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR
+from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR, _payload_approved_paths
 from repopilot_agent.web_sessions import create_proposal_session
 
 
@@ -31,6 +31,58 @@ class FakeLLMClient(LLMClient):
 
     def complete(self, messages: list[LLMMessage]) -> str:
         return self.responses.pop(0)
+
+
+class ApprovedPathsPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.edits = [
+            FileEditProposal(path="notes.txt", new_content="new notes\n", rationale="Update notes."),
+            FileEditProposal(path="src/main.py", new_content="print('ok')\n", rationale="Update main."),
+        ]
+
+    def test_payload_approved_paths_defaults_to_all_file_edits(self) -> None:
+        self.assertEqual(_payload_approved_paths({}, self.edits), ["notes.txt", "src/main.py"])
+
+    def test_payload_approved_paths_preserves_proposal_order_and_deduplicates(self) -> None:
+        result = _payload_approved_paths(
+            {"approved_paths": ["src\\main.py", "notes.txt", "notes.txt"]},
+            self.edits,
+        )
+
+        self.assertEqual(result, ["notes.txt", "src/main.py"])
+
+    def test_payload_approved_paths_rejects_empty_or_malformed_values(self) -> None:
+        cases = [
+            ({"approved_paths": []}, "select at least one"),
+            ({"approved_paths": [""]}, "select at least one"),
+            ({"approved_paths": "notes.txt"}, "list of strings"),
+            ({"approved_paths": [123]}, "list of strings"),
+        ]
+
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError) as raised:
+                    _payload_approved_paths(payload, self.edits)
+                self.assertIn(expected, str(raised.exception))
+
+    def test_payload_approved_paths_rejects_unknown_or_unsafe_paths(self) -> None:
+        cases = [
+            ({"approved_paths": ["missing.txt"]}, "not in this proposal"),
+            ({"approved_paths": ["../secret.txt"]}, "Unsafe approved path"),
+            ({"approved_paths": ["/absolute.txt"]}, "Unsafe approved path"),
+        ]
+
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError) as raised:
+                    _payload_approved_paths(payload, self.edits)
+                self.assertIn(expected, str(raised.exception))
+
+    def test_payload_approved_paths_rejects_empty_proposals(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            _payload_approved_paths({}, [])
+
+        self.assertIn("No proposal file edits", str(raised.exception))
 
 
 class WebServerTests(unittest.TestCase):
@@ -470,6 +522,142 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(reverted["restored_files"], ["notes.txt"])
                 self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "old\n")
                 self.assertTrue(any(event["step"] == "rollback" and event["status"] == "done" for event in reverted["timeline"]))
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_writes_only_approved_file_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "first.txt").write_text("old first\n", encoding="utf-8")
+            (root / "second.txt").write_text("old second\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update first file",
+                file_edits=[
+                    FileEditProposal(path="first.txt", new_content="new first\n", rationale="Update first."),
+                    FileEditProposal(path="second.txt", new_content="new second\n", rationale="Update second."),
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["first.txt", "second.txt"],
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                apply_payload = json.dumps(
+                    {"proposal_id": session.proposal_id, "approved_paths": ["first.txt"]}
+                ).encode("utf-8")
+                apply_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(apply_request, timeout=5) as response:
+                    applied = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(applied["applied"])
+                self.assertEqual(applied["changed_files"], ["first.txt"])
+                self.assertEqual(applied["approved_paths"], ["first.txt"])
+                self.assertEqual(applied["applied_paths"], ["first.txt"])
+                self.assertEqual((root / "first.txt").read_text(encoding="utf-8"), "new first\n")
+                self.assertEqual((root / "second.txt").read_text(encoding="utf-8"), "old second\n")
+
+                revert_payload = json.dumps({"proposal_id": session.proposal_id}).encode("utf-8")
+                revert_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/revert",
+                    data=revert_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(revert_request, timeout=5) as response:
+                    reverted = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(reverted["reverted"])
+                self.assertEqual(reverted["restored_files"], ["first.txt"])
+                self.assertEqual((root / "first.txt").read_text(encoding="utf-8"), "old first\n")
+                self.assertEqual((root / "second.txt").read_text(encoding="utf-8"), "old second\n")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_rejects_approved_paths_outside_session_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[
+                    FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                apply_payload = json.dumps(
+                    {"proposal_id": session.proposal_id, "approved_paths": ["missing.txt"]}
+                ).encode("utf-8")
+                apply_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(apply_request, timeout=5)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertIn("not in this proposal", data["error"])
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "old\n")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_rejects_empty_approved_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[
+                    FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                apply_payload = json.dumps(
+                    {"proposal_id": session.proposal_id, "approved_paths": []}
+                ).encode("utf-8")
+                apply_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=apply_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(apply_request, timeout=5)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertIn("select at least one", data["error"])
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "old\n")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

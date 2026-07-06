@@ -276,7 +276,7 @@ In the web UI:
 4. Click `Generate Proposal`.
 5. Inspect the Summary tab and proposed diff.
 
-The proposal is stored server-side with a `proposal_id`. The browser cannot submit arbitrary file edits for apply; it can only ask the local server to apply a known proposal.
+The proposal is stored server-side with a `proposal_id`. The browser cannot submit arbitrary file edits for apply; it can only ask the local server to apply selected file edits from a known proposal.
 
 ## Step 8: Review Safety And Diff
 
@@ -294,11 +294,13 @@ Do not apply a proposal if the diff touches unexpected files.
 
 When the proposal looks correct:
 
-1. Click `Apply Proposal`.
-2. Confirm the browser prompt.
-3. RepoPilot writes only the server-stored proposal edits.
-4. RepoPilot runs configured or recommended validation commands.
-5. Open the Diff tab to inspect the final working tree diff.
+1. Review the apply-ready file checkboxes in `Proposed Changes`.
+2. Leave only the files you want to approve checked.
+3. Click `Apply Proposal`.
+4. Confirm the browser prompt.
+5. RepoPilot writes only the approved server-stored proposal edits.
+6. RepoPilot runs configured or recommended validation commands.
+7. Open the Diff tab to inspect the final working tree diff.
 
 RepoPilot does not commit, push, or open pull requests automatically.
 

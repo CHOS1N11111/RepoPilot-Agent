@@ -7,7 +7,7 @@ import mimetypes
 from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -17,6 +17,7 @@ from .github_tools import inspect_github_repository
 from .llm.base import LLMError, LLMMessage
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
+from .models import FileEditProposal
 from .patch_apply import apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from .repo_source import resolve_repository_reference, sync_repository_reference
 from .safety import SafetyCheckError
@@ -179,15 +180,27 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Proposal has already been applied."}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            rollback_snapshot = capture_file_snapshots(session.repo_path, session.file_edits)
+            approved_paths = _payload_approved_paths(payload, session.file_edits)
+            approved_path_set = set(approved_paths)
+            approved_edits = [edit for edit in session.file_edits if edit.path in approved_path_set]
+            session.approved_paths = approved_paths
+            session.applied_paths = []
+            append_timeline(
+                session,
+                "approval",
+                "done",
+                f"Approved {len(approved_edits)} of {len(session.file_edits)} proposed file edit(s).",
+            )
+            rollback_snapshot = capture_file_snapshots(session.repo_path, approved_edits)
             result = apply_file_edits(
                 session.repo_path,
-                session.file_edits,
+                approved_edits,
                 task=session.task,
                 allowed_paths=session.allowed_paths,
             )
             session.applied = True
             session.reverted = False
+            session.applied_paths = result.changed_files
             session.rollback_snapshot = rollback_snapshot if result.applied else []
             append_timeline(session, "apply", "done", result.message)
             if session.rollback_snapshot:
@@ -247,6 +260,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["timeline"] = public_session["timeline"]
         data["rollback_available"] = public_session["rollback_available"]
         data["reverted"] = public_session["reverted"]
+        data["approved_paths"] = public_session["approved_paths"]
+        data["applied_paths"] = public_session["applied_paths"]
         try:
             self._memory(session.repo_path).mark_proposal_applied(
                 proposal_id,
@@ -778,6 +793,45 @@ def _payload_agent_max_steps(payload: dict[str, Any]) -> int:
     if value <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
     return min(value, 12)
+
+
+def _payload_approved_paths(payload: dict[str, Any], file_edits: list[FileEditProposal]) -> list[str]:
+    available_paths = [edit.path for edit in file_edits]
+    if not available_paths:
+        raise ValueError("No proposal file edits are available to apply.")
+    raw_paths = payload.get("approved_paths")
+    if raw_paths is None:
+        return available_paths
+    if not isinstance(raw_paths, list) or not all(isinstance(path, str) for path in raw_paths):
+        raise ValueError("approved_paths must be a list of strings.")
+
+    requested: set[str] = set()
+    for raw_path in raw_paths:
+        path = _normalize_approved_path(raw_path)
+        if path:
+            requested.add(path)
+    if not requested:
+        raise ValueError("approved_paths must select at least one proposal file.")
+
+    available = set(available_paths)
+    unknown = sorted(requested - available)
+    if unknown:
+        raise ValueError(
+            "approved_paths contains file(s) that are not in this proposal: "
+            + ", ".join(unknown)
+        )
+    return [path for path in available_paths if path in requested]
+
+
+def _normalize_approved_path(path: str) -> str:
+    stripped = path.strip()
+    if not stripped:
+        return ""
+    normalized = PurePosixPath(stripped.replace("\\", "/"))
+    parts = normalized.parts
+    if normalized.is_absolute() or ".." in parts or any(part in {"", "."} for part in parts):
+        raise ValueError(f"Unsafe approved path: {path}")
+    return normalized.as_posix()
 
 
 def _payload_bool(value: Any, default: bool = False) -> bool:

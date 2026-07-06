@@ -27,6 +27,8 @@ class ProposalSession:
     validation_commands: list[str]
     created_at: str
     allowed_paths: list[str] = field(default_factory=list)
+    approved_paths: list[str] = field(default_factory=list)
+    applied_paths: list[str] = field(default_factory=list)
     timeline: list[TimelineEvent] = field(default_factory=list)
     applied: bool = False
     reverted: bool = False
@@ -45,6 +47,8 @@ class ProposalSession:
             "reverted": self.reverted,
             "rollback_available": rollback_available,
             "allowed_paths": self.allowed_paths,
+            "approved_paths": self.approved_paths,
+            "applied_paths": self.applied_paths,
             "timeline": [asdict(event) for event in self.timeline],
             "validation": [asdict(result) for result in self.validation],
             "validation_feedback": asdict(self.validation_feedback) if self.validation_feedback else None,

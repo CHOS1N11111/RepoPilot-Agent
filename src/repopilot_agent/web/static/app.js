@@ -4,6 +4,8 @@ const state = {
   proposalId: null,
   repairParentId: null,
   rollbackAvailable: false,
+  proposalApplied: false,
+  approvedPaths: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -30,6 +32,18 @@ $("modelSelect").addEventListener("change", () => {
   $("customModelWrap").classList.toggle("hidden", $("modelSelect").value !== "custom");
 });
 $("repoSource").addEventListener("change", updateRepositorySourceUi);
+document.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!target?.dataset?.approvalPath) {
+    return;
+  }
+  if (target.checked) {
+    state.approvedPaths.add(target.dataset.approvalPath);
+  } else {
+    state.approvedPaths.delete(target.dataset.approvalPath);
+  }
+  updateApprovalState();
+});
 
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
@@ -110,8 +124,12 @@ async function applyProposal() {
     setStatus("No apply-ready proposal is available.");
     return;
   }
-  const fileCount = (proposal.file_edits || []).length;
-  const confirmed = window.confirm(`Apply proposal ${state.proposalId} with ${fileCount} file edit(s) to the working tree?`);
+  const approvedPaths = approvedFilePaths();
+  if (!approvedPaths.length) {
+    setStatus("Select at least one proposed file before applying.");
+    return;
+  }
+  const confirmed = window.confirm(`Apply proposal ${state.proposalId} with ${approvedPaths.length} approved file edit(s) to the working tree?`);
   if (!confirmed) {
     return;
   }
@@ -120,6 +138,7 @@ async function applyProposal() {
   try {
     const result = await postJson("/api/apply", {
       proposal_id: state.proposalId,
+      approved_paths: approvedPaths,
     });
     if (result.error) {
       if (result.safety_check) {
@@ -133,13 +152,15 @@ async function applyProposal() {
     $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback);
     state.repairParentId = result.validation_feedback ? state.proposalId : null;
     state.rollbackAvailable = Boolean(result.rollback_available);
+    state.proposalApplied = true;
     $("generateRepairProposal").disabled = !state.repairParentId;
     $("revertProposal").disabled = !state.rollbackAvailable;
     $("rollbackStatus").textContent = state.rollbackAvailable
       ? "Rollback snapshot available for this applied proposal."
       : "No rollback snapshot available.";
     renderTimeline(result.timeline || []);
-    $("applyProposal").disabled = true;
+    setApprovalInputsDisabled(true);
+    updateApprovalState();
     setStatus(result.message || "Proposal applied.");
     await loadDiff(false);
   } catch (error) {
@@ -170,10 +191,12 @@ async function revertProposal() {
     }
     $("diffOutput").textContent = result.diff || "No diff.";
     state.rollbackAvailable = Boolean(result.rollback_available);
+    state.proposalApplied = false;
     state.repairParentId = null;
     $("revertProposal").disabled = true;
     $("generateRepairProposal").disabled = true;
-    $("applyProposal").disabled = !state.proposalId || !state.lastReport?.patch_proposal?.apply_ready || !(state.lastReport?.patch_proposal?.file_edits || []).length;
+    setApprovalInputsDisabled(false);
+    updateApprovalState();
     $("rollbackStatus").textContent = "Applied proposal was reverted from its rollback snapshot.";
     $("validationFeedbackList").innerHTML = renderValidationFeedback(null);
     renderTimeline(result.timeline || []);
@@ -368,6 +391,8 @@ function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
   state.repairParentId = report.validation_feedback && state.proposalId ? state.proposalId : null;
   state.rollbackAvailable = Boolean(report.rollback_available);
+  state.proposalApplied = false;
+  state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));
   updateRepositorySourceStatus(report.repository_source);
   $("filesScanned").textContent = report.files_scanned;
   $("planSource").textContent = sourceLabel(report.plan_metadata);
@@ -386,7 +411,7 @@ function renderReport(report, payload) {
     2
   );
   $("proposedDiffOutput").textContent = report.patch_proposal?.proposed_diff || "No proposed diff. Use LLM proposal generation for apply-ready edits.";
-  $("applyProposal").disabled = !state.proposalId || !report.patch_proposal?.apply_ready || !(report.patch_proposal.file_edits || []).length;
+  updateApprovalState();
   $("revertProposal").disabled = !state.rollbackAvailable;
   $("rollbackStatus").textContent = state.proposalId
     ? "Proposal is stored server-side; rollback becomes available after apply."
@@ -444,18 +469,59 @@ function renderAgentSteps(steps) {
     .join("");
 }
 
+function editableProposalPaths(proposal = state.lastReport?.patch_proposal) {
+  const visiblePaths = new Set((proposal?.files || []).map((file) => file.path));
+  return (proposal?.file_edits || [])
+    .map((edit) => edit.path)
+    .filter((path) => !visiblePaths.size || visiblePaths.has(path));
+}
+
+function approvedFilePaths() {
+  const available = new Set(editableProposalPaths());
+  return Array.from(state.approvedPaths).filter((path) => available.has(path));
+}
+
+function updateApprovalState() {
+  const total = editableProposalPaths().length;
+  const selected = approvedFilePaths().length;
+  $("applyProposal").disabled = !state.proposalId || state.proposalApplied || !state.lastReport?.patch_proposal?.apply_ready || total === 0 || selected === 0;
+  if ($("approvalStatus")) {
+    $("approvalStatus").textContent = total
+      ? `${selected} of ${total} apply-ready file(s) approved.`
+      : "No apply-ready file edits.";
+  }
+}
+
+function setApprovalInputsDisabled(disabled) {
+  document.querySelectorAll("[data-approval-path]").forEach((input) => {
+    input.disabled = disabled;
+  });
+}
+
 function renderProposals(proposal) {
   if (!proposal || !proposal.files || proposal.files.length === 0) {
     return item("No proposed changes.");
   }
+  const editsByPath = new Map((proposal.file_edits || []).map((edit) => [edit.path, edit]));
   const files = proposal.files
     .map((file) => {
       const actions = file.suggested_actions.map((action) => `<li>${escapeHtml(action)}</li>`).join("");
+      const edit = editsByPath.get(file.path);
+      const approved = state.approvedPaths.has(file.path);
+      const approval = edit
+        ? `<label class="approval-row">
+            <input type="checkbox" data-approval-path="${escapeHtml(file.path)}" ${approved ? "checked" : ""} />
+            Approve this file for apply
+          </label>
+          <p><small>${escapeHtml(edit.rationale || "Direct replacement edit available.")}</small></p>`
+        : `<p><small>No direct file edit was generated for this file.</small></p>`;
       return `<div class="item">
         <div class="item-title">${escapeHtml(file.path)}
           <span class="tag">${escapeHtml(file.change_type)}</span>
           <span class="tag ${file.confidence === "high" ? "ok" : "warn"}">${escapeHtml(file.confidence)}</span>
+          ${edit ? '<span class="tag ok">apply-ready</span>' : ""}
         </div>
+        ${approval}
         <p>${escapeHtml(file.rationale)}</p>
         <ul>${actions}</ul>
       </div>`;
