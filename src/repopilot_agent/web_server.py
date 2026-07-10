@@ -24,6 +24,7 @@ from .safety import SafetyCheckError
 from .validation_feedback import build_validation_feedback
 from .validator import run_validation
 from .web_sessions import (
+    DEFAULT_MAX_REPAIR_ATTEMPTS,
     ProposalSession,
     append_timeline,
     build_report_timeline,
@@ -35,6 +36,16 @@ from .web_sessions import (
 from .workflow import run_workflow
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
+MAX_REPAIR_ATTEMPTS_LIMIT = 5
+
+_SESSION_PUBLIC_KEYS = (
+    "parent_proposal_id",
+    "repair_attempt",
+    "max_repair_attempts",
+    "repair_budget_remaining",
+    "next_repair_attempt",
+    "repair_budget_exhausted",
+)
 
 
 def run_web_server(host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -236,7 +247,24 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                         f"Validation completed with {len(failed)} failed and {len(rejected)} rejected command(s).",
                     )
                     if session.validation_feedback:
-                        append_timeline(session, "repair", "available", session.validation_feedback.summary)
+                        if session.repair_budget_exhausted():
+                            append_timeline(
+                                session,
+                                "repair",
+                                "blocked",
+                                f"Repair retry budget exhausted ({session.repair_attempt}/{session.max_repair_attempts}).",
+                            )
+                        else:
+                            append_timeline(
+                                session,
+                                "repair",
+                                "available",
+                                (
+                                    f"{session.validation_feedback.summary} "
+                                    f"Next repair attempt: {session.next_repair_attempt()}/"
+                                    f"{session.max_repair_attempts}."
+                                ),
+                            )
                 else:
                     append_timeline(session, "validation", "done", f"Ran {len(validation)} validation command(s).")
             else:
@@ -271,6 +299,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["reverted"] = public_session["reverted"]
         data["approved_paths"] = public_session["approved_paths"]
         data["applied_paths"] = public_session["applied_paths"]
+        _add_session_public_fields(data, session)
         self._persist_session(session)
         try:
             self._memory(session.repo_path).mark_proposal_applied(
@@ -328,6 +357,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["timeline"] = public_session["timeline"]
         data["rollback_available"] = public_session["rollback_available"]
         data["reverted"] = public_session["reverted"]
+        _add_session_public_fields(data, session)
         try:
             self._memory(session.repo_path).mark_proposal_reverted(proposal_id, data["timeline"])
         except Exception as exc:
@@ -350,6 +380,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if session.validation_feedback is None:
             self._send_json({"error": "No validation feedback is available for this proposal."}, status=HTTPStatus.BAD_REQUEST)
             return
+        if session.repair_budget_exhausted():
+            append_timeline(
+                session,
+                "repair",
+                "blocked",
+                f"Repair retry budget exhausted ({session.repair_attempt}/{session.max_repair_attempts}).",
+            )
+            self._persist_session(session)
+            data = session.to_public_dict()
+            data["error"] = "Repair retry budget exhausted for this proposal."
+            self._send_json(data, status=HTTPStatus.BAD_REQUEST)
+            return
 
         use_llm = bool(payload.get("use_llm"))
         llm_client = None
@@ -366,7 +408,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
 
-        repair_task = session.validation_feedback.repair_task
+        next_repair_attempt = session.repair_attempt + 1
+        repair_task = _repair_task_with_budget(
+            session.validation_feedback.repair_task,
+            next_repair_attempt,
+            session.max_repair_attempts,
+        )
         try:
             report = run_workflow(
                 session.repo_path,
@@ -400,6 +447,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 validation_commands=validation_commands,
                 timeline=timeline,
                 allowed_paths=[file.path for file in proposal.files],
+                parent_proposal_id=proposal_id,
+                repair_attempt=next_repair_attempt,
+                max_repair_attempts=session.max_repair_attempts,
             )
             repair_proposal_id = repair_session.proposal_id
             append_timeline(
@@ -409,12 +459,29 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 f"Waiting for approval on repair proposal {repair_proposal_id}.",
             )
             self._persist_session(repair_session)
+            append_timeline(
+                session,
+                "repair",
+                "done",
+                (
+                    f"Generated repair attempt {next_repair_attempt}/"
+                    f"{session.max_repair_attempts}: {repair_proposal_id}."
+                ),
+            )
+            self._persist_session(session)
             timeline = repair_session.timeline
 
         data = report.to_dict()
         data["proposal_id"] = repair_proposal_id
         data["parent_proposal_id"] = proposal_id
         data["repair_task"] = repair_task
+        data["repair_attempt"] = next_repair_attempt
+        data["max_repair_attempts"] = session.max_repair_attempts
+        data["repair_budget_remaining"] = max(session.max_repair_attempts - next_repair_attempt, 0)
+        data["next_repair_attempt"] = (
+            next_repair_attempt + 1 if next_repair_attempt < session.max_repair_attempts else None
+        )
+        data["repair_budget_exhausted"] = False
         data["timeline"] = [asdict(event) for event in timeline]
         try:
             data["run_id"] = self._memory(report.repo_path).create_run(
@@ -508,6 +575,11 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(validation, list) or not all(isinstance(item, str) for item in validation):
             self._send_json({"error": "validation must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
             return
+        try:
+            max_repair_attempts = _payload_max_repair_attempts(payload)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         repo_source = self._resolve_payload_repository_or_error(payload)
         if repo_source is None:
             return
@@ -557,6 +629,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 validation_commands=validation_commands,
                 timeline=timeline,
                 allowed_paths=[file.path for file in proposal.files],
+                max_repair_attempts=max_repair_attempts,
             )
             proposal_id = session.proposal_id
             append_timeline(session, "approval", "pending", f"Waiting for approval on proposal {proposal_id}.")
@@ -566,6 +639,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["repository_source"] = repo_source.to_dict()
         data["proposal_id"] = proposal_id
         data["timeline"] = [asdict(event) for event in timeline]
+        if proposal_id and session:
+            _add_session_public_fields(data, session)
         try:
             data["run_id"] = self._memory(report.repo_path).create_run(
                 repo_path=report.repo_path,
@@ -823,6 +898,37 @@ def _payload_agent_max_steps(payload: dict[str, Any]) -> int:
     if value <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
     return min(value, 12)
+
+
+def _payload_max_repair_attempts(payload: dict[str, Any]) -> int:
+    raw = payload.get("max_repair_attempts")
+    if raw is None or raw == "":
+        return DEFAULT_MAX_REPAIR_ATTEMPTS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Repair max attempts must be an integer.") from exc
+    if value < 0:
+        raise ValueError("Repair max attempts cannot be negative.")
+    return min(value, MAX_REPAIR_ATTEMPTS_LIMIT)
+
+
+def _repair_task_with_budget(task: str, attempt: int, max_attempts: int) -> str:
+    return "\n\n".join(
+        [
+            task.strip(),
+            (
+                f"Repair attempt: {attempt}/{max_attempts}. "
+                "Use the latest validation failure context and avoid repeating ineffective edits."
+            ),
+        ]
+    ).strip()
+
+
+def _add_session_public_fields(data: dict[str, Any], session: ProposalSession) -> None:
+    public = session.to_public_dict()
+    for key in _SESSION_PUBLIC_KEYS:
+        data[key] = public[key]
 
 
 def _payload_approved_paths(payload: dict[str, Any], file_edits: list[FileEditProposal]) -> list[str]:

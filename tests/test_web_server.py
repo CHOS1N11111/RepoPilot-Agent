@@ -18,9 +18,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
-from repopilot_agent.models import FileEditProposal, PlanMetadata, WorkflowReport
+from repopilot_agent.models import FileEditProposal, PlanMetadata, ValidationFeedback, WorkflowReport
 from repopilot_agent.repo_source import RepositorySource
-from repopilot_agent.web_server import RepoPilotRequestHandler, STATIC_DIR, _payload_approved_paths
+from repopilot_agent.web_server import (
+    RepoPilotRequestHandler,
+    STATIC_DIR,
+    _payload_approved_paths,
+    _payload_max_repair_attempts,
+)
 from repopilot_agent.web_sessions import clear_proposal_sessions, create_proposal_session, proposal_session_to_record
 
 
@@ -83,6 +88,21 @@ class ApprovedPathsPayloadTests(unittest.TestCase):
             _payload_approved_paths({}, [])
 
         self.assertIn("No proposal file edits", str(raised.exception))
+
+    def test_payload_max_repair_attempts_defaults_clamps_and_validates(self) -> None:
+        self.assertEqual(_payload_max_repair_attempts({}), 2)
+        self.assertEqual(_payload_max_repair_attempts({"max_repair_attempts": ""}), 2)
+        self.assertEqual(_payload_max_repair_attempts({"max_repair_attempts": "0"}), 0)
+        self.assertEqual(_payload_max_repair_attempts({"max_repair_attempts": "9"}), 5)
+
+        for payload, expected in [
+            ({"max_repair_attempts": "-1"}, "cannot be negative"),
+            ({"max_repair_attempts": "many"}, "must be an integer"),
+        ]:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError) as raised:
+                    _payload_max_repair_attempts(payload)
+                self.assertIn(expected, str(raised.exception))
 
 
 class WebServerTests(unittest.TestCase):
@@ -944,6 +964,7 @@ class WebServerTests(unittest.TestCase):
                             "repo": str(root),
                             "task": "update notes",
                             "validation": ["python -m unittest test_fail"],
+                            "max_repair_attempts": "2",
                             "use_llm": True,
                             "api_key": "test-key",
                         }
@@ -985,11 +1006,71 @@ class WebServerTests(unittest.TestCase):
 
                 self.assertIsNotNone(applied["validation_feedback"])
                 self.assertIn("test_fail.py", applied["validation_feedback"]["suspected_files"])
+                self.assertEqual(applied["repair_attempt"], 0)
+                self.assertEqual(applied["max_repair_attempts"], 2)
+                self.assertEqual(applied["next_repair_attempt"], 1)
+                self.assertFalse(applied["repair_budget_exhausted"])
                 self.assertEqual(repair["parent_proposal_id"], proposal["proposal_id"])
                 self.assertIsNotNone(repair["proposal_id"])
+                self.assertEqual(repair["repair_attempt"], 1)
+                self.assertEqual(repair["max_repair_attempts"], 2)
+                self.assertEqual(repair["repair_budget_remaining"], 1)
                 self.assertIn("Repair the repository", repair["repair_task"])
+                self.assertIn("Repair attempt: 1/2", repair["repair_task"])
                 self.assertEqual(repair["patch_proposal"]["files"][0]["path"], "test_fail.py")
             finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_repair_proposal_api_rejects_exhausted_retry_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="repair failed tests",
+                file_edits=[
+                    FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")
+                ],
+                validation_commands=["python -m unittest test_fail"],
+                timeline=[],
+                repair_attempt=1,
+                max_repair_attempts=1,
+            )
+            session.validation_feedback = ValidationFeedback(
+                summary="Validation failed.",
+                failures=[],
+                suspected_files=["test_fail.py"],
+                repair_steps=["Fix the failed assertion."],
+                repair_task="Repair the repository after validation failed.",
+                source="rules",
+            )
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps({"proposal_id": session.proposal_id}).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/repair/propose",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch("repopilot_agent.web_server.run_workflow") as workflow:
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(request, timeout=5)
+                    body = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 400)
+                self.assertIn("budget exhausted", body["error"])
+                self.assertEqual(body["repair_attempt"], 1)
+                self.assertEqual(body["max_repair_attempts"], 1)
+                self.assertEqual(body["repair_budget_remaining"], 0)
+                self.assertTrue(body["repair_budget_exhausted"])
+                workflow.assert_not_called()
+            finally:
+                clear_proposal_sessions()
                 server.shutdown()
                 thread.join(timeout=5)
                 server.server_close()

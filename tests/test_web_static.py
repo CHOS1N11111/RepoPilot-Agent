@@ -71,6 +71,13 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("trace.prompt_preview", self.app_js)
         self.assertIn("trace.raw_output", self.app_js)
 
+    def test_repair_budget_controls_are_sent_and_rendered(self) -> None:
+        self.assertIn('id="repairMaxAttempts"', self.index_html)
+        self.assertIn("max_repair_attempts: $(\"repairMaxAttempts\").value.trim()", self.app_js)
+        self.assertIn("repair_budget_exhausted", self.app_js)
+        self.assertIn("next attempt", self.app_js)
+        self.assertIn("function renderRepairBudget", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

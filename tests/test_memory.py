@@ -26,6 +26,9 @@ class MemoryStoreTests(unittest.TestCase):
                 ],
                 "validation_commands": ["python -m unittest discover -s tests"],
                 "created_at": "2026-07-06T00:00:00+00:00",
+                "parent_proposal_id": "proposal-root",
+                "repair_attempt": 1,
+                "max_repair_attempts": 2,
                 "allowed_paths": ["notes.txt"],
                 "approved_paths": ["notes.txt"],
                 "applied_paths": ["notes.txt"],
@@ -48,6 +51,9 @@ class MemoryStoreTests(unittest.TestCase):
             loaded = store.get_proposal_session("proposal-1")
 
             self.assertIsNotNone(loaded)
+            self.assertEqual(loaded["parent_proposal_id"], "proposal-root")
+            self.assertEqual(loaded["repair_attempt"], 1)
+            self.assertEqual(loaded["max_repair_attempts"], 2)
             self.assertEqual(loaded["approved_paths"], ["notes.txt"])
             self.assertEqual(loaded["rollback_snapshot"][0]["original_content"], "old\n")
 

@@ -11,6 +11,9 @@ from .models import FileEditProposal, ValidationFailureDetail, ValidationFeedbac
 from .patch_apply import FileRollbackSnapshot
 
 
+DEFAULT_MAX_REPAIR_ATTEMPTS = 2
+
+
 @dataclass(frozen=True)
 class TimelineEvent:
     step: str
@@ -26,6 +29,9 @@ class ProposalSession:
     file_edits: list[FileEditProposal]
     validation_commands: list[str]
     created_at: str
+    parent_proposal_id: str | None = None
+    repair_attempt: int = 0
+    max_repair_attempts: int = DEFAULT_MAX_REPAIR_ATTEMPTS
     allowed_paths: list[str] = field(default_factory=list)
     approved_paths: list[str] = field(default_factory=list)
     applied_paths: list[str] = field(default_factory=list)
@@ -36,16 +42,33 @@ class ProposalSession:
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None
 
+    def repair_budget_remaining(self) -> int:
+        return max(self.max_repair_attempts - self.repair_attempt, 0)
+
+    def repair_budget_exhausted(self) -> bool:
+        return self.validation_feedback is not None and self.repair_budget_remaining() <= 0
+
+    def next_repair_attempt(self) -> int | None:
+        if self.repair_budget_remaining() <= 0:
+            return None
+        return self.repair_attempt + 1
+
     def to_public_dict(self) -> dict[str, Any]:
         rollback_available = bool(self.applied and not self.reverted and self.rollback_snapshot)
         return {
             "proposal_id": self.proposal_id,
+            "parent_proposal_id": self.parent_proposal_id,
             "repo_path": self.repo_path,
             "task": self.task,
             "created_at": self.created_at,
             "applied": self.applied,
             "reverted": self.reverted,
             "rollback_available": rollback_available,
+            "repair_attempt": self.repair_attempt,
+            "max_repair_attempts": self.max_repair_attempts,
+            "repair_budget_remaining": self.repair_budget_remaining(),
+            "next_repair_attempt": self.next_repair_attempt(),
+            "repair_budget_exhausted": self.repair_budget_exhausted(),
             "allowed_paths": self.allowed_paths,
             "approved_paths": self.approved_paths,
             "applied_paths": self.applied_paths,
@@ -65,6 +88,9 @@ def create_proposal_session(
     validation_commands: list[str],
     timeline: list[TimelineEvent],
     allowed_paths: list[str] | None = None,
+    parent_proposal_id: str | None = None,
+    repair_attempt: int = 0,
+    max_repair_attempts: int = DEFAULT_MAX_REPAIR_ATTEMPTS,
 ) -> ProposalSession:
     proposal_id = uuid4().hex
     session = ProposalSession(
@@ -74,6 +100,9 @@ def create_proposal_session(
         file_edits=file_edits,
         validation_commands=validation_commands,
         created_at=datetime.now(timezone.utc).isoformat(),
+        parent_proposal_id=parent_proposal_id,
+        repair_attempt=max(_int_value(repair_attempt, 0), 0),
+        max_repair_attempts=max(_int_value(max_repair_attempts, DEFAULT_MAX_REPAIR_ATTEMPTS), 0),
         allowed_paths=allowed_paths or [edit.path for edit in file_edits],
         timeline=timeline,
     )
@@ -97,11 +126,14 @@ def clear_proposal_sessions() -> None:
 def proposal_session_to_record(session: ProposalSession) -> dict[str, Any]:
     return {
         "proposal_id": session.proposal_id,
+        "parent_proposal_id": session.parent_proposal_id,
         "repo_path": session.repo_path,
         "task": session.task,
         "file_edits": [asdict(edit) for edit in session.file_edits],
         "validation_commands": session.validation_commands,
         "created_at": session.created_at,
+        "repair_attempt": session.repair_attempt,
+        "max_repair_attempts": session.max_repair_attempts,
         "allowed_paths": session.allowed_paths,
         "approved_paths": session.approved_paths,
         "applied_paths": session.applied_paths,
@@ -122,6 +154,12 @@ def proposal_session_from_record(record: dict[str, Any]) -> ProposalSession:
         file_edits=[_file_edit(item) for item in record.get("file_edits", [])],
         validation_commands=_string_list(record.get("validation_commands", [])),
         created_at=str(record.get("created_at") or datetime.now(timezone.utc).isoformat()),
+        parent_proposal_id=_optional_string(record.get("parent_proposal_id")),
+        repair_attempt=max(_int_value(record.get("repair_attempt"), 0), 0),
+        max_repair_attempts=max(
+            _int_value(record.get("max_repair_attempts"), DEFAULT_MAX_REPAIR_ATTEMPTS),
+            0,
+        ),
         allowed_paths=_string_list(record.get("allowed_paths", [])),
         approved_paths=_string_list(record.get("approved_paths", [])),
         applied_paths=_string_list(record.get("applied_paths", [])),
@@ -234,3 +272,17 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if isinstance(item, str)]
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _int_value(value: object, default: int) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default

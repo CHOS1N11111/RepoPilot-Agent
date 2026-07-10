@@ -150,8 +150,8 @@ async function applyProposal() {
     }
     $("diffOutput").textContent = result.diff || "No diff.";
     $("validationList").innerHTML = renderValidation(result.validation || []);
-    $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback);
-    state.repairParentId = result.validation_feedback ? state.proposalId : null;
+    $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback, result);
+    state.repairParentId = result.validation_feedback && !result.repair_budget_exhausted ? state.proposalId : null;
     state.rollbackAvailable = Boolean(result.rollback_available);
     state.proposalApplied = true;
     $("generateRepairProposal").disabled = !state.repairParentId;
@@ -246,6 +246,7 @@ function buildWorkflowPayload() {
     use_memory: !$("disableMemory").checked,
     iterative_agent: $("iterativeAgent").checked,
     agent_max_steps: $("agentMaxSteps").value.trim(),
+    max_repair_attempts: $("repairMaxAttempts").value.trim(),
   };
 }
 
@@ -391,7 +392,7 @@ async function clearHistory() {
 
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
-  state.repairParentId = report.validation_feedback && state.proposalId ? state.proposalId : null;
+  state.repairParentId = report.validation_feedback && state.proposalId && !report.repair_budget_exhausted ? state.proposalId : null;
   state.rollbackAvailable = Boolean(report.rollback_available);
   state.proposalApplied = false;
   state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));
@@ -419,7 +420,7 @@ function renderReport(report, payload) {
     ? "Proposal is stored server-side; rollback becomes available after apply."
     : "No rollback snapshot available.";
   $("validationList").innerHTML = renderValidation(report.validation);
-  $("validationFeedbackList").innerHTML = renderValidationFeedback(report.validation_feedback);
+  $("validationFeedbackList").innerHTML = renderValidationFeedback(report.validation_feedback, report);
   $("generateRepairProposal").disabled = !state.repairParentId;
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);
@@ -581,10 +582,11 @@ function renderValidation(results) {
     .join("");
 }
 
-function renderValidationFeedback(feedback) {
+function renderValidationFeedback(feedback, repairState = {}) {
   if (!feedback) {
     return item("No validation failures detected.");
   }
+  const budget = renderRepairBudget(repairState);
   const files = feedback.suspected_files && feedback.suspected_files.length
     ? feedback.suspected_files.map((path) => `<li>${escapeHtml(path)}</li>`).join("")
     : "<li>No specific file extracted.</li>";
@@ -598,14 +600,32 @@ function renderValidationFeedback(feedback) {
       <pre>${escapeHtml(failure.output_excerpt || "")}</pre>
     </div>`)
     .join("");
+  const repairTag = repairState.repair_budget_exhausted
+    ? '<span class="tag danger">budget exhausted</span>'
+    : '<span class="tag danger">repair available</span>';
   return `<div class="item">
-    <div class="item-title">Failure Analysis <span class="tag danger">repair available</span></div>
+    <div class="item-title">Failure Analysis ${repairTag}</div>
     <p>${escapeHtml(feedback.summary || "")}</p>
+    ${budget}
     <strong>Suspected Files</strong>
     <ul>${files}</ul>
     <strong>Repair Steps</strong>
     <ul>${steps || "<li>No repair steps available.</li>"}</ul>
   </div>${failures}`;
+}
+
+function renderRepairBudget(repairState = {}) {
+  if (repairState.max_repair_attempts === undefined || repairState.repair_attempt === undefined) {
+    return "";
+  }
+  const maxAttempts = Number(repairState.max_repair_attempts) || 0;
+  const currentAttempt = Number(repairState.repair_attempt) || 0;
+  const remaining = Number(repairState.repair_budget_remaining ?? Math.max(maxAttempts - currentAttempt, 0));
+  if (maxAttempts <= 0 || repairState.repair_budget_exhausted) {
+    return `<p><strong>Repair budget:</strong> exhausted (${escapeHtml(currentAttempt)}/${escapeHtml(maxAttempts)}).</p>`;
+  }
+  const nextAttempt = repairState.next_repair_attempt ?? currentAttempt + 1;
+  return `<p><strong>Repair budget:</strong> next attempt ${escapeHtml(nextAttempt)}/${escapeHtml(maxAttempts)}; ${escapeHtml(remaining)} remaining.</p>`;
 }
 
 function renderDelivery(data) {

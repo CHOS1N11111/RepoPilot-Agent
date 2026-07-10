@@ -207,6 +207,8 @@ Before running an LLM workflow from the web UI, fill in the model, API endpoint 
 
 Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows `Agent Steps`, and the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
 
+Use `Repair max attempts` to cap how many failed-validation repair proposal rounds RepoPilot can create for a proposal chain. The default is `2`, and `0` disables repair proposal generation while still showing validation failure analysis.
+
 ## Step 5: Choose A Repository Source
 
 RepoPilot supports local paths and GitHub URLs.
@@ -330,12 +332,15 @@ If validation fails, RepoPilot builds bounded validation feedback:
 In the web UI:
 
 1. Read the Validation Feedback panel.
-2. Click `Generate Repair Proposal`.
-3. Review the repair diff.
-4. Apply only if the repair is correct.
-5. Rerun validation.
+2. Check the displayed repair budget, such as `next attempt 1/2`.
+3. Click `Generate Repair Proposal`.
+4. Review the repair diff.
+5. Apply only if the repair is correct.
+6. Rerun validation.
 
-This keeps the repair loop explicit and human-approved.
+Repair proposals inherit the original proposal's retry budget. If a repair proposal is applied and validation fails again, RepoPilot can generate the next repair attempt until the configured budget is exhausted. Once exhausted, the failure analysis remains visible, but `Generate Repair Proposal` is disabled and the API rejects further repair generation for that proposal.
+
+This keeps the repair loop explicit, bounded, and human-approved.
 
 ## Step 11: Inspect Git State
 
