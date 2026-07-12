@@ -78,6 +78,18 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("next attempt", self.app_js)
         self.assertIn("function renderRepairBudget", self.app_js)
 
+    def test_delivery_tab_exposes_pr_readiness_controls(self) -> None:
+        self.assertIn('id="loadPrReadiness"', self.index_html)
+        self.assertIn('id="createPullRequest"', self.index_html)
+        self.assertIn('id="prReadinessContent"', self.index_html)
+        self.assertIn("async function loadPrReadiness", self.app_js)
+        self.assertIn("async function createPullRequest", self.app_js)
+        self.assertIn("/api/github/pr/readiness", self.app_js)
+        self.assertIn("/api/github/pr/create", self.app_js)
+        self.assertIn("function renderPrReadiness", self.app_js)
+        self.assertIn("function updateCreatePullRequestState", self.app_js)
+        self.assertIn("create_pr_command", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -228,12 +228,33 @@ class PullRequestDraft:
 
 
 @dataclass(frozen=True)
+class PullRequestReadiness:
+    ready: bool
+    repository: GitHubRepositoryRef | None
+    remote_name: str | None
+    branch: str
+    upstream: str | None
+    base_branch: str
+    head_branch: str
+    clean_worktree: bool
+    upstream_pushed: bool
+    needs_commit: bool
+    needs_push: bool
+    blockers: list[str]
+    warnings: list[str]
+    next_steps: list[str]
+    suggested_commands: list[str]
+    create_pr_command: str | None = None
+
+
+@dataclass(frozen=True)
 class GitWorkflowSummary:
     state: GitRepositoryState
     suggested_commit_message: str
     change_summary: list[str]
     validation_notes: list[str]
     pull_request: PullRequestDraft
+    pr_readiness: PullRequestReadiness
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,6 +1,7 @@
 const state = {
   lastReport: null,
   github: null,
+  delivery: null,
   proposalId: null,
   repairParentId: null,
   rollbackAvailable: false,
@@ -54,7 +55,9 @@ $("syncRepository").addEventListener("click", syncRepository);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
+$("loadPrReadiness").addEventListener("click", loadPrReadiness);
 $("generateDelivery").addEventListener("click", generateDelivery);
+$("createPullRequest").addEventListener("click", createPullRequest);
 $("generateRepairProposal").addEventListener("click", generateRepairProposal);
 $("loadHistory").addEventListener("click", loadHistory);
 $("clearHistory").addEventListener("click", clearHistory);
@@ -297,8 +300,62 @@ async function generateDelivery() {
     if (data.error) {
       throw new Error(data.error);
     }
+    state.delivery = data;
     renderDelivery(data);
     setStatus("Delivery draft ready.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function loadPrReadiness() {
+  setStatus("Checking PR readiness...");
+  try {
+    const data = await postJson("/api/github/pr/readiness", buildRepositoryPayload());
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    updateRepositorySourceStatus(data.repository_source);
+    $("prReadinessContent").innerHTML = renderPrReadiness(data.pr_readiness);
+    updateCreatePullRequestState(data.pr_readiness);
+    setStatus(data.pr_readiness?.ready ? "PR readiness passed." : "PR readiness needs attention.");
+  } catch (error) {
+    $("prReadinessContent").innerHTML = item(`PR readiness unavailable: ${escapeHtml(error.message)}`);
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function createPullRequest() {
+  const delivery = state.delivery;
+  const readiness = delivery?.pr_readiness;
+  const draft = delivery?.pull_request;
+  if (!readiness?.ready || !draft?.title || !draft?.body) {
+    setStatus("Generate a ready PR draft before creating a pull request.");
+    return;
+  }
+  const confirmed = window.confirm(`Create a GitHub pull request from ${readiness.head_branch} to ${readiness.base_branch}?`);
+  if (!confirmed) {
+    return;
+  }
+  setStatus("Creating pull request...");
+  try {
+    const data = await postJson("/api/github/pr/create", {
+      ...buildRepositoryPayload(),
+      confirm_create: true,
+      title: draft.title,
+      body: draft.body,
+      base_branch: readiness.base_branch,
+    });
+    if (data.error) {
+      if (data.pr_readiness) {
+        $("prReadinessContent").innerHTML = renderPrReadiness(data.pr_readiness);
+        updateCreatePullRequestState(data.pr_readiness);
+      }
+      throw new Error(data.error);
+    }
+    $("prReadinessContent").innerHTML = renderPrCreated(data.pull_request) + renderPrReadiness(data.pr_readiness);
+    updateCreatePullRequestState(null);
+    setStatus(`Pull request created: ${data.pull_request?.html_url || data.pull_request?.number || "done"}.`);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -637,6 +694,8 @@ function renderDelivery(data) {
     : "<li>No changed files detected.</li>";
   const summaries = (data.change_summary || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
   const validation = (data.validation_notes || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  $("prReadinessContent").innerHTML = renderPrReadiness(data.pr_readiness);
+  updateCreatePullRequestState(data.pr_readiness, data.pull_request);
   $("deliveryContent").innerHTML = `
     <div class="metrics">
       <div><span>${escapeHtml(state.branch || "unknown")}</span><small>branch</small></div>
@@ -672,6 +731,63 @@ function renderDelivery(data) {
       <pre>${escapeHtml(state.diff_stat || state.staged_diff_stat || "No diff stat.")}</pre>
     </div>
   `;
+}
+
+function updateCreatePullRequestState(readiness, draft = state.delivery?.pull_request) {
+  $("createPullRequest").disabled = !readiness?.ready || !draft?.title || !draft?.body;
+}
+
+function renderPrCreated(pr) {
+  if (!pr) {
+    return "";
+  }
+  const link = pr.html_url
+    ? `<p><a href="${escapeHtml(pr.html_url)}" target="_blank" rel="noreferrer">${escapeHtml(pr.html_url)}</a></p>`
+    : "";
+  return `<div class="item">
+    <div class="item-title">Pull Request Created <span class="tag ok">created</span></div>
+    <p>#${escapeHtml(pr.number || "")} ${escapeHtml(pr.title || "")}</p>
+    ${link}
+  </div>`;
+}
+
+function renderPrReadiness(readiness) {
+  if (!readiness) {
+    return item("No PR readiness data yet.");
+  }
+  const status = readiness.ready ? "ok" : "warn";
+  const repo = readiness.repository
+    ? `${readiness.repository.owner}/${readiness.repository.repo}`
+    : "No GitHub remote";
+  const blockers = renderList(readiness.blockers, "No blockers detected.");
+  const warnings = renderList(readiness.warnings, "No warnings.");
+  const steps = renderList(readiness.next_steps, "No next steps.");
+  const commands = (readiness.suggested_commands || []).length
+    ? readiness.suggested_commands.map((command) => `<li><code>${escapeHtml(command)}</code></li>`).join("")
+    : "<li>No command suggestions.</li>";
+  const createCommand = readiness.create_pr_command
+    ? `<strong>PR Command</strong><pre>${escapeHtml(readiness.create_pr_command)}</pre>`
+    : "";
+  return `<div class="item">
+    <div class="item-title">PR Readiness <span class="tag ${status}">${readiness.ready ? "ready" : "attention needed"}</span></div>
+    <p>${escapeHtml(repo)} - ${escapeHtml(readiness.branch || "unknown")} -> ${escapeHtml(readiness.base_branch || "main")}</p>
+    <p><small>Upstream: ${escapeHtml(readiness.upstream || "none")}; clean worktree: ${readiness.clean_worktree ? "yes" : "no"}; pushed: ${readiness.upstream_pushed ? "yes" : "no"}.</small></p>
+    <strong>Blockers</strong>
+    <ul>${blockers}</ul>
+    <strong>Warnings</strong>
+    <ul>${warnings}</ul>
+    <strong>Next Steps</strong>
+    <ul>${steps}</ul>
+    <strong>Suggested Commands</strong>
+    <ul>${commands}</ul>
+    ${createCommand}
+  </div>`;
+}
+
+function renderList(values, emptyMessage) {
+  return values && values.length
+    ? values.map((value) => `<li>${escapeHtml(value)}</li>`).join("")
+    : `<li>${escapeHtml(emptyMessage)}</li>`;
 }
 
 function renderHistory(runs) {

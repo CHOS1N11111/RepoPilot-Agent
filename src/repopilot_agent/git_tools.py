@@ -47,6 +47,23 @@ def get_git_diff(repo_path: str | Path, staged: bool = False) -> str:
     return _run_git(root, args).stdout
 
 
+def get_remote_default_branch(repo_path: str | Path, remote: str | None = "origin") -> str | None:
+    if not remote:
+        return None
+    root = _repository_root(repo_path)
+    result = _run_raw_git(root, ["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"])
+    if result.returncode == 0 and result.stdout.strip():
+        ref = result.stdout.strip()
+        prefix = f"{remote}/"
+        return ref.removeprefix(prefix)
+
+    for candidate in ("main", "master", "trunk", "develop"):
+        verify = _run_raw_git(root, ["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{candidate}"])
+        if verify.returncode == 0:
+            return candidate
+    return None
+
+
 def _repository_root(repo_path: str | Path) -> Path:
     candidate = Path(repo_path).expanduser().resolve()
     result = _run_raw_git(candidate, ["rev-parse", "--show-toplevel"])

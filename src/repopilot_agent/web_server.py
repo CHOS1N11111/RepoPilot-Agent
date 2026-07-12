@@ -12,8 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .git_tools import get_git_diff, inspect_repository
-from .git_summary import build_git_workflow_summary
-from .github_tools import inspect_github_repository
+from .git_summary import build_git_workflow_summary, build_pull_request_readiness
+from .github_tools import create_github_pull_request, inspect_github_repository
 from .llm.base import LLMError, LLMMessage
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
@@ -100,6 +100,15 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/git/summary":
             self._handle_git_summary()
+            return
+        if parsed.path == "/api/github/pr/readiness":
+            self._handle_pr_readiness()
+            return
+        if parsed.path == "/api/github/pr/draft":
+            self._handle_git_summary()
+            return
+        if parsed.path == "/api/github/pr/create":
+            self._handle_pr_create()
             return
         if parsed.path == "/api/repository/sync":
             self._handle_repository_sync()
@@ -547,6 +556,85 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data = summary.to_dict()
         data["repository_source"] = repo_source.to_dict()
         self._send_json(data)
+
+    def _handle_pr_readiness(self) -> None:
+        payload = self._read_json()
+        repo_source = self._resolve_payload_repository_or_error(payload, clone_if_missing=False)
+        if repo_source is None:
+            return
+        base_branch = str(payload.get("base_branch") or "").strip() or None
+        pull_request_title = str(payload.get("title") or "").strip() or None
+        try:
+            readiness = build_pull_request_readiness(
+                repo_source.local_path,
+                base_branch=base_branch,
+                pull_request_title=pull_request_title,
+            )
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json(
+            {
+                "pr_readiness": asdict(readiness),
+                "repository_source": repo_source.to_dict(),
+            }
+        )
+
+    def _handle_pr_create(self) -> None:
+        payload = self._read_json()
+        if not bool(payload.get("confirm_create")):
+            self._send_json(
+                {"error": "confirm_create must be true before creating a pull request."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        title = str(payload.get("title") or "").strip()
+        body = str(payload.get("body") or "").strip()
+        if not title or not body:
+            self._send_json({"error": "title and body are required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        repo_source = self._resolve_payload_repository_or_error(payload, clone_if_missing=False)
+        if repo_source is None:
+            return
+        base_branch = str(payload.get("base_branch") or "").strip() or None
+        try:
+            readiness = build_pull_request_readiness(
+                repo_source.local_path,
+                base_branch=base_branch,
+                pull_request_title=title,
+            )
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if not readiness.ready:
+            self._send_json(
+                {
+                    "error": "Pull request is not ready to create.",
+                    "pr_readiness": asdict(readiness),
+                    "repository_source": repo_source.to_dict(),
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            created = create_github_pull_request(
+                repo_source.local_path,
+                title=title,
+                body=body,
+                base_branch=readiness.base_branch,
+                head_branch=readiness.head_branch,
+            )
+        except Exception as exc:
+            self._send_json({"error": str(exc), "pr_readiness": asdict(readiness)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._send_json(
+            {
+                "created": True,
+                "pull_request": created,
+                "pr_readiness": asdict(readiness),
+                "repository_source": repo_source.to_dict(),
+            }
+        )
 
     def _handle_repository_sync(self) -> None:
         payload = self._read_json()

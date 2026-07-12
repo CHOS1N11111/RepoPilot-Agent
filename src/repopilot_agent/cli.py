@@ -332,6 +332,19 @@ def _print_git_status(state) -> None:
 def _print_git_summary(summary) -> None:
     _print_git_status(summary.state)
     print()
+    readiness = summary.pr_readiness
+    print("PR readiness")
+    print(f"Ready: {'yes' if readiness.ready else 'no'}")
+    print(f"Base: {readiness.base_branch}")
+    if readiness.blockers:
+        print("Blockers")
+        for blocker in readiness.blockers:
+            print(f"- {blocker}")
+    if readiness.warnings:
+        print("Warnings")
+        for warning in readiness.warnings:
+            print(f"- {warning}")
+    print()
     print("Suggested commit")
     print(summary.suggested_commit_message)
     print()

@@ -200,7 +200,7 @@ The web UI is local. It gives you the full workflow in tabs:
 - LLM I/O: prompt preview, output preview, trace status, and context budget.
 - GitHub: open issues, pull requests, reviews, files, comments, and checks.
 - Diff: current working tree diff or staged diff.
-- Delivery: suggested commit message and pull request draft.
+- Delivery: PR readiness, suggested commit message, pull request draft, and explicit PR creation.
 - History: saved local runs, memory reuse, pinning, deletion, and clearing.
 
 Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
@@ -383,10 +383,13 @@ python repopilot.py git pr-draft --repo . --validation "python -m unittest disco
 Web UI:
 
 1. Open the Delivery tab.
-2. Click `Generate Delivery Draft`.
-3. Review the suggested commit message, change summary, validation notes, and PR body.
+2. Click `Check PR Readiness` to inspect branch, upstream, dirty working tree, push state, and suggested commands.
+3. Click `Generate Delivery Draft`.
+4. Review the suggested commit message, change summary, validation notes, PR readiness, and PR body.
+5. Commit and push manually if readiness reports blockers.
+6. Click `Create Pull Request` only after the branch is clean, pushed, on a non-base branch, and the browser confirmation matches what you intend to publish.
 
-You still decide what to commit and push.
+RepoPilot still does not commit or push. Pull request creation is gated by readiness checks, requires explicit confirmation, and uses `GITHUB_TOKEN` or `GH_TOKEN` from the local server environment.
 
 ## Step 13: Use Local Memory
 

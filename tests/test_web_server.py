@@ -38,6 +38,37 @@ class FakeLLMClient(LLMClient):
         return self.responses.pop(0)
 
 
+def prepare_ready_pr_repository(root: Path) -> None:
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "tester@example.local"], cwd=root, check=True)
+    (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "switch", "-c", "feature/pr-ready"], cwd=root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example/project.git"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/feature/pr-ready", "HEAD"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "branch", "--set-upstream-to", "origin/feature/pr-ready"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 class ApprovedPathsPayloadTests(unittest.TestCase):
     def setUp(self) -> None:
         self.edits = [
@@ -1110,6 +1141,90 @@ class WebServerTests(unittest.TestCase):
                 self.assertIn("README.md", data["change_summary"][-1])
                 self.assertIn("## What changed", data["pull_request"]["body"])
                 self.assertEqual(data["validation_notes"], ["python -m unittest discover -s tests: exit 0"])
+                self.assertIn("pr_readiness", data)
+                self.assertFalse(data["pr_readiness"]["ready"])
+                self.assertTrue(data["pr_readiness"]["needs_commit"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_pr_readiness_api_returns_blockers_without_creating_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps({"repo": str(root), "title": "Update docs"}).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/github/pr/readiness",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                readiness = data["pr_readiness"]
+                self.assertFalse(readiness["ready"])
+                self.assertTrue(any("No GitHub remote" in item for item in readiness["blockers"]))
+                self.assertTrue(any("uncommitted changes" in item for item in readiness["blockers"]))
+                self.assertIn("repository_source", data)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_pr_create_api_requires_ready_branch_and_explicit_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "confirm_create": True,
+                        "title": "Add PR readiness",
+                        "body": "## What changed\n- Added PR readiness.",
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/github/pr/create",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                with patch(
+                    "repopilot_agent.web_server.create_github_pull_request",
+                    return_value={
+                        "number": 12,
+                        "title": "Add PR readiness",
+                        "state": "open",
+                        "html_url": "https://github.com/example/project/pull/12",
+                        "base": "main",
+                        "head": "feature/pr-ready",
+                    },
+                ) as create_pr:
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(data["created"])
+                self.assertEqual(data["pull_request"]["number"], 12)
+                self.assertTrue(data["pr_readiness"]["ready"])
+                create_pr.assert_called_once()
+                _, kwargs = create_pr.call_args
+                self.assertEqual(kwargs["base_branch"], "main")
+                self.assertEqual(kwargs["head_branch"], "feature/pr-ready")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

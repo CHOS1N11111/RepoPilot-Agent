@@ -51,6 +51,29 @@ class GitHubClient:
         except TimeoutError as exc:
             raise RuntimeError("GitHub API request timed out.") from exc
 
+    def post_json(self, path: str, payload: dict[str, Any]) -> Any:
+        if not self.token:
+            raise RuntimeError("GITHUB_TOKEN or GH_TOKEN is required to create a pull request.")
+        body = json.dumps(payload).encode("utf-8")
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(
+            self._build_url(path),
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"GitHub API request failed with HTTP {exc.code}: {message}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"GitHub API request failed: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise RuntimeError("GitHub API request timed out.") from exc
+
     def _build_url(self, path: str, query: dict[str, Any] | None = None) -> str:
         encoded_query = urllib.parse.urlencode(query or {})
         url = f"{self.api_base}{path}"
@@ -111,6 +134,35 @@ def resolve_github_repository(repo_path: str | Path) -> GitHubRepositoryRef | No
                 html_url=f"https://github.com/{owner}/{repo}",
             )
     return None
+
+
+def create_github_pull_request(
+    repo_path: str | Path,
+    title: str,
+    body: str,
+    base_branch: str,
+    head_branch: str,
+    client: GitHubClient | None = None,
+) -> dict[str, Any]:
+    repository = resolve_github_repository(repo_path)
+    if repository is None:
+        raise RuntimeError("No GitHub remote was found for this repository.")
+    active_client = client or GitHubClient()
+    payload = {
+        "title": title,
+        "body": body,
+        "base": base_branch,
+        "head": head_branch,
+    }
+    created = active_client.post_json(f"/repos/{repository.owner}/{repository.repo}/pulls", payload)
+    return {
+        "number": created.get("number"),
+        "title": created.get("title", title),
+        "state": created.get("state", "open"),
+        "html_url": created.get("html_url"),
+        "base": base_branch,
+        "head": head_branch,
+    }
 
 
 def parse_github_remote(remote_url: str) -> tuple[str, str] | None:

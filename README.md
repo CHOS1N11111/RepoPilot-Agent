@@ -24,7 +24,7 @@ Task or GitHub issue
 -> protected file application
 -> validation rerun
 -> validation feedback and repair proposal
--> Git diff and PR draft support
+-> Git diff, PR readiness, and PR draft support
 ```
 
 ```mermaid
@@ -43,7 +43,7 @@ flowchart LR
     J --> L{"Validation passed?"}
     L -->|No| R["Repair proposal"]
     R --> G
-    L -->|Yes| K["Git diff and PR draft"]
+    L -->|Yes| K["Git diff, PR readiness, and PR draft"]
 ```
 
 ## Highlights
@@ -62,9 +62,9 @@ flowchart LR
 - 🧯 Rollback snapshots for reverting applied proposal edits without using destructive Git commands.
 - 🧪 Validation command allowlist for safer test and lint execution.
 - 🛠️ Validation feedback loop for failed tests, suspected files, and repair proposals.
-- 🌿 Git workflow awareness for branch state, remotes, changes, diff stats, commit messages, and PR drafts.
+- 🌿 Git workflow awareness for branch state, remotes, changes, diff stats, commit messages, PR readiness, and PR drafts.
 - 🔗 GitHub awareness for open issues, pull requests, reviews, and CI/check status.
-- 📦 Delivery draft panel for suggested commit messages, validation notes, and PR-ready text.
+- 📦 Delivery draft panel for suggested commit messages, validation notes, PR readiness, PR-ready text, and explicit PR creation.
 
 ## Capability Map
 
@@ -79,7 +79,7 @@ flowchart LR
 | 🧠 Memory              | Retrieves related and pinned local run history and feeds concise lessons into planning.                |
 | 🖐️ Web approval      | Stores proposals server-side, previews diffs, applies approved proposals, and supports rollback.      |
 | 🧪 Validation          | Recommends commands, runs allowlisted checks, analyzes failures, and prepares repair context.         |
-| 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and delivery drafts. |
+| 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and PR readiness.    |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
 ## Architecture
@@ -171,7 +171,7 @@ The web UI supports:
 - Rollback controls for reverting applied proposal edits from an internal pre-apply snapshot.
 - Validation feedback panel with suspected files, bounded failure excerpts, repair steps, and repair proposal generation.
 - Repair retry budget controls for bounded multi-attempt validation repair loops.
-- 📦 Delivery draft generation for commit message and PR body preparation.
+- 📦 Delivery draft generation for commit message, PR readiness, PR body preparation, and explicit PR creation.
 - 🔗 GitHub issue/PR/review/check display.
 - 🌿 Working tree and staged diff display.
 - History controls for opening, reusing, pinning, deleting, or clearing saved runs.
@@ -192,7 +192,7 @@ The web UI can analyze either a local repository path or a GitHub repository URL
 - All patch previews, approved file writes, validation commands, Git diffs, and history records operate on the local cached working tree.
 - Set `REPOPILOT_REPO_CACHE` to override the clone cache directory.
 
-The first run for a GitHub URL requires `git clone` network access and any credentials required by that repository. RepoPilot still does not commit, push, or open pull requests automatically.
+The first run for a GitHub URL requires `git clone` network access and any credentials required by that repository. RepoPilot still does not commit or push automatically. It can create a GitHub pull request only after the Delivery tab readiness checks pass and the user explicitly confirms the action.
 
 ## LLM Configuration
 
@@ -309,7 +309,7 @@ python repopilot.py git summary --repo . --validation "python -m unittest discov
 python repopilot.py git pr-draft --repo . --validation "python -m unittest discover -s tests"
 ```
 
-The web UI also includes a Delivery tab that generates the same kind of commit message and PR draft from the current working tree. It does not commit, push, or create pull requests.
+The web UI also includes a Delivery tab that generates the same kind of commit message and PR draft from the current working tree. It checks PR readiness, reports blockers such as dirty working trees or unpushed branches, suggests manual Git commands, and can create a GitHub pull request only after explicit user confirmation.
 
 Inspect GitHub issue, pull request, review, and CI state:
 
@@ -360,6 +360,8 @@ Memory context is intentionally bounded and inspectable:
 
 RepoPilot is intentionally approval-first:
 
+GitHub PR creation follows the same rule: RepoPilot checks readiness first, blocks dirty or unpushed branches, requires a non-base branch, and asks for explicit confirmation before calling the GitHub API.
+
 - ✅ It previews proposed diffs before writing files.
 - 🔐 It applies only server-stored proposal edits by `proposal_id`.
 - It applies only the file edits approved in the Web UI; unchecked proposal edits are skipped.
@@ -387,7 +389,6 @@ python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.p
 
 ## Roadmap
 
-- 🚀 Add GitHub pull request creation after explicit user approval.
 - 🧠 Add per-project memory policies and richer forgetting controls.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
@@ -399,4 +400,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, validation planning, validation runner, validation feedback and bounded repair proposal generation, Git workflow awareness, delivery draft generation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, validation planning, validation runner, validation feedback and bounded repair proposal generation, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
