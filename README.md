@@ -1,6 +1,7 @@
 # RepoPilot Agent
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+[![CI](https://github.com/CHOS1N11111/RepoPilot-Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/CHOS1N11111/RepoPilot-Agent/actions/workflows/ci.yml)
 ![LLM](https://img.shields.io/badge/LLM-OpenAI--compatible-111827)
 ![Workflow](https://img.shields.io/badge/Workflow-Human--in--the--loop-176B87)
 ![Status](https://img.shields.io/badge/Status-Local%20MVP-18794E)
@@ -250,6 +251,7 @@ Environment variables:
 - `REPOPILOT_LLM_TIMEOUT_SECONDS`: Optional LLM request timeout. Defaults to `120`.
 
 RepoPilot uses the configured endpoint URL exactly as provided. It does not append `/chat/completions` to the value.
+See [`.env.example`](.env.example) for a secret-free configuration reference. RepoPilot does not load `.env` files automatically; set values in the process environment that starts the CLI or web server.
 
 ## LLM Context Management
 
@@ -386,6 +388,8 @@ Compile-check Python files:
 ```bash
 python -m py_compile repopilot.py src/repopilot_agent/*.py tests/test_workflow.py
 ```
+
+GitHub Actions runs editable-install, compile, and unit-test checks on Python 3.10, 3.11, and 3.12. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, development conventions, and pull request guidance.
 
 ## Roadmap
 
