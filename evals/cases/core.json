@@ -1,0 +1,81 @@
+{
+  "suite": "core-workflow",
+  "description": "Deterministic retrieval, planning, proposal, and validation baselines.",
+  "cases": [
+    {
+      "id": "auth-token-validation",
+      "description": "Find paired authentication code and rank the regression test first.",
+      "repo": "../fixtures/auth_service",
+      "task": "fix expired authentication token rejection",
+      "validation_commands": [
+        "python -m unittest discover -s tests"
+      ],
+      "expect": {
+        "relevant_files": [
+          "src/token_validation.py",
+          "tests/test_token_validation.py"
+        ],
+        "top_relevant_file": "tests/test_token_validation.py",
+        "proposal_files": [
+          "src/token_validation.py",
+          "tests/test_token_validation.py"
+        ],
+        "proposal_ready": true,
+        "min_plan_steps": 6,
+        "validation_passed": true,
+        "max_llm_failures": 0,
+        "max_fallbacks": 0
+      }
+    },
+    {
+      "id": "web-validation-panel",
+      "description": "Use web UI path intent to retrieve frontend validation files.",
+      "repo": "../fixtures/web_dashboard",
+      "task": "improve web UI validation error panel",
+      "validation_commands": [
+        "python -m unittest discover -s tests"
+      ],
+      "expect": {
+        "relevant_files": [
+          "web/static/app.js",
+          "web/static/app.css"
+        ],
+        "top_relevant_file": "web/static/app.js",
+        "proposal_files": [
+          "web/static/app.js",
+          "web/static/app.css"
+        ],
+        "proposal_ready": true,
+        "min_plan_steps": 6,
+        "validation_passed": true,
+        "max_llm_failures": 0,
+        "max_fallbacks": 0
+      }
+    },
+    {
+      "id": "github-branch-sync",
+      "description": "Find GitHub branch synchronization code and paired tests.",
+      "repo": "../fixtures/github_sync",
+      "task": "fix GitHub remote branch sync failure",
+      "validation_commands": [
+        "python -m unittest discover -s tests"
+      ],
+      "expect": {
+        "relevant_files": [
+          "src/repo_sync.py",
+          "tests/test_repo_sync.py"
+        ],
+        "top_relevant_file": "src/repo_sync.py",
+        "proposal_files": [
+          "src/repo_sync.py",
+          "tests/test_repo_sync.py"
+        ],
+        "proposal_ready": true,
+        "min_plan_steps": 6,
+        "validation_passed": true,
+        "max_llm_failures": 0,
+        "max_fallbacks": 0
+      }
+    }
+  ]
+}

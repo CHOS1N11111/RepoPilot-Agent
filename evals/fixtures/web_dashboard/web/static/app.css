@@ -1,0 +1,9 @@
+.validation-error-panel {
+  border-left: 3px solid #b42318;
+  color: #7a271a;
+  padding: 8px 12px;
+}
+
+.validation-error-panel[hidden] {
+  display: none;
+}

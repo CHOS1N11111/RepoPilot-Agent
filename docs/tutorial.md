@@ -417,6 +417,38 @@ CLI clean-context run:
 python repopilot.py run --repo . --task "analyze without previous run history" --no-memory
 ```
 
+## Step 14: Run Evaluations
+
+Run the deterministic baseline without configuring an API:
+
+```bash
+python repopilot.py eval
+```
+
+This runs the cases under `evals/cases/` against self-contained fixture repositories. Memory is disabled, proposed edits are never applied, and the command exits with status `1` when a case fails.
+
+The summary shows pass rate, score, relevant-file recall, proposal-file recall, runtime, LLM calls, LLM failures, fallback stages, and provider latency. Inspect failed criteria under each case instead of treating the aggregate score as the only signal.
+
+Write the structured report to an ignored local directory:
+
+```bash
+python repopilot.py eval --output evals/results/baseline.json
+```
+
+After the deterministic baseline passes, evaluate the configured model:
+
+```bash
+python repopilot.py eval --use-llm --model gpt-4o-mini --no-llm-fallback
+```
+
+Include read-only iterative exploration:
+
+```bash
+python repopilot.py eval --use-llm --iterative-agent --agent-max-steps 6 --no-llm-fallback
+```
+
+LLM reports contain aggregate call metadata but exclude API keys, raw prompts, and raw outputs. See `evals/README.md` before adding or changing cases.
+
 ## Recommended End-To-End Test
 
 Use this sequence when you want to verify the project manually:
@@ -427,37 +459,43 @@ Use this sequence when you want to verify the project manually:
    python -m unittest discover -s tests
    ```
 
-2. Run a deterministic CLI workflow:
+2. Run the deterministic evaluation baseline:
+
+   ```bash
+   python repopilot.py eval
+   ```
+
+3. Run a deterministic CLI workflow:
 
    ```bash
    python repopilot.py run --repo . --task "inspect documentation workflow" --validate "python -m unittest discover -s tests"
    ```
 
-3. Run an LLM CLI workflow with a small documentation task:
+4. Run an LLM CLI workflow with a small documentation task:
 
    ```bash
    python repopilot.py run --repo . --task "suggest a README wording improvement" --use-llm --model gpt-4o-mini --json
    ```
 
-4. Start the web UI:
+5. Start the web UI:
 
    ```bash
    python repopilot.py serve
    ```
 
-5. In the browser, generate a proposal for a small, low-risk documentation change.
+6. In the browser, generate a proposal for a small, low-risk documentation change.
 
-6. Review proposed diff and safety output.
+7. Review proposed diff and safety output.
 
-7. Apply only if the diff is expected.
+8. Apply only if the diff is expected.
 
-8. Test `Revert Applied Proposal` once on a low-risk documentation change.
+9. Test `Revert Applied Proposal` once on a low-risk documentation change.
 
-9. Run validation and inspect the final Git diff.
+10. Run validation and inspect the final Git diff.
 
-10. Generate delivery text.
+11. Generate delivery text.
 
-11. Commit and push manually when you are satisfied.
+12. Commit and push manually when you are satisfied.
 
 ## Troubleshooting
 

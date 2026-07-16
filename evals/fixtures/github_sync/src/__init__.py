@@ -1,0 +1,1 @@
+"""GitHub sync fixture package."""

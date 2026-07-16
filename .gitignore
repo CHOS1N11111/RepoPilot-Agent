@@ -1,6 +1,7 @@
 # Local work log
 log.md
 .repopilot/
+evals/results/
 
 # Environment files
 .env

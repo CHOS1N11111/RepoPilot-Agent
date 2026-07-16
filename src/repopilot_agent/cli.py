@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict
 
+from .evaluation import EvalConfigurationError, run_eval_suite, write_eval_report
 from .git_summary import build_git_workflow_summary
 from .git_tools import inspect_repository
 from .github_tools import inspect_github_repository
@@ -60,6 +62,49 @@ def main() -> int:
         help="Disable related local memory lookup for this run.",
     )
     run_parser.add_argument("--json", action="store_true", help="Print the workflow report as JSON.")
+
+    eval_parser = subparsers.add_parser("eval", help="Run a reproducible RepoPilot evaluation suite.")
+    eval_parser.add_argument(
+        "--suite",
+        default="evals/cases",
+        help="Evaluation JSON file or directory. Defaults to evals/cases.",
+    )
+    eval_parser.add_argument("--use-llm", action="store_true", help="Evaluate LLM-backed planning and proposals.")
+    eval_parser.add_argument("--model", help="Override the model used during LLM evaluation.")
+    eval_parser.add_argument(
+        "--llm-timeout",
+        type=int,
+        help="LLM request timeout in seconds. Defaults to REPOPILOT_LLM_TIMEOUT_SECONDS or 120.",
+    )
+    eval_parser.add_argument(
+        "--iterative-agent",
+        action="store_true",
+        help="Evaluate the read-only multi-step exploration loop before planning.",
+    )
+    eval_parser.add_argument(
+        "--agent-max-steps",
+        type=int,
+        default=6,
+        help="Maximum iterative agent steps. Defaults to 6.",
+    )
+    eval_parser.add_argument(
+        "--search-limit",
+        type=int,
+        default=8,
+        help="Maximum relevant files passed into the workflow. Defaults to 8.",
+    )
+    eval_parser.add_argument(
+        "--no-json-mode",
+        action="store_true",
+        help="Do not send response_format=json_object to the OpenAI-compatible provider.",
+    )
+    eval_parser.add_argument(
+        "--no-llm-fallback",
+        action="store_true",
+        help="Fail a case instead of using deterministic fallback after an LLM error.",
+    )
+    eval_parser.add_argument("--output", help="Write the aggregate JSON report to this path.")
+    eval_parser.add_argument("--json", action="store_true", help="Print the aggregate report as JSON.")
 
     git_parser = subparsers.add_parser("git", help="Inspect local Git workflow state.")
     git_subparsers = git_parser.add_subparsers(dest="git_command", required=True)
@@ -120,6 +165,8 @@ def main() -> int:
         else:
             _print_report(report)
         return 0
+    if args.command == "eval":
+        return _handle_eval_command(args)
     if args.command == "git":
         return _handle_git_command(args)
     if args.command == "github":
@@ -128,6 +175,78 @@ def main() -> int:
         run_web_server(args.host, args.port)
         return 0
     return 1
+
+
+def _handle_eval_command(args) -> int:
+    try:
+        result = run_eval_suite(
+            args.suite,
+            use_llm=args.use_llm,
+            llm_model=args.model,
+            allow_llm_fallback=not args.no_llm_fallback,
+            llm_json_mode=False if args.no_json_mode else None,
+            llm_timeout_seconds=args.llm_timeout,
+            iterative_agent=args.iterative_agent,
+            agent_max_steps=args.agent_max_steps,
+            search_limit=args.search_limit,
+        )
+    except EvalConfigurationError as exc:
+        print(f"Evaluation configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    output_path = None
+    if args.output:
+        try:
+            output_path = write_eval_report(result, args.output)
+        except EvalConfigurationError as exc:
+            print(f"Evaluation output error: {exc}", file=sys.stderr)
+            return 2
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        _print_eval_report(result)
+        if output_path:
+            print(f"\nJSON report: {output_path}")
+    return 0 if result.passed else 1
+
+
+def _print_eval_report(result) -> None:
+    print("RepoPilot Evaluation Report")
+    print("===========================")
+    print(f"Suite: {result.suite_path}")
+    print(f"Mode: {result.mode}")
+    if result.model:
+        print(f"Model: {result.model}")
+    print(f"Cases: {result.passed_cases}/{result.total_cases} passed")
+    print(f"Pass rate: {result.pass_rate:.2f}%")
+    print(f"Average score: {result.average_score:.2f}%")
+    if result.average_relevant_file_recall is not None:
+        print(f"Relevant-file recall: {result.average_relevant_file_recall * 100:.2f}%")
+    if result.average_proposal_file_recall is not None:
+        print(f"Proposal-file recall: {result.average_proposal_file_recall * 100:.2f}%")
+    print(f"Duration: {result.duration_ms} ms")
+    print(
+        "LLM: "
+        f"{result.total_llm_calls} traced call(s), "
+        f"{result.total_llm_failures} failure(s), "
+        f"{result.total_fallbacks} fallback stage(s), "
+        f"{result.total_llm_latency_ms} ms provider latency"
+    )
+    print()
+    print("Cases")
+    for case in result.cases:
+        status = "PASS" if case.passed else "FAIL"
+        print(f"- [{status}] {case.case_id}: {case.score:.2f}% ({case.duration_ms} ms)")
+        if case.error:
+            print(f"  Error: {case.error}")
+        failed_criteria = [criterion for criterion in case.criteria if not criterion.passed]
+        for criterion in failed_criteria:
+            print(
+                f"  - {criterion.name}: expected {criterion.expected!r}, "
+                f"got {criterion.actual!r}"
+            )
+            if criterion.detail:
+                print(f"    {criterion.detail}")
 
 
 def _handle_git_command(args) -> int:

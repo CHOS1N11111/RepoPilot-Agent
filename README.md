@@ -53,6 +53,7 @@ flowchart LR
 - 🖥️ Local web UI for task input, LLM settings, proposal review, timelines, GitHub state, and diffs.
 - 🧠 Optional OpenAI-compatible LLM integration with deterministic fallback.
 - Read-only iterative agent mode for multi-step search, file reading, Git inspection, and context selection.
+- Reproducible deterministic and LLM evaluation suites with explicit scoring and aggregate metrics.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
@@ -80,6 +81,7 @@ flowchart LR
 | 🧠 Memory              | Retrieves related and pinned local run history and feeds concise lessons into planning.                |
 | 🖐️ Web approval      | Stores proposals server-side, previews diffs, applies approved proposals, and supports rollback.      |
 | 🧪 Validation          | Recommends commands, runs allowlisted checks, analyzes failures, and prepares repair context.         |
+| Evaluation             | Scores retrieval, proposals, validation, Agent steps, LLM calls, latency, failures, and fallbacks.    |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and PR readiness.    |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -101,6 +103,7 @@ src/repopilot_agent/
   validator.py          allowlisted validation runner
   validation_planner.py recommended validation command planner
   validation_feedback.py validation failure analysis and repair task builder
+  evaluation.py         reproducible case loading, workflow scoring, and aggregate reports
   memory.py             SQLite history and related-run retrieval
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
@@ -296,6 +299,30 @@ When validation fails, RepoPilot builds a bounded failure context instead of pas
 - Repair attempts are counted on proposal sessions and capped by the web UI's `Repair max attempts` setting.
 - When the retry budget is exhausted, RepoPilot keeps the failure analysis visible but blocks new repair proposal generation.
 
+## Evaluations
+
+Run the built-in deterministic baseline without an API key:
+
+```bash
+python repopilot.py eval
+```
+
+The bundled suite uses three self-contained repositories for authentication, web UI, and GitHub branch-sync tasks. It scores relevant-file retrieval, top-file ranking, proposal files, plan shape, validation, LLM failures, and fallback stages. Memory is disabled so repeated runs remain comparable, and a failed case makes the command exit with status `1` for CI use.
+
+Run the same cases through an LLM and the iterative Agent:
+
+```bash
+python repopilot.py eval --use-llm --iterative-agent --no-llm-fallback
+```
+
+Save a structured local result:
+
+```bash
+python repopilot.py eval --output evals/results/baseline.json
+```
+
+Evaluation never applies proposed edits. Saved reports omit API keys, raw prompts, and raw model outputs, and `evals/results/` is ignored by Git. See [evals/README.md](evals/README.md) for metrics, schema, fixtures, and case authoring.
+
 ## Git And GitHub
 
 Inspect local Git state:
@@ -383,6 +410,12 @@ Run the test suite:
 python -m unittest discover -s tests
 ```
 
+Run the deterministic Agent evaluation baseline:
+
+```bash
+python repopilot.py eval --suite evals/cases
+```
+
 Compile-check Python files:
 
 ```bash
@@ -396,7 +429,7 @@ GitHub Actions runs editable-install, compile, and unit-test checks on Python 3.
 - 🧠 Add per-project memory policies and richer forgetting controls.
 - ⚙️ Move the web backend to FastAPI when dependency-light constraints are relaxed.
 - 🖥️ Build a richer React or Next.js dashboard for multi-run history and team workflows.
-- 🧪 Add benchmark tasks from real open-source issues.
+- 🧪 Expand the evaluation suite with benchmark tasks from real open-source issues.
 
 ## License
 
@@ -404,4 +437,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, validation planning, validation runner, validation feedback and bounded repair proposal generation, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.

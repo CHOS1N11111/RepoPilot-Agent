@@ -73,9 +73,15 @@ Compile-check the launcher, package, and tests:
 python -m compileall -q repopilot.py src tests
 ```
 
+Run the deterministic Agent evaluation baseline:
+
+```bash
+python repopilot.py eval --suite evals/cases
+```
+
 For a narrow change, run the directly related test module first, then run the complete suite before opening a pull request.
 
-GitHub Actions runs the same compile and unit-test checks on Python 3.10, 3.11, and 3.12.
+GitHub Actions runs the same compile, unit-test, and deterministic evaluation checks on Python 3.10, 3.11, and 3.12.
 
 ## Pull Requests
 
