@@ -12,6 +12,12 @@ from .git_summary import build_git_workflow_summary
 from .git_tools import inspect_repository
 from .github_tools import inspect_github_repository
 from .web_server import run_web_server
+from .worktree_sandbox import (
+    WorktreeSandboxError,
+    create_worktree_sandbox,
+    list_worktree_sandboxes,
+    remove_worktree_sandbox,
+)
 from .workflow import run_workflow
 
 
@@ -106,6 +112,32 @@ def main() -> int:
     eval_parser.add_argument("--output", help="Write the aggregate JSON report to this path.")
     eval_parser.add_argument("--json", action="store_true", help="Print the aggregate report as JSON.")
 
+    sandbox_parser = subparsers.add_parser("sandbox", help="Manage isolated Git worktree sandboxes.")
+    sandbox_subparsers = sandbox_parser.add_subparsers(dest="sandbox_command", required=True)
+
+    sandbox_create_parser = sandbox_subparsers.add_parser("create", help="Create a detached worktree sandbox.")
+    sandbox_create_parser.add_argument("--repo", default=".", help="Path to a clean Git repository.")
+    sandbox_create_parser.add_argument("--ref", default="HEAD", help="Commit or ref used as the sandbox base.")
+    sandbox_create_parser.add_argument("--name", help="Optional unique sandbox directory name.")
+    sandbox_create_parser.add_argument("--worktree-root", help="Override the managed sandbox root directory.")
+    sandbox_create_parser.add_argument("--json", action="store_true", help="Print sandbox metadata as JSON.")
+
+    sandbox_list_parser = sandbox_subparsers.add_parser("list", help="List managed worktree sandboxes.")
+    sandbox_list_parser.add_argument("--repo", default=".", help="Path to any linked repository worktree.")
+    sandbox_list_parser.add_argument("--worktree-root", help="Override the managed sandbox root directory.")
+    sandbox_list_parser.add_argument("--json", action="store_true", help="Print sandbox metadata as JSON.")
+
+    sandbox_remove_parser = sandbox_subparsers.add_parser("remove", help="Remove a managed worktree sandbox.")
+    sandbox_remove_parser.add_argument("--repo", default=".", help="Path to any linked repository worktree.")
+    sandbox_remove_parser.add_argument("--path", required=True, help="Managed worktree path to remove.")
+    sandbox_remove_parser.add_argument("--worktree-root", help="Override the managed sandbox root directory.")
+    sandbox_remove_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Explicitly discard uncommitted changes in the sandbox.",
+    )
+    sandbox_remove_parser.add_argument("--json", action="store_true", help="Print removal metadata as JSON.")
+
     git_parser = subparsers.add_parser("git", help="Inspect local Git workflow state.")
     git_subparsers = git_parser.add_subparsers(dest="git_command", required=True)
 
@@ -167,6 +199,8 @@ def main() -> int:
         return 0
     if args.command == "eval":
         return _handle_eval_command(args)
+    if args.command == "sandbox":
+        return _handle_sandbox_command(args)
     if args.command == "git":
         return _handle_git_command(args)
     if args.command == "github":
@@ -247,6 +281,67 @@ def _print_eval_report(result) -> None:
             )
             if criterion.detail:
                 print(f"    {criterion.detail}")
+
+
+def _handle_sandbox_command(args) -> int:
+    try:
+        if args.sandbox_command == "create":
+            sandbox = create_worktree_sandbox(
+                args.repo,
+                base_ref=args.ref,
+                name=args.name,
+                worktree_root=args.worktree_root,
+            )
+            if args.json:
+                print(json.dumps(sandbox.to_dict(), indent=2))
+            else:
+                _print_sandbox(sandbox, heading="Created RepoPilot worktree sandbox")
+            return 0
+        if args.sandbox_command == "list":
+            sandboxes = list_worktree_sandboxes(args.repo, worktree_root=args.worktree_root)
+            if args.json:
+                print(json.dumps({"sandboxes": [item.to_dict() for item in sandboxes]}, indent=2))
+            else:
+                print("RepoPilot Worktree Sandboxes")
+                print("===========================")
+                if not sandboxes:
+                    print("No managed sandboxes found.")
+                for sandbox in sandboxes:
+                    _print_sandbox(sandbox)
+            return 0
+        if args.sandbox_command == "remove":
+            removal = remove_worktree_sandbox(
+                args.repo,
+                args.path,
+                force=args.force,
+                worktree_root=args.worktree_root,
+            )
+            if args.json:
+                print(json.dumps(removal.to_dict(), indent=2))
+            else:
+                print(f"Removed worktree sandbox: {removal.path}")
+                print(f"Forced: {'yes' if removal.forced else 'no'}")
+            return 0
+    except WorktreeSandboxError as exc:
+        print(f"Sandbox error: {exc}", file=sys.stderr)
+        return 2
+    return 1
+
+
+def _print_sandbox(sandbox, heading: str | None = None) -> None:
+    if heading:
+        print(heading)
+        print("=" * len(heading))
+    print(f"Path: {sandbox.path}")
+    print(f"Source: {sandbox.source_repo}")
+    print(f"HEAD: {sandbox.head}")
+    print(f"Branch: {sandbox.branch or 'detached'}")
+    clean_label = "unknown" if sandbox.clean is None else ("yes" if sandbox.clean else "no")
+    print(f"Clean: {clean_label}")
+    if sandbox.base_ref:
+        print(f"Base ref: {sandbox.base_ref}")
+    if not heading:
+        print()
 
 
 def _handle_git_command(args) -> int:

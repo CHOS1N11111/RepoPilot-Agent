@@ -33,6 +33,13 @@ from .web_sessions import (
     proposal_session_from_record,
     proposal_session_to_record,
 )
+from .worktree_sandbox import (
+    DirtyWorktreeError,
+    WorktreeSandboxError,
+    create_worktree_sandbox,
+    list_worktree_sandboxes,
+    remove_worktree_sandbox,
+)
 from .workflow import run_workflow
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
@@ -79,6 +86,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history/run":
             self._handle_history_detail(parsed.query)
             return
+        if parsed.path == "/api/sandbox/list":
+            self._handle_sandbox_list(parsed.query)
+            return
         self._serve_static(parsed.path)
 
     def do_POST(self) -> None:
@@ -112,6 +122,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/repository/sync":
             self._handle_repository_sync()
+            return
+        if parsed.path == "/api/sandbox/create":
+            self._handle_sandbox_create()
+            return
+        if parsed.path == "/api/sandbox/remove":
+            self._handle_sandbox_remove()
             return
         if parsed.path == "/api/history/delete":
             self._handle_history_delete()
@@ -652,6 +668,83 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._send_json({"repository_source": source.to_dict()})
+
+    def _handle_sandbox_create(self) -> None:
+        payload = self._read_json()
+        repo_source = self._resolve_payload_repository_or_error(payload)
+        if repo_source is None:
+            return
+        try:
+            sandbox = create_worktree_sandbox(
+                repo_source.local_path,
+                base_ref=str(payload.get("ref") or "HEAD"),
+                name=str(payload.get("name") or "").strip() or None,
+            )
+            sandboxes = list_worktree_sandboxes(sandbox.source_repo)
+        except DirtyWorktreeError as exc:
+            self._send_json(
+                {"error": str(exc), "dirty": True, "repository_source": repo_source.to_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        except WorktreeSandboxError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._send_json(
+            {
+                "sandbox": sandbox.to_dict(),
+                "sandboxes": [item.to_dict() for item in sandboxes],
+                "repository_source": repo_source.to_dict(),
+            }
+        )
+
+    def _handle_sandbox_list(self, query: str) -> None:
+        params = parse_qs(query)
+        try:
+            repo_source = self._resolve_query_repository(params, clone_if_missing=False)
+            sandboxes = list_worktree_sandboxes(repo_source.local_path)
+        except (ValueError, FileNotFoundError, WorktreeSandboxError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._send_json(
+            {
+                "sandboxes": [item.to_dict() for item in sandboxes],
+                "repository_source": repo_source.to_dict(),
+            }
+        )
+
+    def _handle_sandbox_remove(self) -> None:
+        payload = self._read_json()
+        if not _payload_bool(payload.get("confirm_remove"), default=False):
+            self._send_json(
+                {"error": "Explicit sandbox removal confirmation is required."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        target = str(payload.get("path") or "").strip()
+        if not target:
+            self._send_json({"error": "Sandbox path is required."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        source_repo = str(payload.get("source_repo") or payload.get("repo") or ".").strip() or "."
+        force = _payload_bool(payload.get("force"), default=False)
+        try:
+            removal = remove_worktree_sandbox(source_repo, target, force=force)
+            sandboxes = list_worktree_sandboxes(removal.source_repo)
+        except DirtyWorktreeError as exc:
+            self._send_json(
+                {"error": str(exc), "dirty": True, "path": target},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        except WorktreeSandboxError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self._send_json(
+            {
+                "removed": removal.to_dict(),
+                "sandboxes": [item.to_dict() for item in sandboxes],
+            }
+        )
 
     def _handle_propose(self) -> None:
         payload = self._read_json()

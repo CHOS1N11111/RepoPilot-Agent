@@ -27,6 +27,11 @@ from repopilot_agent.web_server import (
     _payload_max_repair_attempts,
 )
 from repopilot_agent.web_sessions import clear_proposal_sessions, create_proposal_session, proposal_session_to_record
+from repopilot_agent.worktree_sandbox import (
+    DirtyWorktreeError,
+    WorktreeRemoval,
+    WorktreeSandbox,
+)
 
 
 class FakeLLMClient(LLMClient):
@@ -456,6 +461,157 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(data["repository_source"]["branch"], "feature")
                 self.assertTrue(data["repository_source"]["synced"])
                 self.assertEqual(data["repository_source"]["latest_commit"], "abc123 Sync")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_sandbox_create_and_list_apis_return_managed_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_path = root / "managed" / "case-one"
+            source = RepositorySource(
+                source="local",
+                input=str(root),
+                local_path=str(root),
+                branch="main",
+                latest_commit="abc123 Initial",
+                dirty=False,
+                cached=True,
+                message="Using local repository path.",
+            )
+            sandbox = WorktreeSandbox(
+                source_repo=str(root),
+                path=str(sandbox_path),
+                head="abc123def456",
+                branch=None,
+                detached=True,
+                clean=True,
+                primary=False,
+                managed=True,
+                base_ref="HEAD",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with (
+                    patch("repopilot_agent.web_server.resolve_repository_reference", return_value=source),
+                    patch("repopilot_agent.web_server.create_worktree_sandbox", return_value=sandbox) as create_mock,
+                    patch("repopilot_agent.web_server.list_worktree_sandboxes", return_value=[sandbox]),
+                ):
+                    payload = json.dumps({"repo": str(root), "repo_source": "local"}).encode("utf-8")
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/sandbox/create",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(request, timeout=5) as response:
+                        created = json.loads(response.read().decode("utf-8"))
+
+                    with urlopen(
+                        f"http://127.0.0.1:{server.server_port}/api/sandbox/list?repo={root}&repo_source=local",
+                        timeout=5,
+                    ) as response:
+                        listed = json.loads(response.read().decode("utf-8"))
+
+                create_mock.assert_called_once_with(str(root), base_ref="HEAD", name=None)
+                self.assertEqual(created["sandbox"]["path"], str(sandbox_path))
+                self.assertTrue(created["sandbox"]["detached"])
+                self.assertEqual(listed["sandboxes"][0]["head"], "abc123def456")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_sandbox_remove_api_requires_confirmation(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            payload = json.dumps({"source_repo": ".", "path": "sandbox"}).encode("utf-8")
+            request = Request(
+                f"http://127.0.0.1:{server.server_port}/api/sandbox/remove",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+            data = json.loads(raised.exception.read().decode("utf-8"))
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("confirmation is required", data["error"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_sandbox_remove_api_reports_dirty_then_allows_explicit_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sandbox_path = root / "managed" / "dirty-case"
+            removal = WorktreeRemoval(
+                source_repo=str(root),
+                path=str(sandbox_path),
+                removed=True,
+                forced=True,
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                dirty_payload = json.dumps(
+                    {
+                        "source_repo": str(root),
+                        "path": str(sandbox_path),
+                        "confirm_remove": True,
+                        "force": False,
+                    }
+                ).encode("utf-8")
+                dirty_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/sandbox/remove",
+                    data=dirty_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch(
+                    "repopilot_agent.web_server.remove_worktree_sandbox",
+                    side_effect=DirtyWorktreeError("Sandbox has uncommitted changes."),
+                ):
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(dirty_request, timeout=5)
+                    dirty = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 409)
+                self.assertTrue(dirty["dirty"])
+
+                force_payload = json.dumps(
+                    {
+                        "source_repo": str(root),
+                        "path": str(sandbox_path),
+                        "confirm_remove": True,
+                        "force": True,
+                    }
+                ).encode("utf-8")
+                force_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/sandbox/remove",
+                    data=force_payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with (
+                    patch("repopilot_agent.web_server.remove_worktree_sandbox", return_value=removal) as remove_mock,
+                    patch("repopilot_agent.web_server.list_worktree_sandboxes", return_value=[]),
+                ):
+                    with urlopen(force_request, timeout=5) as response:
+                        forced = json.loads(response.read().decode("utf-8"))
+
+                remove_mock.assert_called_once_with(str(root), str(sandbox_path), force=True)
+                self.assertTrue(forced["removed"]["removed"])
+                self.assertTrue(forced["removed"]["forced"])
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

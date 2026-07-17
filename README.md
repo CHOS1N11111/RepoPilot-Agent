@@ -54,6 +54,7 @@ flowchart LR
 - 🧠 Optional OpenAI-compatible LLM integration with deterministic fallback.
 - Read-only iterative agent mode for multi-step search, file reading, Git inspection, and context selection.
 - Reproducible deterministic and LLM evaluation suites with explicit scoring and aggregate metrics.
+- Managed detached Git worktree sandboxes for isolated proposal application and validation.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
@@ -82,6 +83,7 @@ flowchart LR
 | 🖐️ Web approval      | Stores proposals server-side, previews diffs, applies approved proposals, and supports rollback.      |
 | 🧪 Validation          | Recommends commands, runs allowlisted checks, analyzes failures, and prepares repair context.         |
 | Evaluation             | Scores retrieval, proposals, validation, Agent steps, LLM calls, latency, failures, and fallbacks.    |
+| Worktree sandbox       | Creates isolated committed snapshots and guards dirty-source and destructive-removal operations.      |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and PR readiness.    |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -104,6 +106,7 @@ src/repopilot_agent/
   validation_planner.py recommended validation command planner
   validation_feedback.py validation failure analysis and repair task builder
   evaluation.py         reproducible case loading, workflow scoring, and aggregate reports
+  worktree_sandbox.py   managed detached Git worktree lifecycle and safety rules
   memory.py             SQLite history and related-run retrieval
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
@@ -160,6 +163,7 @@ The web UI supports:
 
 - Repository source selection for local paths, GitHub URLs, or auto detection.
 - Repository sync controls for cached GitHub clones, branch checkout, latest commit display, and local-change protection.
+- Worktree sandbox creation, selection, refresh, and explicitly confirmed removal.
 - 🧠 LLM model, API endpoint URL, and API key inputs.
 - Automatic JSON mode compatibility retry for providers that do not support `response_format`.
 - LLM connection testing before running the full workflow.
@@ -197,6 +201,36 @@ The web UI can analyze either a local repository path or a GitHub repository URL
 - Set `REPOPILOT_REPO_CACHE` to override the clone cache directory.
 
 The first run for a GitHub URL requires `git clone` network access and any credentials required by that repository. RepoPilot still does not commit or push automatically. It can create a GitHub pull request only after the Delivery tab readiness checks pass and the user explicitly confirms the action.
+
+## Git Worktree Sandboxes
+
+Create an isolated detached worktree from the current committed `HEAD`:
+
+```bash
+python repopilot.py sandbox create --repo .
+```
+
+The command prints the sandbox path. Use that path as `--repo`, or select the sandbox from the Web UI. All RepoPilot scans, proposals, approved edits, validation commands, diffs, and local memory then operate inside the isolated worktree.
+
+List managed sandboxes:
+
+```bash
+python repopilot.py sandbox list --repo .
+```
+
+Remove a clean sandbox:
+
+```bash
+python repopilot.py sandbox remove --repo . --path "C:/path/from/create"
+```
+
+RepoPilot requires the source worktree to be clean before creation because a Git worktree starts from a commit and cannot include uncommitted source changes. Sandboxes are created detached so they cannot accidentally advance the source branch. Removal is limited to registered worktrees under RepoPilot's managed root. A dirty sandbox is preserved unless removal is repeated with explicit `--force`:
+
+```bash
+python repopilot.py sandbox remove --repo . --path "C:/path/from/create" --force
+```
+
+By default sandboxes live under the operating system's temporary directory. Set `REPOPILOT_WORKTREE_ROOT` to use another directory outside the source repository.
 
 ## LLM Configuration
 
@@ -252,6 +286,7 @@ Environment variables:
 - `REPOPILOT_MODEL`: Optional default model name.
 - `REPOPILOT_DISABLE_JSON_MODE`: Set to `1`, `true`, `yes`, or `on` to omit `response_format` for providers such as some API gateways.
 - `REPOPILOT_LLM_TIMEOUT_SECONDS`: Optional LLM request timeout. Defaults to `120`.
+- `REPOPILOT_WORKTREE_ROOT`: Optional directory for managed detached Git worktree sandboxes.
 
 RepoPilot uses the configured endpoint URL exactly as provided. It does not append `/chat/completions` to the value.
 See [`.env.example`](.env.example) for a secret-free configuration reference. RepoPilot does not load `.env` files automatically; set values in the process environment that starts the CLI or web server.
@@ -399,6 +434,8 @@ GitHub PR creation follows the same rule: RepoPilot checks readiness first, bloc
 - 🚧 It blocks repository escapes and sensitive paths such as `.git`, `.env`, and `log.md`.
 - 🛡️ It runs structured safety checks for duplicate edits, unapproved paths, empty overwrites, large deletions, repeated generated content, and weak task relevance.
 - 🧪 It runs validation commands only through an allowlist.
+- It creates sandboxes only from clean committed state and removes only registered worktrees inside the managed root.
+- It refuses to delete dirty sandboxes unless the user explicitly requests forced removal.
 - 🧯 It keeps deterministic fallbacks for invalid or unavailable LLM output.
 - 🔍 It exposes LLM traces and self-review output so decisions are inspectable.
 
@@ -437,4 +474,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.

@@ -90,6 +90,21 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("function updateCreatePullRequestState", self.app_js)
         self.assertIn("create_pr_command", self.app_js)
 
+    def test_repository_controls_expose_worktree_sandbox_lifecycle(self) -> None:
+        self.assertIn('id="sandboxSelect"', self.index_html)
+        self.assertIn('id="createSandbox"', self.index_html)
+        self.assertIn('id="refreshSandboxes"', self.index_html)
+        self.assertIn('id="removeSandbox"', self.index_html)
+        self.assertIn('id="sandboxLine"', self.index_html)
+        self.assertIn("async function createSandbox", self.app_js)
+        self.assertIn("async function refreshSandboxes", self.app_js)
+        self.assertIn("async function removeSandbox", self.app_js)
+        self.assertIn("/api/sandbox/create", self.app_js)
+        self.assertIn("/api/sandbox/list", self.app_js)
+        self.assertIn("/api/sandbox/remove", self.app_js)
+        self.assertIn("Permanently discard them", self.app_js)
+        self.assertIn("resetProposalForRepositoryChange", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

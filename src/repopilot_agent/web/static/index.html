@@ -38,8 +38,20 @@
           Branch
           <input id="repoBranch" placeholder="default branch" />
         </label>
-        <button id="syncRepository" class="secondary">Sync Repository</button>
+        <label>
+          Worktree sandbox
+          <select id="sandboxSelect">
+            <option value="">No managed sandbox</option>
+          </select>
+        </label>
+        <div class="toolbar">
+          <button id="syncRepository" class="secondary">Sync Repository</button>
+          <button id="createSandbox" class="secondary">Create Sandbox</button>
+          <button id="refreshSandboxes" class="secondary">Refresh Sandboxes</button>
+          <button id="removeSandbox" class="secondary danger-button" disabled>Remove Sandbox</button>
+        </div>
         <p id="repoSourceLine" class="status-line">Using local repository path.</p>
+        <p id="sandboxLine" class="status-line">No managed worktree sandbox selected.</p>
         <label>
           Task
           <textarea id="taskInput" rows="7">fix search relevance for login behavior</textarea>

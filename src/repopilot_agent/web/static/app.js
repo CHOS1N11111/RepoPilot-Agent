@@ -7,6 +7,8 @@ const state = {
   rollbackAvailable: false,
   proposalApplied: false,
   approvedPaths: new Set(),
+  sandbox: null,
+  sandboxes: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -33,6 +35,7 @@ $("modelSelect").addEventListener("change", () => {
   $("customModelWrap").classList.toggle("hidden", $("modelSelect").value !== "custom");
 });
 $("repoSource").addEventListener("change", updateRepositorySourceUi);
+$("sandboxSelect").addEventListener("change", selectSandbox);
 document.addEventListener("change", (event) => {
   const target = event.target;
   if (!target?.dataset?.approvalPath) {
@@ -52,6 +55,9 @@ $("testLlm").addEventListener("click", testLlmConnection);
 $("applyProposal").addEventListener("click", applyProposal);
 $("revertProposal").addEventListener("click", revertProposal);
 $("syncRepository").addEventListener("click", syncRepository);
+$("createSandbox").addEventListener("click", createSandbox);
+$("refreshSandboxes").addEventListener("click", refreshSandboxes);
+$("removeSandbox").addEventListener("click", removeSandbox);
 $("loadGithub").addEventListener("click", loadGithub);
 $("loadDiff").addEventListener("click", () => loadDiff(false));
 $("loadStagedDiff").addEventListener("click", () => loadDiff(true));
@@ -275,6 +281,182 @@ async function syncRepository() {
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
+}
+
+async function createSandbox() {
+  setStatus("Creating isolated worktree sandbox...");
+  try {
+    const data = await postJson("/api/sandbox/create", {
+      ...buildRepositoryPayload(),
+      ref: "HEAD",
+    });
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    state.sandboxes = data.sandboxes || [data.sandbox];
+    renderSandboxOptions(data.sandbox?.path || "");
+    activateSandbox(data.sandbox);
+    setStatus("Worktree sandbox created and selected.");
+    await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function refreshSandboxes() {
+  const previousSandbox = state.sandbox;
+  const params = state.sandbox
+    ? new URLSearchParams({ repo: state.sandbox.source_repo, repo_source: "local" })
+    : new URLSearchParams(repositoryQuery());
+  const data = await getJson(`/api/sandbox/list?${params.toString()}`);
+  if (data.error) {
+    throw new Error(data.error);
+  }
+  state.sandboxes = data.sandboxes || [];
+  const currentPath = state.sandbox?.path || $("repoPath").value.trim();
+  const selected = state.sandboxes.find((sandbox) => sandbox.path === currentPath) || null;
+  state.sandbox = selected;
+  if (previousSandbox && !selected) {
+    restoreSandboxSource(previousSandbox);
+    resetProposalForRepositoryChange();
+  }
+  renderSandboxOptions(selected?.path || "");
+  renderSandboxStatus(selected);
+}
+
+function selectSandbox() {
+  const selectedPath = $("sandboxSelect").value;
+  const sandbox = state.sandboxes.find((item) => item.path === selectedPath) || null;
+  if (!sandbox) {
+    const previousSandbox = state.sandbox;
+    state.sandbox = null;
+    if (previousSandbox) {
+      restoreSandboxSource(previousSandbox);
+    }
+    renderSandboxStatus(null);
+    resetProposalForRepositoryChange();
+    return;
+  }
+  activateSandbox(sandbox);
+  setStatus("Worktree sandbox selected.");
+}
+
+function activateSandbox(sandbox) {
+  if (!sandbox) {
+    return;
+  }
+  state.sandbox = sandbox;
+  $("repoSource").value = "local";
+  $("repoPath").value = sandbox.path;
+  $("repoBranch").value = "";
+  updateRepositorySourceUi();
+  renderSandboxStatus(sandbox);
+  resetProposalForRepositoryChange();
+}
+
+function restoreSandboxSource(sandbox) {
+  $("repoSource").value = "local";
+  $("repoPath").value = sandbox.source_repo;
+  $("repoBranch").value = "";
+  updateRepositorySourceUi();
+}
+
+async function removeSandbox() {
+  const sandbox = state.sandbox;
+  if (!sandbox) {
+    setStatus("Select a managed sandbox first.");
+    return;
+  }
+  const confirmed = window.confirm(`Remove worktree sandbox ${sandbox.path}?`);
+  if (!confirmed) {
+    return;
+  }
+
+  setStatus("Removing worktree sandbox...");
+  try {
+    let data = await postJson("/api/sandbox/remove", {
+      source_repo: sandbox.source_repo,
+      path: sandbox.path,
+      confirm_remove: true,
+      force: false,
+    });
+    if (data.error && data.dirty) {
+      const discard = window.confirm(
+        "This sandbox has uncommitted changes. Permanently discard them and remove the sandbox?"
+      );
+      if (!discard) {
+        setStatus("Sandbox removal cancelled; changes were preserved.");
+        return;
+      }
+      data = await postJson("/api/sandbox/remove", {
+        source_repo: sandbox.source_repo,
+        path: sandbox.path,
+        confirm_remove: true,
+        force: true,
+      });
+    }
+    if (data.error) {
+      throw new Error(data.error);
+    }
+
+    const sourceRepo = data.removed?.source_repo || sandbox.source_repo;
+    state.sandbox = null;
+    state.sandboxes = data.sandboxes || [];
+    $("repoSource").value = "local";
+    $("repoPath").value = sourceRepo;
+    $("repoBranch").value = "";
+    updateRepositorySourceUi();
+    renderSandboxOptions("");
+    renderSandboxStatus(null);
+    resetProposalForRepositoryChange();
+    setStatus("Worktree sandbox removed.");
+    await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+function renderSandboxOptions(selectedPath) {
+  const select = $("sandboxSelect");
+  select.replaceChildren();
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "No managed sandbox";
+  select.appendChild(empty);
+  state.sandboxes.forEach((sandbox) => {
+    const option = document.createElement("option");
+    option.value = sandbox.path;
+    const name = sandbox.path.split(/[\\/]/).pop() || sandbox.path;
+    const stateLabel = sandbox.clean == null ? "unknown" : sandbox.clean ? "clean" : "changes";
+    option.textContent = `${name} | ${String(sandbox.head || "").slice(0, 8)} | ${stateLabel}`;
+    select.appendChild(option);
+  });
+  select.value = selectedPath || "";
+}
+
+function renderSandboxStatus(sandbox) {
+  $("removeSandbox").disabled = !sandbox;
+  if (!sandbox) {
+    $("sandboxLine").textContent = "No managed worktree sandbox selected.";
+    return;
+  }
+  const stateLabel = sandbox.clean == null ? "state unknown" : sandbox.clean ? "clean" : "local changes present";
+  $("sandboxLine").textContent = `Sandbox: ${sandbox.path}. Detached at ${String(
+    sandbox.head || "unknown"
+  ).slice(0, 12)}; ${stateLabel}.`;
+}
+
+function resetProposalForRepositoryChange() {
+  state.lastReport = null;
+  state.proposalId = null;
+  state.repairParentId = null;
+  state.rollbackAvailable = false;
+  state.proposalApplied = false;
+  state.approvedPaths = new Set();
+  $("applyProposal").disabled = true;
+  $("revertProposal").disabled = true;
+  $("generateRepairProposal").disabled = true;
+  updateApprovalState();
 }
 
 async function loadGithub() {
@@ -1152,4 +1334,7 @@ loadDiff(false).catch((error) => {
   $("diffOutput").textContent = `Diff unavailable: ${error.message}`;
 });
 updateRepositorySourceUi();
+refreshSandboxes().catch((error) => {
+  $("sandboxLine").textContent = `Sandbox status unavailable: ${error.message}`;
+});
 loadHistory().catch(() => {});

@@ -449,6 +449,44 @@ python repopilot.py eval --use-llm --iterative-agent --agent-max-steps 6 --no-ll
 
 LLM reports contain aggregate call metadata but exclude API keys, raw prompts, and raw outputs. See `evals/README.md` before adding or changing cases.
 
+## Step 15: Use A Git Worktree Sandbox
+
+Start from a clean repository and create a detached sandbox:
+
+```bash
+python repopilot.py sandbox create --repo .
+```
+
+The source repository must be clean because the sandbox starts from a committed Git snapshot. RepoPilot refuses creation instead of silently omitting uncommitted source files.
+
+Copy the printed path into `--repo` for CLI work:
+
+```bash
+python repopilot.py run --repo "C:/path/from/create" --task "fix parser behavior" --use-llm
+```
+
+In the Web UI, use `Create Sandbox` in the repository controls. RepoPilot creates and selects it automatically. The sandbox selector can switch between managed worktrees, and `Refresh Sandboxes` reloads their clean/dirty state. Proposal approval, patch application, validation, diff inspection, and history use the selected sandbox path.
+
+List sandboxes later:
+
+```bash
+python repopilot.py sandbox list --repo .
+```
+
+Remove a clean sandbox after reviewing its diff:
+
+```bash
+python repopilot.py sandbox remove --repo . --path "C:/path/from/create"
+```
+
+Dirty sandboxes are preserved. The CLI requires explicit `--force`, while the Web UI shows a second confirmation before discarding changes:
+
+```bash
+python repopilot.py sandbox remove --repo . --path "C:/path/from/create" --force
+```
+
+Forced removal permanently discards uncommitted sandbox changes. It does not modify the primary worktree. Set `REPOPILOT_WORKTREE_ROOT` when the operating system's temporary directory is not suitable.
+
 ## Recommended End-To-End Test
 
 Use this sequence when you want to verify the project manually:
