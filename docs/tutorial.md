@@ -196,6 +196,7 @@ http://127.0.0.1:8765
 
 The web UI is local. It gives you the full workflow in tabs:
 
+- Task Run: sandbox lifecycle, current phase, pause/resume/cancel controls, event history, and local branch delivery.
 - Summary: plan, proposal, validation, safety, repair feedback, and timeline.
 - LLM I/O: prompt preview, output preview, trace status, and context budget.
 - GitHub: open issues, pull requests, reviews, files, comments, and checks.
@@ -486,6 +487,29 @@ python repopilot.py sandbox remove --repo . --path "C:/path/from/create" --force
 ```
 
 Forced removal permanently discards uncommitted sandbox changes. It does not modify the primary worktree. Set `REPOPILOT_WORKTREE_ROOT` when the operating system's temporary directory is not suitable.
+
+## Step 16: Run A Complete Sandboxed Task
+
+Use this flow when you want RepoPilot to manage the complete Agent lifecycle instead of running analysis and proposal generation as separate requests:
+
+1. Start from a clean source repository with the desired base commit checked out.
+2. Enter the task and optional validation command.
+3. Configure and test the LLM connection when model-backed edits are needed.
+4. Click `Start Sandboxed Task`.
+5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
+6. At `awaiting_approval`, inspect the Summary, LLM I/O, and proposed Diff tabs.
+7. Select the approved files and click `Apply Proposal`.
+8. If validation fails, inspect the feedback and generate a bounded repair proposal.
+9. When the run reaches `completed`, inspect the final working Diff.
+10. Optionally enter a feature branch name and click `Create Branch`.
+
+Each task receives its own detached managed worktree. RepoPilot automatically selects that path in the repository controls, so proposal application, validation, rollback, Git inspection, and diff display all target the sandbox rather than the source worktree.
+
+Task runs are saved in the source repository's `.repopilot/memory.sqlite3`. RepoPilot adds `.repopilot/` to the clone's local Git `info/exclude`; it does not modify the tracked `.gitignore`. API keys are request-scoped and are not serialized into the task-run record.
+
+`Pause` and `Cancel` are checkpoint operations. They take effect after the current safe operation returns, so they do not terminate an in-flight LLM HTTP request or interrupt a file write halfway through. Paused, cancelled, failed, and server-interrupted runs preserve their sandboxes. Use `Resume` to restart analysis with the current Web LLM settings or return to a saved approval checkpoint.
+
+Branch creation is intentionally separate from task execution. It is available only after successful completion, requires explicit confirmation, validates the branch name, and verifies that the destination is a registered RepoPilot worktree. RepoPilot leaves the diff uncommitted and unpushed for manual review.
 
 ## Recommended End-To-End Test
 

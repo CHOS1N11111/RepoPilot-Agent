@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from pathlib import Path
 from unittest.mock import patch
@@ -18,8 +21,17 @@ sys.path.insert(0, str(ROOT / "src"))
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
-from repopilot_agent.models import FileEditProposal, PlanMetadata, ValidationFeedback, WorkflowReport
+from repopilot_agent.models import (
+    FileChangeProposal,
+    FileEditProposal,
+    PatchProposal,
+    PatchProposalMetadata,
+    PlanMetadata,
+    ValidationFeedback,
+    WorkflowReport,
+)
 from repopilot_agent.repo_source import RepositorySource
+from repopilot_agent.task_runs import clear_task_runs, create_task_run, update_task_run
 from repopilot_agent.web_server import (
     RepoPilotRequestHandler,
     STATIC_DIR,
@@ -31,6 +43,7 @@ from repopilot_agent.worktree_sandbox import (
     DirtyWorktreeError,
     WorktreeRemoval,
     WorktreeSandbox,
+    remove_worktree_sandbox,
 )
 
 
@@ -146,6 +159,120 @@ class WebServerTests(unittest.TestCase):
         self.assertTrue((STATIC_DIR / "index.html").is_file())
         self.assertTrue((STATIC_DIR / "app.css").is_file())
         self.assertTrue((STATIC_DIR / "app.js").is_file())
+
+    def test_task_run_start_persists_state_without_credentials(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "repo_source": "local",
+                        "task": "inspect login behavior",
+                        "validation": [],
+                        "use_llm": False,
+                        "api_key": "must-not-be-saved",
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/start",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch_mock:
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                task_run = data["task_run"]
+                record = MemoryStore(default_memory_path(root)).get_task_run(task_run["run_id"])
+                self.assertEqual(task_run["status"], "queued")
+                self.assertEqual(record["task"], "inspect login behavior")
+                self.assertNotIn("must-not-be-saved", json.dumps(record))
+                self.assertEqual(
+                    subprocess.run(
+                        ["git", "status", "--porcelain"],
+                        cwd=root,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip(),
+                    "",
+                )
+                launch_mock.assert_called_once()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_api_completes_deterministic_analysis_in_managed_sandbox(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            managed = root / "managed"
+            source.mkdir()
+            initialize_repository = prepare_ready_pr_repository
+            initialize_repository(source)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            sandbox_path = None
+            try:
+                with patch.dict(os.environ, {"REPOPILOT_WORKTREE_ROOT": str(managed)}):
+                    payload = json.dumps(
+                        {
+                            "repo": str(source),
+                            "repo_source": "local",
+                            "task": "explain the repository readme",
+                            "validation": [],
+                            "use_llm": False,
+                            "use_memory": True,
+                        }
+                    ).encode("utf-8")
+                    request = Request(
+                        f"http://127.0.0.1:{server.server_port}/api/task-runs/start",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(request, timeout=5) as response:
+                        started = json.loads(response.read().decode("utf-8"))["task_run"]
+
+                    params = urlencode({"run_id": started["run_id"], "source_repo": str(source)})
+                    current = started
+                    for _ in range(100):
+                        with urlopen(
+                            f"http://127.0.0.1:{server.server_port}/api/task-runs/status?{params}",
+                            timeout=5,
+                        ) as response:
+                            current = json.loads(response.read().decode("utf-8"))["task_run"]
+                        if current["status"] in {"completed", "failed", "cancelled"}:
+                            break
+                        time.sleep(0.05)
+
+                    self.assertEqual(current["status"], "completed", current.get("error"))
+                    self.assertTrue(current["sandbox_path"])
+                    self.assertEqual(current["result"]["task_run_id"], started["run_id"])
+                    self.assertEqual(current["result"]["repository_source"]["local_path"], current["sandbox_path"])
+                    self.assertTrue(Path(current["sandbox_path"]).is_dir())
+                    sandbox_path = current["sandbox_path"]
+                    remove_worktree_sandbox(source, sandbox_path, force=True)
+                    sandbox_path = None
+            finally:
+                if sandbox_path and Path(sandbox_path).exists():
+                    with patch.dict(os.environ, {"REPOPILOT_WORKTREE_ROOT": str(managed)}):
+                        remove_worktree_sandbox(source, sandbox_path, force=True)
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
 
     def test_get_git_diff_returns_working_tree_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -686,6 +813,160 @@ class WebServerTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
                 server.server_close()
+
+    def test_task_run_apply_moves_failed_validation_to_repair_pending(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")],
+                validation_commands=["python -m unittest missing_task_run_suite"],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            task_run = create_task_run(root, "update notes", session.validation_commands)
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Proposal ready.",
+                proposal_id=session.proposal_id,
+                sandbox_path=str(root),
+                result={"proposal_id": session.proposal_id},
+            )
+            MemoryStore(default_memory_path(root)).save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "repo_source": "local",
+                        "proposal_id": session.proposal_id,
+                        "task_run_id": task_run.run_id,
+                        "source_repo": str(root),
+                        "approved_paths": ["notes.txt"],
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                self.assertTrue(data["applied"])
+                self.assertEqual(data["task_run"]["status"], "repair_pending")
+                self.assertTrue(data["task_run"]["can_repair"])
+                self.assertIsNotNone(data["validation_feedback"])
+                stored = MemoryStore(default_memory_path(root)).get_task_run(task_run.run_id)
+                self.assertEqual(stored["status"], "repair_pending")
+                self.assertEqual(stored["result"]["validation"][0]["exit_code"], 1)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_repair_proposal_returns_to_approval_checkpoint(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("broken\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[FileEditProposal(path="notes.txt", new_content="broken\n", rationale="Initial edit.")],
+                validation_commands=["python -m unittest missing_task_run_suite"],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            session.applied = True
+            session.validation_feedback = ValidationFeedback(
+                summary="Validation failed.",
+                failures=[],
+                suspected_files=["notes.txt"],
+                repair_steps=["Fix notes.txt."],
+                repair_task="repair notes validation",
+            )
+            task_run = create_task_run(root, "update notes", session.validation_commands)
+            update_task_run(
+                task_run,
+                "repair_pending",
+                "Validation needs attention.",
+                proposal_id=session.proposal_id,
+                sandbox_path=str(root),
+                result={"proposal_id": session.proposal_id},
+            )
+            MemoryStore(default_memory_path(root)).save_task_run(task_run.to_record())
+            repair_report = WorkflowReport(
+                task="repair notes validation",
+                repo_path=str(root),
+                files_scanned=1,
+                patch_proposal=PatchProposal(
+                    objective="Repair notes",
+                    files=[
+                        FileChangeProposal(
+                            path="notes.txt",
+                            change_type="bugfix",
+                            rationale="Validation identified notes.txt.",
+                            suggested_actions=["Replace the broken content."],
+                            confidence="high",
+                        )
+                    ],
+                    risks=[],
+                    validation_suggestions=["python -m unittest missing_task_run_suite"],
+                    ready_for_patch=True,
+                    file_edits=[
+                        FileEditProposal(path="notes.txt", new_content="fixed\n", rationale="Repair validation.")
+                    ],
+                    proposed_diff="--- a/notes.txt\n+++ b/notes.txt\n",
+                    apply_ready=True,
+                ),
+                patch_proposal_metadata=PatchProposalMetadata(source="rules"),
+                summary="Prepared a repair proposal.",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = json.dumps(
+                    {
+                        "repo": str(root),
+                        "repo_source": "local",
+                        "proposal_id": session.proposal_id,
+                        "task_run_id": task_run.run_id,
+                        "source_repo": str(root),
+                        "use_llm": False,
+                    }
+                ).encode("utf-8")
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/repair/propose",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch("repopilot_agent.web_server.run_workflow", return_value=repair_report):
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                self.assertNotEqual(data["proposal_id"], session.proposal_id)
+                self.assertEqual(data["task_run"]["status"], "awaiting_approval")
+                self.assertEqual(data["task_run"]["proposal_id"], data["proposal_id"])
+                self.assertEqual(data["repair_attempt"], 1)
+                stored = MemoryStore(default_memory_path(root)).get_task_run(task_run.run_id)
+                self.assertEqual(stored["proposal_id"], data["proposal_id"])
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
 
     def test_revert_api_restores_applied_proposal_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

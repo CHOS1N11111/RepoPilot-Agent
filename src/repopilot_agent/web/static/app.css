@@ -265,6 +265,74 @@ button:disabled:hover {
   background: #fbfcfe;
 }
 
+.task-run-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-run-header div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-run-header strong {
+  overflow-wrap: anywhere;
+}
+
+.task-run-status {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.task-run-phases {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(92px, 1fr));
+  gap: 8px;
+  margin: 18px 0 12px;
+  overflow-x: auto;
+}
+
+.task-run-phase {
+  min-width: 92px;
+  min-height: 52px;
+  padding: 9px 4px 4px;
+  border-top: 4px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.task-run-phase.done {
+  border-top-color: var(--ok);
+  color: var(--ok);
+}
+
+.task-run-phase.active {
+  border-top-color: var(--accent);
+  color: var(--accent);
+}
+
+.task-run-phase.warning {
+  border-top-color: var(--warn);
+  color: var(--warn);
+}
+
+.task-run-controls {
+  margin: 14px 0 22px;
+}
+
+.task-run-delivery {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .timeline-step {
   font-weight: 800;
 }
@@ -390,5 +458,9 @@ button:disabled:hover {
 
   .subtabs {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-run-delivery {
+    grid-template-columns: 1fr;
   }
 }

@@ -9,7 +9,14 @@ const state = {
   approvedPaths: new Set(),
   sandbox: null,
   sandboxes: [],
+  taskRun: null,
+  taskRunPayload: null,
+  taskRunPoll: null,
+  taskRunSandboxPath: null,
+  taskRunRenderedProposalId: null,
 };
+
+const TASK_RUN_PHASES = ["Sandbox", "Explore", "Approval", "Apply", "Validate", "Complete"];
 
 const $ = (id) => document.getElementById(id);
 
@@ -51,6 +58,11 @@ document.addEventListener("change", (event) => {
 
 $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
+$("startTaskRun").addEventListener("click", startTaskRun);
+$("pauseTaskRun").addEventListener("click", pauseTaskRun);
+$("resumeTaskRun").addEventListener("click", resumeTaskRun);
+$("cancelTaskRun").addEventListener("click", cancelTaskRun);
+$("createTaskBranch").addEventListener("click", createTaskBranch);
 $("testLlm").addEventListener("click", testLlmConnection);
 $("applyProposal").addEventListener("click", applyProposal);
 $("revertProposal").addEventListener("click", revertProposal);
@@ -68,7 +80,7 @@ $("generateRepairProposal").addEventListener("click", generateRepairProposal);
 $("loadHistory").addEventListener("click", loadHistory);
 $("clearHistory").addEventListener("click", clearHistory);
 $("refreshAll").addEventListener("click", async () => {
-  await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+  await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory(), pollTaskRun()]);
 });
 
 function selectedModel() {
@@ -109,6 +121,280 @@ async function generateProposal() {
   }
 }
 
+async function startTaskRun() {
+  const payload = buildWorkflowPayload();
+  if (!payload.task) {
+    setStatus("Task is required.");
+    return;
+  }
+  setStatus("Starting sandboxed task run...");
+  activateTab("taskRun");
+  try {
+    const data = await postJson("/api/task-runs/start", payload);
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    state.taskRunPayload = payload;
+    state.taskRunSandboxPath = null;
+    state.taskRunRenderedProposalId = null;
+    updateTaskRun(data.task_run);
+    const shortId = String(data.task_run?.run_id || "task").slice(0, 8);
+    $("taskRunBranch").value = `feature/repopilot-${shortId}`;
+    startTaskRunPolling();
+    setStatus("Sandboxed task run started.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function pauseTaskRun() {
+  if (!state.taskRun) return;
+  setStatus("Requesting task pause...");
+  try {
+    const data = await postJson("/api/task-runs/pause", taskRunControlPayload());
+    if (data.error) throw new Error(data.error);
+    updateTaskRun(data.task_run);
+    startTaskRunPolling();
+    setStatus(data.task_run.message || "Pause requested.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function resumeTaskRun() {
+  if (!state.taskRun) return;
+  setStatus("Resuming task run...");
+  try {
+    const data = await postJson("/api/task-runs/resume", {
+      ...buildWorkflowPayload(),
+      ...taskRunControlPayload(),
+    });
+    if (data.error) throw new Error(data.error);
+    state.taskRunPayload = buildWorkflowPayload();
+    updateTaskRun(data.task_run);
+    startTaskRunPolling();
+    setStatus(data.task_run.message || "Task run resumed.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function cancelTaskRun() {
+  if (!state.taskRun) return;
+  const confirmed = window.confirm("Cancel this task run and preserve its sandbox for inspection?");
+  if (!confirmed) return;
+  setStatus("Requesting task cancellation...");
+  try {
+    const data = await postJson("/api/task-runs/cancel", taskRunControlPayload());
+    if (data.error) throw new Error(data.error);
+    updateTaskRun(data.task_run);
+    startTaskRunPolling();
+    setStatus(data.task_run.message || "Cancellation requested.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function createTaskBranch() {
+  if (!state.taskRun) return;
+  const branchName = $("taskRunBranch").value.trim();
+  if (!branchName) {
+    setStatus("Feature branch name is required.");
+    return;
+  }
+  const confirmed = window.confirm(
+    `Create local branch ${branchName} in the task sandbox? RepoPilot will not commit or push.`
+  );
+  if (!confirmed) return;
+  setStatus("Creating local feature branch...");
+  try {
+    const data = await postJson("/api/task-runs/branch", {
+      ...taskRunControlPayload(),
+      branch_name: branchName,
+      confirm_create: true,
+    });
+    if (data.error) throw new Error(data.error);
+    updateTaskRun(data.task_run);
+    setStatus(`Created local branch ${data.branch}.`);
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+function startTaskRunPolling() {
+  stopTaskRunPolling();
+  state.taskRunPoll = window.setInterval(() => {
+    pollTaskRun().catch((error) => setStatus(`Task status error: ${error.message}`));
+  }, 1000);
+}
+
+function stopTaskRunPolling() {
+  if (state.taskRunPoll) {
+    window.clearInterval(state.taskRunPoll);
+    state.taskRunPoll = null;
+  }
+}
+
+async function pollTaskRun() {
+  const current = state.taskRun;
+  if (!current?.run_id || !current.source_repo) return;
+  const params = new URLSearchParams({
+    run_id: current.run_id,
+    source_repo: current.source_repo,
+  });
+  const data = await getJson(`/api/task-runs/status?${params.toString()}`);
+  if (data.error) throw new Error(data.error);
+  if (state.taskRun?.run_id !== data.task_run?.run_id) return;
+  updateTaskRun(data.task_run);
+}
+
+async function loadLatestTaskRun() {
+  const data = await getJson(`/api/task-runs?${repositoryQuery()}&limit=1`);
+  if (data.error) throw new Error(data.error);
+  const latest = (data.task_runs || [])[0];
+  if (!latest) {
+    $("taskRunPhases").innerHTML = TASK_RUN_PHASES.map(
+      (phase, index) => `<div class="task-run-phase">${index + 1}. ${escapeHtml(phase)}</div>`
+    ).join("");
+    return;
+  }
+  state.taskRunPayload = buildWorkflowPayload();
+  state.taskRunRenderedProposalId = null;
+  updateTaskRun(latest);
+  const shortId = String(latest.run_id || "task").slice(0, 8);
+  $("taskRunBranch").value = latest.delivery_branch || `feature/repopilot-${shortId}`;
+}
+
+function updateTaskRun(taskRun) {
+  if (!taskRun) return;
+  state.taskRun = taskRun;
+  renderTaskRun(taskRun);
+  adoptTaskRunSandbox(taskRun);
+  const report = currentTaskRunReport(taskRun);
+  const reportKey = report
+    ? `${taskRun.proposal_id || "none"}:${taskRun.history_run_id || "analysis"}`
+    : null;
+  if (report && reportKey !== state.taskRunRenderedProposalId) {
+    state.taskRunRenderedProposalId = reportKey;
+    state.lastReport = report;
+    renderReport(report, state.taskRunPayload || buildWorkflowPayload());
+  }
+  if (["completed", "cancelled", "failed", "paused", "awaiting_approval", "repair_pending"].includes(taskRun.status)) {
+    stopTaskRunPolling();
+  }
+}
+
+function currentTaskRunReport(taskRun) {
+  const result = taskRun?.result;
+  if (!result) return null;
+  if (result.repair_report && result.repair_report.proposal_id === taskRun.proposal_id) {
+    return result.repair_report;
+  }
+  return result;
+}
+
+function adoptTaskRunSandbox(taskRun) {
+  if (!taskRun.sandbox_path || state.taskRunSandboxPath === taskRun.sandbox_path) return;
+  state.taskRunSandboxPath = taskRun.sandbox_path;
+  const sandbox = {
+    source_repo: taskRun.source_repo,
+    path: taskRun.sandbox_path,
+    head: taskRun.sandbox_head,
+    branch: taskRun.delivery_branch,
+    detached: !taskRun.delivery_branch,
+    clean: taskRun.status === "awaiting_approval",
+    managed: true,
+    primary: false,
+  };
+  if (!state.sandboxes.some((item) => item.path === sandbox.path)) {
+    state.sandboxes = [sandbox, ...state.sandboxes];
+  }
+  state.sandbox = sandbox;
+  $("repoSource").value = "local";
+  $("repoPath").value = sandbox.path;
+  $("repoBranch").value = taskRun.delivery_branch || "";
+  renderSandboxOptions(sandbox.path);
+  renderSandboxStatus(sandbox);
+  updateRepositorySourceUi();
+  resetProposalForRepositoryChange();
+}
+
+function renderTaskRun(taskRun) {
+  $("taskRunId").textContent = taskRun.run_id || "Not started";
+  $("taskRunStatus").textContent = String(taskRun.status || "unknown").replaceAll("_", " ");
+  $("taskRunMessage").textContent = taskRun.message || "";
+  $("taskRunSandbox").textContent = taskRun.sandbox_path
+    ? `${taskRun.sandbox_path}\nHEAD ${taskRun.sandbox_head || "unknown"}`
+    : "Not created";
+  $("pauseTaskRun").disabled = !taskRun.can_pause;
+  $("resumeTaskRun").disabled = !taskRun.can_resume;
+  $("cancelTaskRun").disabled = !taskRun.can_cancel;
+  $("createTaskBranch").disabled = !taskRun.can_create_branch;
+  $("taskRunDelivery").textContent = taskRun.delivery_branch
+    ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
+    : "No delivery branch created.";
+  renderTaskRunPhases(taskRun);
+  const events = taskRun.events || [];
+  $("taskRunEvents").innerHTML = events.length
+    ? events
+        .map(
+          (event) => `<div class="timeline-event">
+            <div class="timeline-step">${escapeHtml(String(event.status || "").replaceAll("_", " "))}</div>
+            <div class="timeline-status">${escapeHtml(formatTime(event.created_at))}</div>
+            <div>${escapeHtml(event.detail || "")}</div>
+          </div>`
+        )
+        .join("")
+    : item("No task-run events yet.");
+}
+
+function renderTaskRunPhases(taskRun) {
+  const phaseIndex = taskRunPhaseIndex(taskRun);
+  const completed = taskRun.status === "completed";
+  const warning = ["failed", "cancelled", "repair_pending", "interrupted"].includes(taskRun.status);
+  $("taskRunPhases").innerHTML = TASK_RUN_PHASES.map((phase, index) => {
+    let className = "task-run-phase";
+    if (completed || index < phaseIndex) className += " done";
+    else if (index === phaseIndex) className += warning ? " warning" : " active";
+    return `<div class="${className}">${index + 1}. ${escapeHtml(phase)}</div>`;
+  }).join("");
+}
+
+function taskRunPhaseIndex(taskRun) {
+  const status = taskRun.status === "paused" ? taskRun.resume_status : taskRun.status;
+  if (["queued", "creating_sandbox"].includes(status)) return 0;
+  if (["exploring", "pausing", "cancelling", "interrupted", "failed"].includes(status)) return 1;
+  if (status === "awaiting_approval") return 2;
+  if (status === "applying") return 3;
+  if (["validating", "repair_pending"].includes(status)) return 4;
+  return 5;
+}
+
+function taskRunControlPayload() {
+  return {
+    run_id: state.taskRun?.run_id,
+    source_repo: state.taskRun?.source_repo,
+  };
+}
+
+function taskRunLinkPayload() {
+  if (!state.taskRun?.run_id) return {};
+  return {
+    task_run_id: state.taskRun.run_id,
+    source_repo: state.taskRun.source_repo,
+  };
+}
+
+function activateTab(name) {
+  document.querySelector(`.tab[data-tab="${name}"]`)?.click();
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString();
+}
+
 async function testLlmConnection() {
   setStatus("Testing LLM connection...");
   $("llmTestLine").textContent = "Testing model endpoint...";
@@ -144,9 +430,11 @@ async function applyProposal() {
   }
 
   setStatus("Applying proposal...");
+  if (state.taskRun) startTaskRunPolling();
   try {
     const result = await postJson("/api/apply", {
       ...buildRepositoryPayload(),
+      ...taskRunLinkPayload(),
       proposal_id: state.proposalId,
       approved_paths: approvedPaths,
     });
@@ -169,6 +457,7 @@ async function applyProposal() {
       ? "Rollback snapshot available for this applied proposal."
       : "No rollback snapshot available.";
     renderTimeline(result.timeline || []);
+    if (result.task_run) updateTaskRun(result.task_run);
     setApprovalInputsDisabled(true);
     updateApprovalState();
     setStatus(result.message || "Proposal applied.");
@@ -192,6 +481,7 @@ async function revertProposal() {
   try {
     const result = await postJson("/api/revert", {
       ...buildRepositoryPayload(),
+      ...taskRunLinkPayload(),
       proposal_id: state.proposalId,
     });
     if (result.error) {
@@ -211,6 +501,7 @@ async function revertProposal() {
     $("rollbackStatus").textContent = "Applied proposal was reverted from its rollback snapshot.";
     $("validationFeedbackList").innerHTML = renderValidationFeedback(null);
     renderTimeline(result.timeline || []);
+    if (result.task_run) updateTaskRun(result.task_run);
     setStatus(result.message || "Proposal reverted.");
     await loadDiff(false);
   } catch (error) {
@@ -224,9 +515,11 @@ async function generateRepairProposal() {
     return;
   }
   setStatus("Generating repair proposal...");
+  if (state.taskRun) startTaskRunPolling();
   try {
     const report = await postJson("/api/repair/propose", {
       ...buildWorkflowPayload(),
+      ...taskRunLinkPayload(),
       proposal_id: state.repairParentId,
     });
     if (report.error) {
@@ -234,6 +527,7 @@ async function generateRepairProposal() {
     }
     state.lastReport = report;
     renderReport(report, buildWorkflowPayload());
+    if (report.task_run) updateTaskRun(report.task_run);
     setStatus("Repair proposal ready for review.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
@@ -1336,5 +1630,8 @@ loadDiff(false).catch((error) => {
 updateRepositorySourceUi();
 refreshSandboxes().catch((error) => {
   $("sandboxLine").textContent = `Sandbox status unavailable: ${error.message}`;
+});
+loadLatestTaskRun().catch(() => {
+  $("taskRunMessage").textContent = "Saved task-run state is unavailable for this repository.";
 });
 loadHistory().catch(() => {});

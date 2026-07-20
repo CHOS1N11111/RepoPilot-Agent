@@ -119,6 +119,7 @@
         <p id="llmTestLine" class="status-line">LLM connection not tested.</p>
 
         <div class="button-row">
+          <button id="startTaskRun">Start Sandboxed Task</button>
           <button id="runWorkflow">Run RepoPilot</button>
           <button id="generateProposal" class="secondary">Generate Proposal</button>
         </div>
@@ -127,6 +128,7 @@
 
       <section class="panel output-panel">
         <div class="tabs">
+          <button class="tab" data-tab="taskRun">Task Run</button>
           <button class="tab active" data-tab="summary">Summary</button>
           <button class="tab" data-tab="llm">LLM I/O</button>
           <button class="tab" data-tab="github">GitHub</button>
@@ -135,6 +137,33 @@
           <button class="tab" data-tab="history">History</button>
           <button class="tab" data-tab="json">JSON</button>
         </div>
+
+        <section id="taskRunTab" class="tab-content">
+          <div class="task-run-header">
+            <div>
+              <small>Run</small>
+              <strong id="taskRunId">Not started</strong>
+            </div>
+            <span id="taskRunStatus" class="task-run-status">idle</span>
+          </div>
+          <div id="taskRunPhases" class="task-run-phases"></div>
+          <p id="taskRunMessage" class="status-line">No sandboxed task is active.</p>
+          <div class="toolbar task-run-controls">
+            <button id="pauseTaskRun" class="secondary" disabled>Pause</button>
+            <button id="resumeTaskRun" class="secondary" disabled>Resume</button>
+            <button id="cancelTaskRun" class="secondary danger-button" disabled>Cancel</button>
+          </div>
+          <h2>Sandbox</h2>
+          <pre id="taskRunSandbox" class="code-block compact">Not created</pre>
+          <h2>Run Events</h2>
+          <div id="taskRunEvents" class="timeline"></div>
+          <h2>Local Feature Branch</h2>
+          <div class="task-run-delivery">
+            <input id="taskRunBranch" placeholder="feature/repopilot-task" />
+            <button id="createTaskBranch" class="secondary" disabled>Create Branch</button>
+          </div>
+          <p id="taskRunDelivery" class="status-line">No delivery branch created.</p>
+        </section>
 
         <section id="summaryTab" class="tab-content active">
           <div class="metrics">

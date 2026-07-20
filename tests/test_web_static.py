@@ -105,6 +105,33 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("Permanently discard them", self.app_js)
         self.assertIn("resetProposalForRepositoryChange", self.app_js)
 
+    def test_task_run_ui_exposes_orchestration_and_delivery_controls(self) -> None:
+        for element_id in [
+            "startTaskRun",
+            "taskRunStatus",
+            "taskRunPhases",
+            "pauseTaskRun",
+            "resumeTaskRun",
+            "cancelTaskRun",
+            "taskRunEvents",
+            "taskRunBranch",
+            "createTaskBranch",
+        ]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        for endpoint in [
+            "/api/task-runs/start",
+            "/api/task-runs/status",
+            "/api/task-runs/pause",
+            "/api/task-runs/resume",
+            "/api/task-runs/cancel",
+            "/api/task-runs/branch",
+        ]:
+            self.assertIn(endpoint, self.app_js)
+        self.assertIn("startTaskRunPolling", self.app_js)
+        self.assertIn("task_run_id: state.taskRun.run_id", self.app_js)
+        self.assertIn("RepoPilot will not commit or push", self.app_js)
+        self.assertIn(".task-run-phases", self.app_css)
+
 
 if __name__ == "__main__":
     unittest.main()

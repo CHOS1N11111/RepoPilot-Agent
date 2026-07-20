@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -46,9 +47,45 @@ def default_memory_path(repo_path: str | Path) -> Path:
     return root / ".repopilot" / "memory.sqlite3"
 
 
+def ensure_local_state_ignored(repo_path: str | Path) -> None:
+    """Keep RepoPilot state local without editing the repository's tracked ignore files."""
+    root = Path(repo_path).expanduser().resolve()
+    if not root.is_dir():
+        return
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    if result.returncode != 0 or not result.stdout.strip():
+        return
+    exclude_path = Path(result.stdout.strip())
+    if not exclude_path.is_absolute():
+        exclude_path = (root / exclude_path).resolve()
+    try:
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        patterns = {line.strip() for line in existing.splitlines()}
+        if ".repopilot/" in patterns:
+            return
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        exclude_path.write_text(f"{existing}{separator}.repopilot/\n", encoding="utf-8")
+    except OSError:
+        return
+
+
 class MemoryStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
+        if self.db_path.parent.name == ".repopilot":
+            ensure_local_state_ignored(self.db_path.parent.parent)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -219,6 +256,53 @@ class MemoryStore:
         if row is None:
             return None
         return _loads(row["data_json"], None)
+
+    def save_task_run(self, task_run: dict[str, Any]) -> None:
+        run_id = str(task_run.get("run_id") or "").strip()
+        source_repo = str(task_run.get("source_repo") or "").strip()
+        status = str(task_run.get("status") or "").strip()
+        if not run_id:
+            raise ValueError("run_id is required to save a task run.")
+        if not source_repo:
+            raise ValueError("source_repo is required to save a task run.")
+        if not status:
+            raise ValueError("status is required to save a task run.")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_runs (id, source_repo, status, updated_at, data_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    source_repo = excluded.source_repo,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    data_json = excluded.data_json
+                """,
+                (run_id, source_repo, status, _now(), _json(task_run)),
+            )
+
+    def get_task_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT data_json FROM task_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _loads(row["data_json"], None)
+
+    def list_task_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT data_json
+                FROM task_runs
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (max(min(limit, 100), 1),),
+            ).fetchall()
+        return [_loads(row["data_json"], {}) for row in rows]
 
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -432,6 +516,14 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS proposal_sessions (
                     id TEXT PRIMARY KEY,
                     repo_path TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    data_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS task_runs (
+                    id TEXT PRIMARY KEY,
+                    source_repo TEXT NOT NULL,
+                    status TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     data_json TEXT NOT NULL
                 );

@@ -6,7 +6,7 @@
 ![Workflow](https://img.shields.io/badge/Workflow-Human--in--the--loop-176B87)
 ![Status](https://img.shields.io/badge/Status-Local%20MVP-18794E)
 
-RepoPilot Agent is a local coding workflow agent for turning GitHub issues, bug reports, or feature requests into reviewed, validated code-change proposals. It scans a repository, retrieves relevant files, plans the work, asks an optional OpenAI-compatible LLM for patch proposals, previews diffs, waits for human approval, applies approved edits, reruns validation, and summarizes the result.
+RepoPilot Agent is a local coding workflow agent for turning GitHub issues, bug reports, or feature requests into reviewed, validated code-change proposals. It can create an isolated worktree for each task, scan the repository, retrieve relevant files, plan the work, ask an optional OpenAI-compatible LLM for patch proposals, wait for human approval, apply approved edits, rerun validation, and preserve the complete task state for recovery.
 
 The project is designed around practical agent engineering: tool use, repository understanding, Git/GitHub awareness, structured LLM outputs, traceability, and human-in-the-loop safety.
 
@@ -14,6 +14,7 @@ The project is designed around practical agent engineering: tool use, repository
 
 ```text
 Task or GitHub issue
+-> isolated task worktree
 -> repository scan
 -> relevant file search
 -> related memory lookup
@@ -25,12 +26,14 @@ Task or GitHub issue
 -> protected file application
 -> validation rerun
 -> validation feedback and repair proposal
+-> resumable task completion
 -> Git diff, PR readiness, and PR draft support
 ```
 
 ```mermaid
 flowchart LR
-    A["GitHub issue or task"] --> B["Repository scan"]
+    A["GitHub issue or task"] --> S["Task worktree"]
+    S --> B["Repository scan"]
     B --> C["Relevant file search"]
     C --> M["Related memory"]
     M --> D["Plan"]
@@ -44,7 +47,8 @@ flowchart LR
     J --> L{"Validation passed?"}
     L -->|No| R["Repair proposal"]
     R --> G
-    L -->|Yes| K["Git diff, PR readiness, and PR draft"]
+    L -->|Yes| T["Completed task run"]
+    T --> K["Local branch, Git diff, and PR draft"]
 ```
 
 ## Highlights
@@ -55,6 +59,7 @@ flowchart LR
 - Read-only iterative agent mode for multi-step search, file reading, Git inspection, and context selection.
 - Reproducible deterministic and LLM evaluation suites with explicit scoring and aggregate metrics.
 - Managed detached Git worktree sandboxes for isolated proposal application and validation.
+- Persistent sandboxed task runs with background execution, progress polling, safe pause/resume/cancel checkpoints, and restart recovery.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
@@ -84,6 +89,7 @@ flowchart LR
 | 🧪 Validation          | Recommends commands, runs allowlisted checks, analyzes failures, and prepares repair context.         |
 | Evaluation             | Scores retrieval, proposals, validation, Agent steps, LLM calls, latency, failures, and fallbacks.    |
 | Worktree sandbox       | Creates isolated committed snapshots and guards dirty-source and destructive-removal operations.      |
+| Task orchestration     | Runs the Agent in a sandbox, persists progress, waits for approval, validates, repairs, and resumes.   |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and PR readiness.    |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -107,6 +113,7 @@ src/repopilot_agent/
   validation_feedback.py validation failure analysis and repair task builder
   evaluation.py         reproducible case loading, workflow scoring, and aggregate reports
   worktree_sandbox.py   managed detached Git worktree lifecycle and safety rules
+  task_runs.py          persistent task-run state, checkpoints, and local branch delivery
   memory.py             SQLite history and related-run retrieval
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
@@ -164,6 +171,8 @@ The web UI supports:
 - Repository source selection for local paths, GitHub URLs, or auto detection.
 - Repository sync controls for cached GitHub clones, branch checkout, latest commit display, and local-change protection.
 - Worktree sandbox creation, selection, refresh, and explicitly confirmed removal.
+- One-click sandboxed task runs that automatically create and select an isolated worktree.
+- A dedicated Task Run view with persisted phases, event history, polling, pause, resume, cancel, and recovery controls.
 - 🧠 LLM model, API endpoint URL, and API key inputs.
 - Automatic JSON mode compatibility retry for providers that do not support `response_format`.
 - LLM connection testing before running the full workflow.
@@ -231,6 +240,20 @@ python repopilot.py sandbox remove --repo . --path "C:/path/from/create" --force
 ```
 
 By default sandboxes live under the operating system's temporary directory. Set `REPOPILOT_WORKTREE_ROOT` to use another directory outside the source repository.
+
+## Sandboxed Task Runs
+
+`Start Sandboxed Task` is the recommended end-to-end Web workflow. It creates a managed worktree from the clean committed source repository and runs exploration and proposal generation in a background worker. The Task Run tab tracks these phases:
+
+```text
+Sandbox -> Explore -> Approval -> Apply -> Validate -> Complete
+```
+
+When an apply-ready proposal is available, the run stops at `awaiting_approval`. Review the proposal and diff in the Summary tab, select the approved files, and use the existing protected Apply action. Passing validation completes the run; failed validation changes it to `repair_pending`, where the bounded repair workflow can generate another human-reviewed proposal.
+
+Task-run state is saved in the source repository's local SQLite database and restored after a server restart. Active work cannot be resumed in the middle of an interrupted provider request, so a restored active run is marked `interrupted` and can be restarted from its last safe sandbox checkpoint. Pause and cancel requests use the same checkpoints and preserve the sandbox for inspection.
+
+After a successful run, `Create Branch` can attach the sandbox to a validated local feature branch. This requires explicit confirmation and works only for a registered RepoPilot worktree. It does not stage, commit, push, or create a pull request.
 
 ## LLM Configuration
 
@@ -405,7 +428,9 @@ RepoPilot stores local web workflow history in SQLite under:
 .repopilot/memory.sqlite3
 ```
 
-The memory layer records run metadata, tasks, summaries, proposal metadata, proposal sessions, proposed diffs, LLM traces, validation results, and timeline events. API keys are not stored. The web UI exposes this through the History tab, where previous runs, saved LLM trace history, and persisted proposal state can be inspected.
+The memory layer records run metadata, tasks, summaries, proposal metadata, proposal sessions, task-run checkpoints, proposed diffs, LLM traces, validation results, and timeline events. API keys are not stored. The web UI exposes this through the History and Task Run tabs, where previous runs, saved LLM trace history, persisted proposal state, and resumable task state can be inspected.
+
+RepoPilot adds `.repopilot/` to the clone's local Git `info/exclude` before writing state. This keeps local memory out of `git status` without changing or committing the repository's `.gitignore`.
 
 Apply-ready proposal sessions are stored in the same SQLite database. If the web server restarts after proposal generation, RepoPilot can restore the proposal session from SQLite when the browser sends the same `proposal_id` with the repository input. Applied proposal rollback snapshots are also persisted so revert remains available across restarts unless the working tree files change after apply.
 
@@ -436,6 +461,8 @@ GitHub PR creation follows the same rule: RepoPilot checks readiness first, bloc
 - 🧪 It runs validation commands only through an allowlist.
 - It creates sandboxes only from clean committed state and removes only registered worktrees inside the managed root.
 - It refuses to delete dirty sandboxes unless the user explicitly requests forced removal.
+- It creates delivery branches only inside registered managed worktrees and only after explicit confirmation.
+- It never persists task-run API credentials and never commits or pushes task-run changes automatically.
 - 🧯 It keeps deterministic fallbacks for invalid or unavailable LLM output.
 - 🔍 It exposes LLM traces and self-review output so decisions are inspectable.
 
@@ -474,4 +501,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, explicit local branch delivery, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
