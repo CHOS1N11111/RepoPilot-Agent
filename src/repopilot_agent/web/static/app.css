@@ -342,6 +342,16 @@ button:disabled:hover {
   font-weight: 700;
 }
 
+.runtime-run-id {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-event span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .issue-actions {
   margin-top: 8px;
 }

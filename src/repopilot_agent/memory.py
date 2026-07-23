@@ -106,8 +106,9 @@ class MemoryStore:
                 """
                 INSERT INTO runs (
                     id, repo_path, task, mode, created_at, summary, proposal_id,
-                    plan_source, proposal_source, review_source, applied, pinned, timeline_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    plan_source, proposal_source, review_source, applied, pinned, timeline_json,
+                    agent_runtime_run_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -123,6 +124,7 @@ class MemoryStore:
                     0,
                     0,
                     _json(timeline or []),
+                    getattr(report, "agent_run_id", None),
                 ),
             )
             if proposal:
@@ -304,12 +306,180 @@ class MemoryStore:
             ).fetchall()
         return [_loads(row["data_json"], {}) for row in rows]
 
+    def reserve_agent_runtime_action(
+        self,
+        runtime_run_id: str,
+        idempotency_key: str,
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not runtime_run_id.strip() or not idempotency_key.strip():
+            raise ValueError("Runtime run id and idempotency key are required.")
+        signature = _runtime_action_signature(action)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT state, action_json, observation_json
+                FROM agent_runtime_actions
+                WHERE runtime_run_id = ? AND idempotency_key = ?
+                """,
+                (runtime_run_id, idempotency_key),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO agent_runtime_actions (
+                        runtime_run_id, idempotency_key, action_id, state,
+                        action_json, observation_json, updated_at
+                    ) VALUES (?, ?, ?, 'in_progress', ?, NULL, ?)
+                    """,
+                    (
+                        runtime_run_id,
+                        idempotency_key,
+                        str(action.get("action_id") or ""),
+                        _json(action),
+                        _now(),
+                    ),
+                )
+                return {"status": "new", "observation": None}
+            if _runtime_action_signature(_loads(row["action_json"], {})) != signature:
+                return {"status": "conflict", "observation": None}
+            observation = _loads(row["observation_json"], None)
+            if row["state"] == "completed" and isinstance(observation, dict):
+                return {"status": "completed", "observation": observation}
+            return {"status": "in_progress", "observation": None}
+
+    def complete_agent_runtime_action(
+        self,
+        runtime_run_id: str,
+        idempotency_key: str,
+        action: dict[str, Any],
+        observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        signature = _runtime_action_signature(action)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT state, action_json, observation_json
+                FROM agent_runtime_actions
+                WHERE runtime_run_id = ? AND idempotency_key = ?
+                """,
+                (runtime_run_id, idempotency_key),
+            ).fetchone()
+            if row is not None and _runtime_action_signature(_loads(row["action_json"], {})) != signature:
+                raise ValueError("Idempotency key is already reserved for a different action.")
+            existing = _loads(row["observation_json"], None) if row is not None else None
+            if row is not None and row["state"] == "completed" and isinstance(existing, dict):
+                return existing
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO agent_runtime_actions (
+                        runtime_run_id, idempotency_key, action_id, state,
+                        action_json, observation_json, updated_at
+                    ) VALUES (?, ?, ?, 'completed', ?, ?, ?)
+                    """,
+                    (
+                        runtime_run_id,
+                        idempotency_key,
+                        str(action.get("action_id") or ""),
+                        _json(action),
+                        _json(observation),
+                        _now(),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE agent_runtime_actions
+                    SET state = 'completed', observation_json = ?, updated_at = ?
+                    WHERE runtime_run_id = ? AND idempotency_key = ?
+                    """,
+                    (_json(observation), _now(), runtime_run_id, idempotency_key),
+                )
+        return observation
+
+    def append_agent_runtime_event(
+        self,
+        runtime_run_id: str,
+        event_type: str,
+        *,
+        action_id: str | None = None,
+        idempotency_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event_id = uuid4().hex
+        created_at = _now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM agent_runtime_events WHERE runtime_run_id = ?",
+                (runtime_run_id,),
+            ).fetchone()
+            sequence = int(row["sequence"] if row else 0) + 1
+            conn.execute(
+                """
+                INSERT INTO agent_runtime_events (
+                    id, runtime_run_id, sequence, event_type, action_id,
+                    idempotency_key, created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    runtime_run_id,
+                    sequence,
+                    event_type,
+                    action_id,
+                    idempotency_key,
+                    created_at,
+                    _json(payload or {}),
+                ),
+            )
+        return {
+            "event_id": event_id,
+            "run_id": runtime_run_id,
+            "sequence": sequence,
+            "event_type": event_type,
+            "created_at": created_at,
+            "action_id": action_id,
+            "idempotency_key": idempotency_key,
+            "payload": payload or {},
+        }
+
+    def list_agent_runtime_events(self, runtime_run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, runtime_run_id, sequence, event_type, action_id,
+                       idempotency_key, created_at, payload_json
+                FROM agent_runtime_events
+                WHERE runtime_run_id = ?
+                ORDER BY sequence
+                """,
+                (runtime_run_id,),
+            ).fetchall()
+        return [
+            {
+                "event_id": row["id"],
+                "run_id": row["runtime_run_id"],
+                "sequence": row["sequence"],
+                "event_type": row["event_type"],
+                "created_at": row["created_at"],
+                "action_id": row["action_id"],
+                "idempotency_key": row["idempotency_key"],
+                "payload": _loads(row["payload_json"], {}),
+            }
+            for row in rows
+        ]
+
     def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT id, repo_path, task, mode, created_at, summary, proposal_id,
-                       plan_source, proposal_source, review_source, applied, pinned, timeline_json
+                       plan_source, proposal_source, review_source, applied, pinned, timeline_json,
+                       agent_runtime_run_id
                 FROM runs
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -323,7 +493,8 @@ class MemoryStore:
             run_row = conn.execute(
                 """
                 SELECT id, repo_path, task, mode, created_at, summary, proposal_id,
-                       plan_source, proposal_source, review_source, applied, pinned, timeline_json
+                       plan_source, proposal_source, review_source, applied, pinned, timeline_json,
+                       agent_runtime_run_id
                 FROM runs
                 WHERE id = ?
                 """,
@@ -343,18 +514,35 @@ class MemoryStore:
                 "SELECT * FROM validation_results WHERE run_id = ? ORDER BY rowid",
                 (run_id,),
             ).fetchall()
+            runtime_events = []
+            if run_row["agent_runtime_run_id"]:
+                runtime_events = conn.execute(
+                    """
+                    SELECT id, runtime_run_id, sequence, event_type, action_id,
+                           idempotency_key, created_at, payload_json
+                    FROM agent_runtime_events
+                    WHERE runtime_run_id = ?
+                    ORDER BY sequence
+                    """,
+                    (run_row["agent_runtime_run_id"],),
+                ).fetchall()
         data = _row_to_run(run_row)
         data["proposal"] = _row_to_proposal(proposal) if proposal else None
         data["proposal_session"] = _loads(proposal_session["data_json"], None) if proposal_session else None
         data["llm_traces"] = [_row_to_trace(row) for row in traces]
         data["validation"] = [_row_to_validation(row) for row in validation]
+        data["agent_events"] = [_row_to_agent_runtime_event(row) for row in runtime_events]
         return data
 
     def delete_run(self, run_id: str) -> bool:
         with self._connect() as conn:
-            row = conn.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+            row = conn.execute(
+                "SELECT id, agent_runtime_run_id FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
             if row is None:
                 return False
+            runtime_run_id = row["agent_runtime_run_id"]
             conn.execute("DELETE FROM validation_results WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM llm_traces WHERE run_id = ?", (run_id,))
             proposal_rows = conn.execute("SELECT id FROM proposals WHERE run_id = ?", (run_id,)).fetchall()
@@ -362,6 +550,19 @@ class MemoryStore:
                 conn.execute("DELETE FROM proposal_sessions WHERE id = ?", (proposal_row["id"],))
             conn.execute("DELETE FROM proposals WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+            if runtime_run_id:
+                still_referenced = conn.execute(
+                    """
+                    SELECT 1 FROM runs WHERE agent_runtime_run_id = ?
+                    UNION ALL
+                    SELECT 1 FROM task_runs WHERE id = ?
+                    LIMIT 1
+                    """,
+                    (runtime_run_id, runtime_run_id),
+                ).fetchone()
+                if still_referenced is None:
+                    conn.execute("DELETE FROM agent_runtime_events WHERE runtime_run_id = ?", (runtime_run_id,))
+                    conn.execute("DELETE FROM agent_runtime_actions WHERE runtime_run_id = ?", (runtime_run_id,))
         return True
 
     def set_run_pinned(self, run_id: str, pinned: bool) -> bool:
@@ -381,6 +582,12 @@ class MemoryStore:
             conn.execute("DELETE FROM proposal_sessions")
             conn.execute("DELETE FROM proposals")
             conn.execute("DELETE FROM runs")
+            conn.execute(
+                "DELETE FROM agent_runtime_events WHERE runtime_run_id NOT IN (SELECT id FROM task_runs)"
+            )
+            conn.execute(
+                "DELETE FROM agent_runtime_actions WHERE runtime_run_id NOT IN (SELECT id FROM task_runs)"
+            )
         return count
 
     def list_pinned_runs(self, limit: int = 5, exclude_run_id: str | None = None) -> list[MemoryContextItem]:
@@ -472,7 +679,8 @@ class MemoryStore:
                     review_source TEXT,
                     applied INTEGER NOT NULL DEFAULT 0,
                     pinned INTEGER NOT NULL DEFAULT 0,
-                    timeline_json TEXT NOT NULL
+                    timeline_json TEXT NOT NULL,
+                    agent_runtime_run_id TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS proposals (
@@ -527,10 +735,37 @@ class MemoryStore:
                     updated_at TEXT NOT NULL,
                     data_json TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS agent_runtime_actions (
+                    runtime_run_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    action_json TEXT NOT NULL,
+                    observation_json TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (runtime_run_id, idempotency_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_runtime_events (
+                    id TEXT PRIMARY KEY,
+                    runtime_run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    action_id TEXT,
+                    idempotency_key TEXT,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    UNIQUE (runtime_run_id, sequence)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_agent_runtime_events_run
+                ON agent_runtime_events (runtime_run_id, sequence);
                 """
             )
             _ensure_column(conn, "llm_traces", "context_summary", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "runs", "pinned", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "runs", "agent_runtime_run_id", "TEXT")
 
     @contextmanager
     def _connect(self):
@@ -557,6 +792,7 @@ def _row_to_run(row: sqlite3.Row) -> dict[str, Any]:
         "review_source": row["review_source"],
         "applied": bool(row["applied"]),
         "pinned": bool(row["pinned"]),
+        "agent_runtime_run_id": row["agent_runtime_run_id"],
         "timeline": _loads(row["timeline_json"], []),
     }
 
@@ -599,8 +835,30 @@ def _row_to_validation(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _row_to_agent_runtime_event(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "event_id": row["id"],
+        "run_id": row["runtime_run_id"],
+        "sequence": row["sequence"],
+        "event_type": row["event_type"],
+        "created_at": row["created_at"],
+        "action_id": row["action_id"],
+        "idempotency_key": row["idempotency_key"],
+        "payload": _loads(row["payload_json"], {}),
+    }
+
+
 def _json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def _runtime_action_signature(action: dict[str, Any]) -> str:
+    return json.dumps(
+        {"kind": action.get("kind"), "arguments": action.get("arguments") or {}},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _loads(data: str | None, default: Any) -> Any:

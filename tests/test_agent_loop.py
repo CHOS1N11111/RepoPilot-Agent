@@ -72,6 +72,9 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.selected_paths, ["main.py"])
         self.assertIn("parser behavior", result.summary)
         self.assertEqual(len(client.calls), 3)
+        self.assertTrue(result.runtime_run_id)
+        self.assertEqual(result.events[0].event_type, "run_started")
+        self.assertEqual(result.events[-1].event_type, "run_stopped")
 
     def test_select_agent_hits_prioritizes_selected_paths(self) -> None:
         files = [

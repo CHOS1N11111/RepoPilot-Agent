@@ -132,6 +132,13 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("RepoPilot will not commit or push", self.app_js)
         self.assertIn(".task-run-phases", self.app_css)
 
+    def test_summary_exposes_typed_runtime_events(self) -> None:
+        self.assertIn('id="runtimeEventList"', self.index_html)
+        self.assertIn("function renderRuntimeEvents", self.app_js)
+        self.assertIn("report.agent_events || []", self.app_js)
+        self.assertIn("run.agent_events || []", self.app_js)
+        self.assertIn(".runtime-event", self.app_css)
+
 
 if __name__ == "__main__":
     unittest.main()

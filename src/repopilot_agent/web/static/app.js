@@ -935,6 +935,7 @@ function renderReport(report, payload) {
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
   renderTimeline(report.timeline || []);
   $("agentStepList").innerHTML = renderAgentSteps(report.agent_steps || []);
+  $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
@@ -1003,6 +1004,27 @@ function renderAgentSteps(steps) {
       ${(step.selected_paths || []).length ? `<p><small>Selected: ${escapeHtml(step.selected_paths.join(", "))}</small></p>` : ""}
     </div>`)
     .join("");
+}
+
+function renderRuntimeEvents(events, runId = "") {
+  if (!events || events.length === 0) {
+    return item("No typed runtime events were recorded for this workflow.");
+  }
+  const header = runId
+    ? `<p class="runtime-run-id"><small>Run ${escapeHtml(runId)}</small></p>`
+    : "";
+  const rows = events
+    .map((event) => {
+      const observation = event.payload?.observation || {};
+      const detail = observation.summary || event.payload?.summary || event.payload?.reason || "";
+      return `<div class="timeline-event runtime-event">
+        <span class="timeline-step">#${escapeHtml(event.sequence)}</span>
+        <span class="timeline-status">${escapeHtml(event.event_type || "event")}</span>
+        <span>${escapeHtml(event.action_id || detail || "runtime")}${event.action_id && detail ? ` - ${escapeHtml(detail)}` : ""}</span>
+      </div>`;
+    })
+    .join("");
+  return `${header}${rows}`;
 }
 
 function editableProposalPaths(proposal = state.lastReport?.patch_proposal) {
@@ -1298,6 +1320,9 @@ function renderHistoryDetail(run) {
     .map((result) => `<li>${escapeHtml(result.command)}: ${result.allowed ? `exit ${result.exit_code}` : "rejected"}</li>`)
     .join("");
   const traces = (run.llm_traces || []).map(renderSavedTrace).join("");
+  const runtimeEvents = (run.agent_events || [])
+    .map((event) => `<li>#${escapeHtml(event.sequence)} ${escapeHtml(event.event_type || "event")}${event.action_id ? ` - ${escapeHtml(event.action_id)}` : ""}</li>`)
+    .join("");
   const pinnedTag = run.pinned ? ' <span class="tag ok">pinned</span>' : "";
   $("historyDetail").innerHTML = `
     <div class="item">
@@ -1316,6 +1341,11 @@ function renderHistoryDetail(run) {
     <div class="item">
       <div class="item-title">LLM Trace History</div>
       ${traces || "<p>No LLM traces saved.</p>"}
+    </div>
+    <div class="item">
+      <div class="item-title">Runtime Events</div>
+      <p><small>${escapeHtml(run.agent_runtime_run_id || "No runtime run id")}</small></p>
+      <ul>${runtimeEvents || "<li>No typed runtime events saved.</li>"}</ul>
     </div>
     <div class="item">
       <div class="item-title">Validation</div>

@@ -13,6 +13,7 @@ from .memory import MemoryStore, default_memory_path
 from .models import LLMCallTrace, MemoryContextItem, PatchProposalMetadata, PlanMetadata, WorkflowReport
 from .patch_proposer import propose_patch, propose_patch_with_optional_llm, review_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
+from .runtime import RuntimeEventStore, SQLiteRuntimeStore
 from .safety import check_file_edits
 from .scanner import scan_repository
 from .search import search_files
@@ -36,6 +37,8 @@ def run_workflow(
     memory_context: list[MemoryContextItem] | None = None,
     iterative_agent: bool = False,
     agent_max_steps: int = 6,
+    agent_run_id: str | None = None,
+    agent_event_store: RuntimeEventStore | None = None,
 ) -> WorkflowReport:
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
@@ -62,6 +65,12 @@ def run_workflow(
         if llm_client is not None:
             if iterative_agent:
                 try:
+                    runtime_store = agent_event_store
+                    if runtime_store is None:
+                        try:
+                            runtime_store = SQLiteRuntimeStore(MemoryStore(default_memory_path(root)))
+                        except (OSError, sqlite3.Error):
+                            runtime_store = None
                     agent_result = run_agent_loop(
                         task,
                         root,
@@ -70,6 +79,8 @@ def run_workflow(
                         llm_client,
                         traces=llm_traces,
                         max_steps=agent_max_steps,
+                        runtime_run_id=agent_run_id,
+                        runtime_store=runtime_store,
                     )
                     hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
                 except LLMError:
@@ -142,6 +153,8 @@ def run_workflow(
         patch_proposal_metadata=patch_proposal_metadata,
         patch_review=patch_review,
         agent_steps=agent_result.steps if agent_result else [],
+        agent_run_id=agent_result.runtime_run_id if agent_result else None,
+        agent_events=agent_result.events if agent_result else [],
         llm_traces=llm_traces,
         validation=validation,
         validation_feedback=validation_feedback,

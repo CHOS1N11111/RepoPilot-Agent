@@ -180,7 +180,7 @@ def build_report_timeline(report: Any, proposal_id: str | None = None) -> list[T
     ]
     agent_steps = getattr(report, "agent_steps", [])
     if agent_steps:
-        events.append(TimelineEvent("agent", "done", f"Completed {len(agent_steps)} read-only exploration step(s)."))
+        events.append(TimelineEvent("agent", "done", f"Completed {len(agent_steps)} typed runtime step(s)."))
     else:
         events.append(TimelineEvent("agent", "skipped", "Iterative agent was not run."))
     events.extend(

@@ -72,6 +72,7 @@ class MemoryStoreTests(unittest.TestCase):
                 repo_path=tmp,
                 files_scanned=2,
                 plan_metadata=PlanMetadata(source="llm", model="fake"),
+                agent_run_id="runtime-1",
                 summary="RepoPilot analyzed the task.",
                 llm_traces=[
                     LLMCallTrace(
@@ -84,6 +85,11 @@ class MemoryStoreTests(unittest.TestCase):
                         context_summary="Budget: 9000 chars. Included parser.py.",
                     )
                 ],
+            )
+            store.append_agent_runtime_event(
+                "runtime-1",
+                "run_started",
+                payload={"task": "fix parser behavior"},
             )
 
             run_id = store.create_run(
@@ -99,9 +105,11 @@ class MemoryStoreTests(unittest.TestCase):
 
             self.assertEqual(runs[0]["id"], run_id)
             self.assertEqual(runs[0]["task"], "fix parser behavior")
+            self.assertEqual(runs[0]["agent_runtime_run_id"], "runtime-1")
             self.assertFalse(runs[0]["pinned"])
             self.assertEqual(detail["llm_traces"][0]["name"], "planner")
             self.assertIn("Budget: 9000", detail["llm_traces"][0]["context_summary"])
+            self.assertEqual(detail["agent_events"][0]["event_type"], "run_started")
             self.assertEqual(detail["timeline"][0]["step"], "scan")
             self.assertFalse(detail["pinned"])
 
@@ -210,6 +218,32 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertFalse(store.delete_run("missing"))
             self.assertEqual(store.clear_runs(), 1)
             self.assertEqual(store.list_runs(), [])
+
+    def test_history_cleanup_preserves_runtime_events_for_resumable_task_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.sqlite3")
+            store.save_task_run(
+                {
+                    "run_id": "task-runtime",
+                    "source_repo": tmp,
+                    "status": "paused",
+                }
+            )
+            store.append_agent_runtime_event(
+                "task-runtime",
+                "run_started",
+                payload={"task": "fix parser"},
+            )
+            store.append_agent_runtime_event(
+                "orphan-runtime",
+                "run_started",
+                payload={"task": "temporary analysis"},
+            )
+
+            store.clear_runs()
+
+            self.assertEqual(len(store.list_agent_runtime_events("task-runtime")), 1)
+            self.assertEqual(store.list_agent_runtime_events("orphan-runtime"), [])
 
 
 if __name__ == "__main__":

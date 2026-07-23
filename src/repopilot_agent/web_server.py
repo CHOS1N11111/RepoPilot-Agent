@@ -21,6 +21,7 @@ from .memory import MemoryStore, default_memory_path, ensure_local_state_ignored
 from .models import FileEditProposal
 from .patch_apply import apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from .repo_source import resolve_repository_reference, sync_repository_reference
+from .runtime import SQLiteRuntimeStore
 from .safety import SafetyCheckError
 from .task_runs import (
     TaskRun,
@@ -1127,6 +1128,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             memory_context = None
             if _payload_use_memory(payload):
                 memory_context = self._memory(task_run.source_repo).find_related_runs(task_run.task)
+            runtime_store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
             report = run_workflow(
                 sandbox_path,
                 task_run.task,
@@ -1141,6 +1143,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
                 memory_context=memory_context,
+                agent_run_id=task_run.run_id,
+                agent_event_store=runtime_store,
             )
             timeline = build_report_timeline(report)
             proposal = report.patch_proposal

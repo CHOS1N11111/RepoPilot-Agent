@@ -16,7 +16,8 @@ The project is designed around practical agent engineering: tool use, repository
 Task or GitHub issue
 -> isolated task worktree
 -> repository scan
--> relevant file search
+-> typed action-observation exploration
+-> relevant file selection
 -> related memory lookup
 -> deterministic or LLM plan
 -> patch proposal
@@ -56,7 +57,8 @@ flowchart LR
 - 🧭 Dependency-light Python implementation using the standard library for the current MVP.
 - 🖥️ Local web UI for task input, LLM settings, proposal review, timelines, GitHub state, and diffs.
 - 🧠 Optional OpenAI-compatible LLM integration with deterministic fallback.
-- Read-only iterative agent mode for multi-step search, file reading, Git inspection, and context selection.
+- Typed agent runtime for multi-step search, file reading, Git inspection, diff inspection, guarded edits, validation, user questions, and explicit finish actions.
+- Ordered runtime events, action reservations, idempotent replay, and interruption recovery stored in local SQLite.
 - Reproducible deterministic and LLM evaluation suites with explicit scoring and aggregate metrics.
 - Managed detached Git worktree sandboxes for isolated proposal application and validation.
 - Persistent sandboxed task runs with background execution, progress polling, safe pause/resume/cancel checkpoints, and restart recovery.
@@ -80,7 +82,8 @@ flowchart LR
 | ---------------------- | ----------------------------------------------------------------------------------------------------- |
 | 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths.           |
 | 🔎 Retrieval           | Scores files with task terms, path intent, symbols, multi-snippets, and source/test pairing.          |
-| Iterative agent        | Lets an LLM choose bounded read-only search/read/Git-inspection steps before planning.                |
+| Agent runtime          | Executes typed tools, records action/observation events, and blocks unsafe automatic replay.          |
+| Iterative agent        | Uses the runtime under a read-only policy for bounded exploration before planning.                    |
 | 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
@@ -102,7 +105,12 @@ repopilot.py
 src/repopilot_agent/
   scanner.py            repository file scanning
   search.py             lightweight relevance search
-  agent_loop.py         read-only iterative LLM exploration loop
+  agent_loop.py         LLM exploration adapter for the typed runtime
+  runtime/
+    models.py           action, observation, event, policy, and run contracts
+    tools.py            typed repository, Git, edit, and validation tools
+    store.py            in-memory and SQLite action/event persistence
+    loop.py             reusable policy-gated action-observation loop
   planner.py            deterministic and LLM planning
   patch_proposer.py     patch proposal and LLM patch review
   patch_apply.py        protected file edit application and rollback snapshots
@@ -293,7 +301,11 @@ Enable read-only iterative agent mode when you want Codex-like multi-step explor
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, and `inspect_git_status`. It still cannot write files directly; approved edits continue to flow through patch proposals and human review.
+In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, and `inspect_git_status`. These actions run through the same typed runtime used for guarded `inspect_diff`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish` tools. The current exploration policy enables only the read-only subset; approved edits continue to flow through patch proposals and human review.
+
+Each runtime action has an action id and idempotency key. RepoPilot persists ordered `run_started`, `action_started`, `action_completed`, approval, recovery, replay, and `run_stopped` events. A completed action is not executed again when retried with the same payload. If RepoPilot finds an unfinished reservation after a restart, it reports `recovery_required` instead of blindly repeating a possible file write or command.
+
+Workflow JSON includes `agent_run_id` and `agent_events`. The Web Summary and saved History views show a concise runtime event timeline without expanding complete file contents into the page.
 
 Disable related memory lookup for a clean-context run:
 
@@ -319,7 +331,7 @@ See [`.env.example`](.env.example) for a secret-free configuration reference. Re
 RepoPilot builds explicit context packets before each LLM call. Planning receives compact ranked file previews, while patch proposal receives bounded file content for the most relevant files.
 
 - Context packets have per-call character and file-count budgets.
-- Iterative agent mode can run several smaller read-only LLM calls before patch proposal, then prioritize the files discovered during those steps.
+- Iterative agent mode can run several smaller read-only LLM calls through the typed runtime before patch proposal, then prioritize the files discovered during those steps.
 - LLM traces include a context budget summary showing included, truncated, omitted, and edit-eligible files.
 - Direct `file_edits` are accepted only for files whose full content fit into the patch context packet.
 - If a file is too large and only a snippet was provided, RepoPilot keeps the model's file-level recommendation but blocks apply-ready edits for that file.
@@ -428,7 +440,7 @@ RepoPilot stores local web workflow history in SQLite under:
 .repopilot/memory.sqlite3
 ```
 
-The memory layer records run metadata, tasks, summaries, proposal metadata, proposal sessions, task-run checkpoints, proposed diffs, LLM traces, validation results, and timeline events. API keys are not stored. The web UI exposes this through the History and Task Run tabs, where previous runs, saved LLM trace history, persisted proposal state, and resumable task state can be inspected.
+The memory layer records run metadata, tasks, summaries, proposal metadata, proposal sessions, task-run checkpoints, proposed diffs, LLM traces, validation results, runtime action reservations, and ordered events. API keys are not stored. The web UI exposes this through the History and Task Run tabs, where previous runs, saved LLM trace history, runtime events, persisted proposal state, and resumable task state can be inspected.
 
 RepoPilot adds `.repopilot/` to the clone's local Git `info/exclude` before writing state. This keeps local memory out of `git status` without changing or committing the repository's `.gitignore`.
 
@@ -463,6 +475,8 @@ GitHub PR creation follows the same rule: RepoPilot checks readiness first, bloc
 - It refuses to delete dirty sandboxes unless the user explicitly requests forced removal.
 - It creates delivery branches only inside registered managed worktrees and only after explicit confirmation.
 - It never persists task-run API credentials and never commits or pushes task-run changes automatically.
+- Side-effect runtime actions require action-scoped approval and an explicit file or command allowlist.
+- Completed runtime actions are idempotent; interrupted reservations stop for recovery inspection instead of executing again automatically.
 - 🧯 It keeps deterministic fallbacks for invalid or unavailable LLM output.
 - 🔍 It exposes LLM traces and self-review output so decisions are inspectable.
 
@@ -501,4 +515,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, read-only iterative agent exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, explicit local branch delivery, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, a typed and persistent agent runtime, policy-gated tools, idempotent action recovery, iterative LLM exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, explicit local branch delivery, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.

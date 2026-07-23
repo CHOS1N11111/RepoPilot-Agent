@@ -377,6 +377,8 @@ class WorkflowReport:
     )
     patch_review: PatchReview | None = None
     agent_steps: list[AgentStep] = field(default_factory=list)
+    agent_run_id: str | None = None
+    agent_events: list[Any] = field(default_factory=list)
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None

@@ -344,6 +344,9 @@ class LLMPlannerTests(unittest.TestCase):
             )
 
         self.assertEqual([step.action for step in report.agent_steps], ["search_files", "read_file", "finish"])
+        self.assertTrue(report.agent_run_id)
+        self.assertEqual(report.agent_events[0].event_type, "run_started")
+        self.assertEqual(report.agent_events[-1].event_type, "run_stopped")
         self.assertEqual(report.relevant_files[0].path, "main.py")
         self.assertEqual(report.plan_metadata.source, "llm")
         self.assertEqual(report.patch_proposal_metadata.source, "llm")

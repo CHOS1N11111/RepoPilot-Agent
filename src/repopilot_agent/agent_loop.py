@@ -1,17 +1,16 @@
-"""Iterative read-only LLM exploration loop."""
+"""LLM repository exploration backed by the unified agent runtime."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .git_tools import inspect_repository
 from .llm.base import LLMClient, LLMError, LLMMessage
 from .llm.prompts import AGENT_SYSTEM_PROMPT, build_agent_prompt
 from .llm.schema import parse_agent_action_json
 from .llm.tracing import traced_llm_json_call
 from .models import AgentAction, AgentStep, LLMCallTrace, RepoFile, SearchHit
-from .search import search_files
+from .runtime import AgentRuntime, RuntimeAction, RuntimeEvent, RuntimeEventStore, RuntimePolicy
 
 DEFAULT_AGENT_MAX_STEPS = 6
 MAX_INITIAL_CONTEXT_CHARS = 4_000
@@ -25,6 +24,8 @@ class AgentLoopResult:
     steps: list[AgentStep]
     selected_paths: list[str]
     summary: str
+    runtime_run_id: str = ""
+    events: list[RuntimeEvent] = field(default_factory=list)
 
 
 def run_agent_loop(
@@ -35,6 +36,8 @@ def run_agent_loop(
     llm_client: LLMClient,
     traces: list[LLMCallTrace] | None = None,
     max_steps: int = DEFAULT_AGENT_MAX_STEPS,
+    runtime_run_id: str | None = None,
+    runtime_store: RuntimeEventStore | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -44,24 +47,42 @@ def run_agent_loop(
     steps: list[AgentStep] = []
     selected_paths: list[str] = []
     summary = ""
+    finished = False
+    runtime = AgentRuntime(
+        root,
+        task,
+        run_id=runtime_run_id,
+        policy=RuntimePolicy.read_only(),
+        store=runtime_store,
+        files=files,
+    )
 
-    for step_number in range(1, max_steps + 1):
-        action = _choose_next_action(task, initial_hits, steps, step_number, max_steps, llm_client, traces)
-        observation, tool_input, newly_selected = _execute_action(action, root, files, by_path)
-        if newly_selected:
-            selected_paths = _merge_paths(selected_paths, newly_selected, by_path)
-        agent_step = AgentStep(
-            order=step_number,
-            action=action.action,
-            thought=action.thought,
-            tool_input=tool_input,
-            observation=observation,
-            selected_paths=list(selected_paths),
-        )
-        steps.append(agent_step)
-        if action.action == "finish":
-            summary = action.summary or observation
-            break
+    try:
+        for step_number in range(1, max_steps + 1):
+            action = _choose_next_action(task, initial_hits, steps, step_number, max_steps, llm_client, traces)
+            runtime_action = _to_runtime_action(action, step_number)
+            runtime_observation = runtime.execute(runtime_action)
+            if runtime_observation.status in {"approval_required", "policy_denied", "recovery_required"}:
+                raise LLMError(runtime_observation.error or runtime_observation.summary)
+            observation = _format_runtime_observation(runtime_observation)
+            tool_input = _runtime_tool_input(runtime_action)
+            selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
+            agent_step = AgentStep(
+                order=step_number,
+                action=action.action,
+                thought=action.thought,
+                tool_input=tool_input,
+                observation=observation,
+                selected_paths=list(selected_paths),
+            )
+            steps.append(agent_step)
+            if action.action == "finish" and runtime_observation.status == "completed":
+                summary = str(runtime_observation.data.get("summary") or action.summary or observation)
+                finished = True
+                break
+    except Exception as exc:
+        runtime.stop("failed", str(exc))
+        raise
 
     if not selected_paths:
         selected_paths = _merge_paths([], [step.tool_input for step in steps if step.action == "read_file"], by_path)
@@ -69,7 +90,14 @@ def run_agent_loop(
         selected_paths = [hit.path for hit in initial_hits[:MAX_SEARCH_RESULTS] if hit.path in by_path]
     if not summary:
         summary = "Agent exploration reached the step limit; selected the best observed files."
-    return AgentLoopResult(steps=steps, selected_paths=selected_paths, summary=summary)
+    runtime.stop("finished" if finished else "step_limit", summary)
+    return AgentLoopResult(
+        steps=steps,
+        selected_paths=selected_paths,
+        summary=summary,
+        runtime_run_id=runtime.run_id,
+        events=runtime.events,
+    )
 
 
 def select_agent_hits(
@@ -140,59 +168,70 @@ def _choose_next_action(
     )
 
 
-def _execute_action(
-    action: AgentAction,
-    root: Path,
-    files: list[RepoFile],
-    by_path: dict[str, RepoFile],
-) -> tuple[str, str, list[str]]:
+def _to_runtime_action(action: AgentAction, step_number: int) -> RuntimeAction:
+    arguments: dict = {}
     if action.action == "search_files":
-        hits = search_files(action.query, files, limit=MAX_SEARCH_RESULTS)
+        arguments["query"] = action.query
+    elif action.action == "read_file":
+        arguments["path"] = action.path
+    elif action.action == "finish":
+        arguments["summary"] = action.summary
+        arguments["selected_paths"] = action.selected_paths
+    return RuntimeAction(
+        kind=action.action,
+        arguments=arguments,
+        rationale=action.thought,
+        action_id=f"explore-{step_number}",
+        idempotency_key=f"explore-step-{step_number}",
+    )
+
+
+def _format_runtime_observation(observation) -> str:
+    if observation.status != "completed":
+        return observation.error or observation.summary
+    if observation.action_kind == "search_files":
+        hits = observation.data.get("hits", [])
         if not hits:
-            return f"No files matched query: {action.query}", action.query, []
-        lines = [
-            f"- {hit.path} (score {hit.score}; reasons: {', '.join(hit.reasons) or 'none'})\n"
-            f"  Preview: {_single_line(hit.preview)}"
-            for hit in hits
-        ]
-        return "\n".join(lines), action.query, []
-
-    if action.action == "read_file":
-        repo_file = by_path.get(action.path)
-        if repo_file is None:
-            return f"File was not found in scanned repository context: {action.path}", action.path, []
-        return _clip(repo_file.content, MAX_FILE_OBSERVATION_CHARS), action.path, [action.path]
-
-    if action.action == "inspect_git_status":
-        try:
-            state = inspect_repository(root)
-        except Exception as exc:
-            return f"Git status unavailable: {exc}", "git status", []
-        changes = "\n".join(f"- {change.path}: {change.description}" for change in state.changes[:8])
-        if not changes:
-            changes = "No local file changes."
-        observation = "\n".join(
+            return f"No files matched query: {observation.data.get('query', '')}"
+        lines = []
+        for hit in hits:
+            reasons = ", ".join(hit.get("reasons", [])) or "none"
+            lines.append(
+                f"- {hit.get('path', '')} (score {hit.get('score', 0)}; reasons: {reasons})\n"
+                f"  Preview: {_single_line(str(hit.get('preview', '')))}"
+            )
+        return "\n".join(lines)
+    if observation.action_kind == "read_file":
+        return _clip(str(observation.data.get("content") or ""), MAX_FILE_OBSERVATION_CHARS)
+    if observation.action_kind == "inspect_git_status":
+        latest = observation.data.get("latest_commit") or {}
+        changes = observation.data.get("changes") or []
+        change_lines = "\n".join(
+            f"- {change.get('path', '')}: {change.get('description', '')}" for change in changes[:8]
+        ) or "No local file changes."
+        latest_text = f"{latest.get('short_hash', '')} {latest.get('subject', '')}".strip() or "(none)"
+        return "\n".join(
             [
-                f"Branch: {state.branch}",
-                f"Upstream: {state.upstream or '(none)'}",
-                f"Ahead/behind: {state.ahead}/{state.behind}",
-                f"Latest commit: {state.latest_commit.short_hash + ' ' + state.latest_commit.subject if state.latest_commit else '(none)'}",
-                f"Diff stat: {state.diff_stat or '(none)'}",
+                f"Branch: {observation.data.get('branch', 'unknown')}",
+                f"Upstream: {observation.data.get('upstream') or '(none)'}",
+                f"Ahead/behind: {observation.data.get('ahead', 0)}/{observation.data.get('behind', 0)}",
+                f"Latest commit: {latest_text}",
+                f"Diff stat: {observation.data.get('diff_stat') or '(none)'}",
                 "Changes:",
-                changes,
+                change_lines,
             ]
         )
-        return observation, "git status", []
+    return observation.summary
 
-    if action.action == "finish":
-        valid_paths = [path for path in action.selected_paths if path in by_path]
-        if valid_paths:
-            observation = f"Finished exploration with selected files: {', '.join(valid_paths)}"
-        else:
-            observation = action.summary or "Finished exploration without explicit selected files."
-        return observation, "finish", valid_paths
 
-    raise LLMError(f"Unsupported agent action: {action.action}")
+def _runtime_tool_input(action: RuntimeAction) -> str:
+    if action.kind == "search_files":
+        return str(action.arguments.get("query") or "")
+    if action.kind == "read_file":
+        return str(action.arguments.get("path") or "")
+    if action.kind == "inspect_git_status":
+        return "git status"
+    return action.kind
 
 
 def _format_initial_context(hits: list[SearchHit]) -> str:

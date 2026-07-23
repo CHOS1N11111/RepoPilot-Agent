@@ -163,7 +163,7 @@ To use Codex-like multi-step exploration before planning and proposal generation
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-This mode lets the LLM choose read-only actions such as `search_files`, `read_file`, and `inspect_git_status` across several smaller calls. It does not write files directly; file changes still require a generated proposal and human approval.
+This mode lets the LLM choose read-only actions such as `search_files`, `read_file`, and `inspect_git_status` across several smaller calls. The actions run through RepoPilot's typed runtime and produce persistent action-observation events. It does not let the explorer write files directly; file changes still require a generated proposal and human approval.
 
 Use JSON output when you want to inspect structured fields:
 
@@ -177,6 +177,8 @@ Important LLM-related fields:
 - `patch_proposal_metadata`: whether proposal generation came from rules or an LLM.
 - `patch_review`: LLM review of the proposed diff when available.
 - `agent_steps`: read-only iterative agent actions when iterative mode is enabled.
+- `agent_run_id`: stable identifier for the typed runtime execution.
+- `agent_events`: ordered runtime lifecycle, action, observation, approval, replay, and recovery events.
 - `llm_traces`: prompt previews, output previews, parse status, fallback state, and latency.
 - `context_summary`: which files were included, truncated, omitted, or eligible for direct edits.
 
@@ -206,7 +208,11 @@ The web UI is local. It gives you the full workflow in tabs:
 
 Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
-Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows `Agent Steps`, and the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows both compatible `Agent Steps` and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+
+Runtime events are ordered by sequence number. `action_started` and `action_completed` show normal tool execution. `approval_required` means a side-effect action cannot proceed without action-scoped approval. `action_replayed` means a completed idempotent result was reused without executing the tool again. `action_recovery_required` means RepoPilot found an interrupted reservation and stopped automatic replay so you can inspect the sandbox first.
+
+The runtime tool registry contains `search_files`, `read_file`, `inspect_git_status`, `inspect_diff`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The current iterative LLM explorer receives a read-only policy. Edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
 
 Use `Repair max attempts` to cap how many failed-validation repair proposal rounds RepoPilot can create for a proposal chain. The default is `2`, and `0` disables repair proposal generation while still showing validation failure analysis.
 
@@ -401,12 +407,13 @@ RepoPilot saves local workflow history in:
 ```
 
 Memory helps later runs by reusing compact summaries, validation outcomes, and task metadata. It does not store API keys.
-It also stores proposal sessions, rollback metadata, and LLM trace history for local inspection.
+It also stores proposal sessions, rollback metadata, LLM trace history, runtime action reservations, and ordered runtime events for local inspection.
 
 In the web UI:
 
 - Open History to inspect saved runs.
 - Open saved run details to inspect persisted LLM trace history.
+- Inspect the Runtime Events section to understand tool execution, replay, or recovery decisions.
 - Pin important runs so they are prioritized in future planning.
 - Delete one run when it is no longer useful.
 - Clear history for the current repository.
