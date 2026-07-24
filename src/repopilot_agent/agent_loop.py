@@ -10,6 +10,7 @@ from .llm.prompts import AGENT_SYSTEM_PROMPT, build_agent_prompt
 from .llm.schema import parse_agent_action_json
 from .llm.tracing import traced_llm_json_call
 from .models import AgentAction, AgentStep, LLMCallTrace, RepoFile, SearchHit
+from .repository_map import RepositoryMap
 from .runtime import AgentRuntime, RuntimeAction, RuntimeEvent, RuntimeEventStore, RuntimePolicy
 
 DEFAULT_AGENT_MAX_STEPS = 6
@@ -38,6 +39,7 @@ def run_agent_loop(
     max_steps: int = DEFAULT_AGENT_MAX_STEPS,
     runtime_run_id: str | None = None,
     runtime_store: RuntimeEventStore | None = None,
+    repository_map: RepositoryMap | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -55,6 +57,7 @@ def run_agent_loop(
         policy=RuntimePolicy.read_only(),
         store=runtime_store,
         files=files,
+        repository_map=repository_map,
     )
 
     try:
@@ -172,6 +175,8 @@ def _to_runtime_action(action: AgentAction, step_number: int) -> RuntimeAction:
     arguments: dict = {}
     if action.action == "search_files":
         arguments["query"] = action.query
+    elif action.action == "inspect_repository_map":
+        arguments["query"] = action.query
     elif action.action == "read_file":
         arguments["path"] = action.path
     elif action.action == "finish":
@@ -203,6 +208,16 @@ def _format_runtime_observation(observation) -> str:
         return "\n".join(lines)
     if observation.action_kind == "read_file":
         return _clip(str(observation.data.get("content") or ""), MAX_FILE_OBSERVATION_CHARS)
+    if observation.action_kind == "inspect_repository_map":
+        matches = observation.data.get("matches", [])
+        if not matches:
+            return observation.summary
+        lines = [observation.summary]
+        for match in matches:
+            symbols = ", ".join(match.get("symbols", [])[:8]) or "no indexed symbols"
+            related = ", ".join(match.get("related_paths", [])[:5]) or "none"
+            lines.append(f"- {match.get('path', '')}: {symbols}; related: {related}")
+        return _clip("\n".join(lines), MAX_FILE_OBSERVATION_CHARS)
     if observation.action_kind == "inspect_git_status":
         latest = observation.data.get("latest_commit") or {}
         changes = observation.data.get("changes") or []
@@ -229,6 +244,8 @@ def _runtime_tool_input(action: RuntimeAction) -> str:
         return str(action.arguments.get("query") or "")
     if action.kind == "read_file":
         return str(action.arguments.get("path") or "")
+    if action.kind == "inspect_repository_map":
+        return str(action.arguments.get("query") or "current task")
     if action.kind == "inspect_git_status":
         return "git status"
     return action.kind

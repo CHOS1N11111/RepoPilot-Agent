@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -51,6 +52,10 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertEqual(result.stop_reason, "finished")
             self.assertEqual(result.selected_paths, ["main.py"])
             self.assertIn("parse", result.observations[1].data["content"])
+            self.assertEqual(
+                result.observations[1].data["sha256"],
+                hashlib.sha256("def parse(value):\n    return value\n".encode("utf-8")).hexdigest(),
+            )
             self.assertEqual([event.sequence for event in result.events], list(range(1, 9)))
             self.assertEqual(
                 [event.event_type for event in result.events],
@@ -308,6 +313,136 @@ class AgentRuntimeTests(unittest.TestCase):
 
             self.assertEqual(conflict.status, "failed")
             self.assertIn("Idempotency key conflicts", conflict.summary)
+
+    def test_repository_map_tool_returns_ranked_symbols(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "auth.py").write_text(
+                "def authenticate_user(token):\n    return token\n",
+                encoding="utf-8",
+            )
+            runtime = AgentRuntime(tmp, "find authenticate user")
+
+            observation = runtime.execute(
+                RuntimeAction(
+                    kind="inspect_repository_map",
+                    arguments={"query": "authenticate"},
+                    action_id="map-1",
+                )
+            )
+
+            self.assertEqual(observation.status, "completed")
+            self.assertEqual(observation.data["symbols_indexed"], 1)
+            self.assertEqual(observation.data["matches"][0]["path"], "auth.py")
+
+    def test_structured_patch_requires_approval_and_reports_stale_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp, "notes.txt")
+            original = "before\n"
+            target.write_text(original, encoding="utf-8")
+            action = RuntimeAction(
+                kind="apply_patch",
+                arguments={
+                    "path": "notes.txt",
+                    "expected_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                    "hunks": [{"old_text": "before", "new_text": "after"}],
+                },
+                action_id="patch-1",
+            )
+            waiting = AgentRuntime(
+                tmp,
+                "update notes",
+                policy=RuntimePolicy.sandboxed(allowed_edit_paths=["notes.txt"]),
+            ).execute(action)
+            self.assertEqual(waiting.status, "approval_required")
+
+            runtime = AgentRuntime(
+                tmp,
+                "update notes",
+                policy=RuntimePolicy.sandboxed(
+                    approved_action_ids={"patch-1"},
+                    allowed_edit_paths=["notes.txt"],
+                ),
+            )
+            applied = runtime.execute(action)
+            self.assertEqual(applied.status, "applied")
+            self.assertEqual(target.read_text(encoding="utf-8"), "after\n")
+
+            stale_action = RuntimeAction(
+                kind="apply_patch",
+                arguments={
+                    "path": "notes.txt",
+                    "expected_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                    "hunks": [{"old_text": "before", "new_text": "again"}],
+                },
+                action_id="patch-2",
+            )
+            stale_runtime = AgentRuntime(
+                tmp,
+                "update notes",
+                policy=RuntimePolicy.sandboxed(
+                    approved_action_ids={"patch-2"},
+                    allowed_edit_paths=["notes.txt"],
+                ),
+            )
+            conflict = stale_runtime.execute(stale_action)
+            self.assertEqual(conflict.status, "conflict")
+            self.assertEqual(conflict.data["conflicts"][0]["kind"], "stale_file")
+            self.assertEqual(target.read_text(encoding="utf-8"), "after\n")
+
+    def test_runtime_can_retry_patch_after_structured_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp, "notes.txt")
+            current = "current\n"
+            target.write_text(current, encoding="utf-8")
+            actions = iter(
+                [
+                    RuntimeAction(
+                        kind="apply_patch",
+                        arguments={
+                            "path": "notes.txt",
+                            "expected_sha256": hashlib.sha256(b"stale\n").hexdigest(),
+                            "hunks": [{"old_text": "current", "new_text": "wrong"}],
+                        },
+                        action_id="stale-patch",
+                        idempotency_key="patch-attempt-1",
+                    ),
+                    RuntimeAction(
+                        kind="read_file",
+                        arguments={"path": "notes.txt"},
+                        action_id="reread",
+                    ),
+                    RuntimeAction(
+                        kind="apply_patch",
+                        arguments={
+                            "path": "notes.txt",
+                            "expected_sha256": hashlib.sha256(current.encode("utf-8")).hexdigest(),
+                            "hunks": [{"old_text": "current", "new_text": "updated"}],
+                        },
+                        action_id="fresh-patch",
+                        idempotency_key="patch-attempt-2",
+                    ),
+                    RuntimeAction(
+                        kind="finish",
+                        arguments={"summary": "Patch recovered after re-read."},
+                        action_id="finish-retry",
+                    ),
+                ]
+            )
+            runtime = AgentRuntime(
+                tmp,
+                "update current notes",
+                policy=RuntimePolicy.sandboxed(
+                    approved_action_ids={"stale-patch", "fresh-patch"},
+                    allowed_edit_paths=["notes.txt"],
+                ),
+            )
+
+            result = runtime.run(lambda _observations: next(actions), max_steps=4)
+
+            self.assertEqual([item.status for item in result.observations], ["conflict", "completed", "applied", "completed"])
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(target.read_text(encoding="utf-8"), "updated\n")
+            self.assertIn("action_conflict", [event.event_type for event in result.events])
 
 
 if __name__ == "__main__":

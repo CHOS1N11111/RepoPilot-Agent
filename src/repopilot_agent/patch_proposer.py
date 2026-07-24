@@ -53,12 +53,21 @@ def propose_patch_with_optional_llm(
     allow_fallback: bool = True,
     file_contents: dict[str, str] | None = None,
     traces: list[LLMCallTrace] | None = None,
+    repository_map_context: str = "",
 ) -> tuple[PatchProposal, PatchProposalMetadata]:
     if llm_client is None:
         return propose_patch(task, hits), PatchProposalMetadata(source="rules")
 
     try:
-        proposal = _propose_llm_patch(task, hits, plan, llm_client, file_contents or {}, traces)
+        proposal = _propose_llm_patch(
+            task,
+            hits,
+            plan,
+            llm_client,
+            file_contents or {},
+            traces,
+            repository_map_context=repository_map_context,
+        )
     except LLMError as exc:
         if not allow_fallback:
             raise
@@ -88,6 +97,7 @@ def _propose_llm_patch(
     llm_client: LLMClient,
     file_contents: dict[str, str],
     traces: list[LLMCallTrace] | None = None,
+    repository_map_context: str = "",
 ) -> PatchProposal:
     context_packet = build_context_packet(hits, file_contents, budget=PATCH_CONTEXT_BUDGET)
     parsed = traced_llm_json_call(
@@ -103,6 +113,7 @@ def _propose_llm_patch(
                     context_packet.text,
                     context_packet.summary,
                     context_packet.editable_paths,
+                    repository_map_context=repository_map_context,
                 ),
             ),
         ],

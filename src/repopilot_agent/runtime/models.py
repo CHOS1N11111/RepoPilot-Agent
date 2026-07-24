@@ -11,9 +11,11 @@ SUPPORTED_ACTIONS = frozenset(
     {
         "search_files",
         "read_file",
+        "inspect_repository_map",
         "inspect_git_status",
         "inspect_diff",
         "edit_file",
+        "apply_patch",
         "run_command",
         "validate",
         "ask_user",
@@ -21,11 +23,26 @@ SUPPORTED_ACTIONS = frozenset(
     }
 )
 READ_ONLY_ACTIONS = frozenset(
-    {"search_files", "read_file", "inspect_git_status", "inspect_diff", "ask_user", "finish"}
+    {
+        "search_files",
+        "read_file",
+        "inspect_repository_map",
+        "inspect_git_status",
+        "inspect_diff",
+        "ask_user",
+        "finish",
+    }
 )
-SIDE_EFFECT_ACTIONS = frozenset({"edit_file", "run_command", "validate"})
+SIDE_EFFECT_ACTIONS = frozenset({"edit_file", "apply_patch", "run_command", "validate"})
 STOPPING_OBSERVATION_STATUSES = frozenset(
-    {"approval_required", "input_required", "recovery_required", "policy_denied", "failed"}
+    {
+        "approval_required",
+        "input_required",
+        "recovery_required",
+        "policy_denied",
+        "verification_failed",
+        "failed",
+    }
 )
 
 
@@ -152,7 +169,7 @@ class RuntimePolicy:
     def evaluate(self, action: RuntimeAction) -> tuple[str, str]:
         if action.kind not in self.allowed_actions:
             return "deny", f"Action {action.kind} is disabled by the current runtime policy."
-        if action.kind == "edit_file":
+        if action.kind in {"edit_file", "apply_patch"}:
             path = str(action.arguments.get("path") or "").replace("\\", "/")
             if self.allowed_edit_paths and path not in self.allowed_edit_paths:
                 return "deny", f"File edit path is outside the approved runtime boundary: {path or '(empty)'}"

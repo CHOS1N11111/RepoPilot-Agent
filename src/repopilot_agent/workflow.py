@@ -14,6 +14,7 @@ from .models import LLMCallTrace, MemoryContextItem, PatchProposalMetadata, Plan
 from .patch_proposer import propose_patch, propose_patch_with_optional_llm, review_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
 from .runtime import RuntimeEventStore, SQLiteRuntimeStore
+from .repository_map import build_repository_map, render_repository_map
 from .safety import check_file_edits
 from .scanner import scan_repository
 from .search import search_files
@@ -43,6 +44,12 @@ def run_workflow(
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
+    repository_map = build_repository_map(files)
+    repository_map_context = render_repository_map(
+        repository_map,
+        task,
+        seed_paths=[hit.path for hit in hits],
+    )
     file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
     related_memory = _resolve_memory_context(root, task, use_memory, memory_context)
     llm_traces: list[LLMCallTrace] = []
@@ -81,8 +88,14 @@ def run_workflow(
                         max_steps=agent_max_steps,
                         runtime_run_id=agent_run_id,
                         runtime_store=runtime_store,
+                        repository_map=repository_map,
                     )
                     hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
+                    repository_map_context = render_repository_map(
+                        repository_map,
+                        task,
+                        seed_paths=[hit.path for hit in hits],
+                    )
                 except LLMError:
                     if not allow_llm_fallback:
                         raise
@@ -93,6 +106,7 @@ def run_workflow(
                 allow_fallback=allow_llm_fallback,
                 traces=llm_traces,
                 memory_context=related_memory,
+                repository_map_context=repository_map_context,
             )
     else:
         plan = create_plan(task, hits, memory_context=related_memory)
@@ -116,6 +130,7 @@ def run_workflow(
                 allow_fallback=allow_llm_fallback,
                 file_contents=file_contents,
                 traces=llm_traces,
+                repository_map_context=repository_map_context,
             )
     else:
         patch_proposal = propose_patch(task, hits)
@@ -159,6 +174,10 @@ def run_workflow(
         validation=validation,
         validation_feedback=validation_feedback,
         memory_context=related_memory,
+        repository_map=repository_map.to_summary(
+            task,
+            seed_paths=[hit.path for hit in hits],
+        ),
         summary=summary,
     )
 

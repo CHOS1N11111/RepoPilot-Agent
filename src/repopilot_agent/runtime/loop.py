@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..models import RepoFile
+from ..repository_map import RepositoryMap
 from .models import (
     STOPPING_OBSERVATION_STATUSES,
     RuntimeAction,
@@ -28,12 +29,19 @@ class AgentRuntime:
         policy: RuntimePolicy | None = None,
         store: RuntimeEventStore | None = None,
         files: list[RepoFile] | None = None,
+        repository_map: RepositoryMap | None = None,
     ) -> None:
         self.run_id = run_id or uuid4().hex
         self.task = task
         self.policy = policy or RuntimePolicy.read_only()
         self.store = store or InMemoryRuntimeStore()
-        self.context = RuntimeToolContext(repo_path, task, self.policy, files=files)
+        self.context = RuntimeToolContext(
+            repo_path,
+            task,
+            self.policy,
+            files=files,
+            repository_map=repository_map,
+        )
         self._started = False
         self._stopped = False
 
@@ -168,7 +176,7 @@ class AgentRuntime:
             observation = RuntimeObservation(
                 action_id=action.action_id,
                 action_kind=action.kind,
-                status="completed",
+                status=tool_result.status,
                 summary=tool_result.summary,
                 data=tool_result.data,
             )
@@ -183,7 +191,11 @@ class AgentRuntime:
         observation = self.store.complete(self.run_id, action, observation)
         self.store.append_event(
             self.run_id,
-            "action_completed" if observation.status == "completed" else "action_failed",
+            "action_completed"
+            if observation.status in {"completed", "applied", "no_change"}
+            else "action_conflict"
+            if observation.status == "conflict"
+            else "action_failed",
             action=action,
             payload={"observation": observation.to_dict()},
         )

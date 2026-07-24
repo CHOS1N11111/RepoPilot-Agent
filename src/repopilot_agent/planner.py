@@ -73,12 +73,20 @@ def create_plan_with_optional_llm(
     allow_fallback: bool = True,
     traces: list[LLMCallTrace] | None = None,
     memory_context: list[MemoryContextItem] | None = None,
+    repository_map_context: str = "",
 ) -> tuple[list[PlanStep], PlanMetadata]:
     if llm_client is None:
         return create_plan(task, hits, memory_context=memory_context), PlanMetadata(source="rules")
 
     try:
-        plan = _create_llm_plan(task, hits, llm_client, traces, memory_context=memory_context)
+        plan = _create_llm_plan(
+            task,
+            hits,
+            llm_client,
+            traces,
+            memory_context=memory_context,
+            repository_map_context=repository_map_context,
+        )
     except LLMError as exc:
         if not allow_fallback:
             raise
@@ -97,6 +105,7 @@ def _create_llm_plan(
     llm_client: LLMClient,
     traces: list[LLMCallTrace] | None = None,
     memory_context: list[MemoryContextItem] | None = None,
+    repository_map_context: str = "",
 ) -> list[PlanStep]:
     context_packet = build_context_packet(hits, budget=PLANNER_CONTEXT_BUDGET)
     return traced_llm_json_call(
@@ -111,6 +120,7 @@ def _create_llm_plan(
                     context_packet.text,
                     context_packet.summary,
                     memory_context=memory_context,
+                    repository_map_context=repository_map_context,
                 ),
             ),
         ],

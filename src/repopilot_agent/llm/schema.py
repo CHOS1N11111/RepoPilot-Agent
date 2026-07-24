@@ -18,7 +18,13 @@ from ..models import (
 ALLOWED_CHANGE_TYPES = {"bugfix", "feature", "test", "documentation", "refinement"}
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_RISK_LEVELS = {"high", "medium", "low"}
-ALLOWED_AGENT_ACTIONS = {"search_files", "read_file", "inspect_git_status", "finish"}
+ALLOWED_AGENT_ACTIONS = {
+    "search_files",
+    "read_file",
+    "inspect_repository_map",
+    "inspect_git_status",
+    "finish",
+}
 
 
 def parse_plan_steps_json(response: str) -> list[PlanStep]:

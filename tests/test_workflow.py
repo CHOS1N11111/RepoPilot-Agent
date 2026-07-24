@@ -127,6 +127,9 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             self.assertTrue(report.patch_proposal.ready_for_patch)
             self.assertIn("RepoPilot analyzed the task", report.summary)
             self.assertIn("Prepared file-level change proposals", report.summary)
+            self.assertEqual(report.repository_map["files_indexed"], 1)
+            self.assertEqual(report.repository_map["symbols_indexed"], 1)
+            self.assertEqual(report.repository_map["relevant_entries"][0]["path"], "main.py")
 
     def test_run_workflow_returns_validation_feedback_for_failed_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

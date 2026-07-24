@@ -931,11 +931,13 @@ function renderReport(report, payload) {
   state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));
   updateRepositorySourceStatus(report.repository_source);
   $("filesScanned").textContent = report.files_scanned;
+  $("symbolsIndexed").textContent = report.repository_map?.symbols_indexed || 0;
   $("planSource").textContent = sourceLabel(report.plan_metadata);
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
   renderTimeline(report.timeline || []);
   $("agentStepList").innerHTML = renderAgentSteps(report.agent_steps || []);
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
+  $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
@@ -962,6 +964,31 @@ function renderReport(report, payload) {
   $("llmTraceList").innerHTML = renderLlmTraces(report.llm_traces || []);
   $("jsonOutput").textContent = JSON.stringify(report, null, 2);
   loadHistory().catch(() => {});
+}
+
+function renderRepositoryMap(repositoryMap) {
+  if (!repositoryMap || !repositoryMap.files_indexed) {
+    return item("No repository map was generated for this run.");
+  }
+  const metrics = `<div class="item">
+    <div class="item-title">Indexed Structure</div>
+    <p>${escapeHtml(repositoryMap.files_indexed)} files, ${escapeHtml(repositoryMap.symbols_indexed || 0)} symbols, ${escapeHtml(repositoryMap.relations_indexed || 0)} relations.</p>
+    ${repositoryMap.parse_errors ? `<p><small>${escapeHtml(repositoryMap.parse_errors)} file(s) could not be parsed completely.</small></p>` : ""}
+  </div>`;
+  const entries = (repositoryMap.relevant_entries || []).map((entry) => {
+    const symbols = (entry.symbols || []).map((symbol) => `<li><code>${escapeHtml(symbol)}</code></li>`).join("");
+    const related = (entry.related_paths || []).map((path) => `<li>${escapeHtml(path)}</li>`).join("");
+    const reasons = (entry.reasons || []).join("; ");
+    return `<div class="item">
+      <div class="item-title">${escapeHtml(entry.path)} <span class="tag">score ${escapeHtml(entry.score)}</span></div>
+      <p><small>${escapeHtml(reasons || "Task-relevant repository structure")}</small></p>
+      <strong>Symbols</strong>
+      <ul>${symbols || "<li>No indexed symbols.</li>"}</ul>
+      <strong>Related files</strong>
+      <ul>${related || "<li>No resolved relations.</li>"}</ul>
+    </div>`;
+  }).join("");
+  return metrics + (entries || item("No task-specific map entries were ranked."));
 }
 
 function renderMemoryContext(memory) {

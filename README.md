@@ -84,6 +84,8 @@ flowchart LR
 | 🔎 Retrieval           | Scores files with task terms, path intent, symbols, multi-snippets, and source/test pairing.          |
 | Agent runtime          | Executes typed tools, records action/observation events, and blocks unsafe automatic replay.          |
 | Iterative agent        | Uses the runtime under a read-only policy for bounded exploration before planning.                    |
+| Repository map        | Indexes symbols, signatures, imports, dependencies, and source/test relations for task context.       |
+| Structured patch      | Applies approved exact-text hunks with SHA-256 preconditions, conflict reports, and syntax checks.    |
 | 🧭 Planning            | Builds deterministic plans or LLM-generated engineering plans.                                        |
 | 🧩 Patch proposal      | Produces file-level change intent, risk notes, validation suggestions, and optional LLM file edits.   |
 | 🧠 LLM governance      | Centralizes prompts, validates schemas, records traces, and runs patch self-review.                   |
@@ -105,6 +107,8 @@ repopilot.py
 src/repopilot_agent/
   scanner.py            repository file scanning
   search.py             lightweight relevance search
+  repository_map.py     symbols, dependencies, source/test relations, and task ranking
+  structured_patch.py   hash-guarded exact-text hunks and syntax/readback verification
   agent_loop.py         LLM exploration adapter for the typed runtime
   runtime/
     models.py           action, observation, event, policy, and run contracts
@@ -301,7 +305,9 @@ Enable read-only iterative agent mode when you want Codex-like multi-step explor
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, and `inspect_git_status`. These actions run through the same typed runtime used for guarded `inspect_diff`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish` tools. The current exploration policy enables only the read-only subset; approved edits continue to flow through patch proposals and human review.
+In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, `inspect_repository_map`, and `inspect_git_status`. These actions run through the same typed runtime used for guarded `inspect_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish` tools. The current exploration policy enables only the read-only subset; approved edits continue to flow through patch proposals and human review.
+
+`read_file` observations include a SHA-256 digest of the complete file even when the displayed content is truncated. The runtime's preferred write tool, `apply_patch`, accepts exact old/new text hunks plus that digest. It refuses stale files, missing or ambiguous hunk matches, and invalid Python or JSON output. Successful writes are read back and hashed again. Conflict observations are structured so a later agent step can re-read the file and prepare a new approved action instead of overwriting external changes.
 
 Each runtime action has an action id and idempotency key. RepoPilot persists ordered `run_started`, `action_started`, `action_completed`, approval, recovery, replay, and `run_stopped` events. A completed action is not executed again when retried with the same payload. If RepoPilot finds an unfinished reservation after a restart, it reports `recovery_required` instead of blindly repeating a possible file write or command.
 
@@ -331,6 +337,7 @@ See [`.env.example`](.env.example) for a secret-free configuration reference. Re
 RepoPilot builds explicit context packets before each LLM call. Planning receives compact ranked file previews, while patch proposal receives bounded file content for the most relevant files.
 
 - Context packets have per-call character and file-count budgets.
+- A bounded task-relevant repository map adds symbol signatures, imports, dependencies, and source/test relations without sending every file body.
 - Iterative agent mode can run several smaller read-only LLM calls through the typed runtime before patch proposal, then prioritize the files discovered during those steps.
 - LLM traces include a context budget summary showing included, truncated, omitted, and edit-eligible files.
 - Direct `file_edits` are accepted only for files whose full content fit into the patch context packet.
@@ -476,6 +483,7 @@ GitHub PR creation follows the same rule: RepoPilot checks readiness first, bloc
 - It creates delivery branches only inside registered managed worktrees and only after explicit confirmation.
 - It never persists task-run API credentials and never commits or pushes task-run changes automatically.
 - Side-effect runtime actions require action-scoped approval and an explicit file or command allowlist.
+- Structured runtime patches require the SHA-256 observed during file read, exact hunk occurrence counts, pre-write syntax checks for Python and JSON, and post-write readback verification.
 - Completed runtime actions are idempotent; interrupted reservations stop for recovery inspection instead of executing again automatically.
 - 🧯 It keeps deterministic fallbacks for invalid or unavailable LLM output.
 - 🔍 It exposes LLM traces and self-review output so decisions are inspectable.

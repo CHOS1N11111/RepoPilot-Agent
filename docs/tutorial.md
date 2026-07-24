@@ -163,7 +163,7 @@ To use Codex-like multi-step exploration before planning and proposal generation
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-This mode lets the LLM choose read-only actions such as `search_files`, `read_file`, and `inspect_git_status` across several smaller calls. The actions run through RepoPilot's typed runtime and produce persistent action-observation events. It does not let the explorer write files directly; file changes still require a generated proposal and human approval.
+This mode lets the LLM choose read-only actions such as `search_files`, `read_file`, `inspect_repository_map`, and `inspect_git_status` across several smaller calls. The actions run through RepoPilot's typed runtime and produce persistent action-observation events. It does not let the explorer write files directly; file changes still require a generated proposal and human approval.
 
 Use JSON output when you want to inspect structured fields:
 
@@ -181,6 +181,7 @@ Important LLM-related fields:
 - `agent_events`: ordered runtime lifecycle, action, observation, approval, replay, and recovery events.
 - `llm_traces`: prompt previews, output previews, parse status, fallback state, and latency.
 - `context_summary`: which files were included, truncated, omitted, or eligible for direct edits.
+- `repository_map`: indexed file/symbol/relation counts and the task-ranked files, symbols, and dependencies.
 
 ## Step 4: Start The Web UI
 
@@ -199,7 +200,7 @@ http://127.0.0.1:8765
 The web UI is local. It gives you the full workflow in tabs:
 
 - Task Run: sandbox lifecycle, current phase, pause/resume/cancel controls, event history, and local branch delivery.
-- Summary: plan, proposal, validation, safety, repair feedback, and timeline.
+- Summary: plan, Repository Map, proposal, validation, safety, repair feedback, and timeline.
 - LLM I/O: prompt preview, output preview, trace status, and context budget.
 - GitHub: open issues, pull requests, reviews, files, comments, and checks.
 - Diff: current working tree diff or staged diff.
@@ -212,7 +213,11 @@ Enable `Iterative agent` when you want RepoPilot to make several smaller read-on
 
 Runtime events are ordered by sequence number. `action_started` and `action_completed` show normal tool execution. `approval_required` means a side-effect action cannot proceed without action-scoped approval. `action_replayed` means a completed idempotent result was reused without executing the tool again. `action_recovery_required` means RepoPilot found an interrupted reservation and stopped automatic replay so you can inspect the sandbox first.
 
-The runtime tool registry contains `search_files`, `read_file`, `inspect_git_status`, `inspect_diff`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The current iterative LLM explorer receives a read-only policy. Edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
+The runtime tool registry contains `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The current iterative LLM explorer receives a read-only policy. Edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
+
+The Repository Map is built locally from scanned files. For Python it uses the standard AST to index classes, functions, methods, signatures, and imports. It also recognizes common JavaScript/TypeScript declarations and relative imports, links source files to tests, and ranks entries against the current task. Planner and proposal prompts receive a bounded map section, while the Summary tab shows the counts and most relevant entries.
+
+For approved runtime writes, prefer `apply_patch` over `edit_file`. First read the file and keep the returned `sha256`; then submit exact `old_text`/`new_text` hunks with `expected_occurrences`. RepoPilot reports `conflict` without writing if the hash is stale or a hunk is missing or ambiguous. It rejects invalid Python and JSON before writing, then reads the result back and verifies its hash. The existing Web proposal flow remains server-stored and per-file approved; the structured tool is the lower-level write contract for the unified runtime.
 
 Use `Repair max attempts` to cap how many failed-validation repair proposal rounds RepoPilot can create for a proposal chain. The default is `2`, and `0` disables repair proposal generation while still showing validation failure analysis.
 

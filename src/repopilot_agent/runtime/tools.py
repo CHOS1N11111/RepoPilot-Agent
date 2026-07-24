@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -9,8 +10,10 @@ from typing import Any
 from ..git_tools import get_git_diff, inspect_repository
 from ..models import FileEditProposal, RepoFile
 from ..patch_apply import apply_file_edits
+from ..repository_map import RepositoryMap, build_repository_map, rank_repository_map
 from ..scanner import scan_repository
 from ..search import search_files
+from ..structured_patch import apply_structured_patch, parse_structured_patch
 from ..validator import run_validation
 from .models import RuntimeAction, RuntimePolicy
 
@@ -28,6 +31,7 @@ class RuntimeToolError(RuntimeError):
 class RuntimeToolResult:
     summary: str
     data: dict[str, Any]
+    status: str = "completed"
 
 
 class RuntimeToolContext:
@@ -37,6 +41,7 @@ class RuntimeToolContext:
         task: str,
         policy: RuntimePolicy,
         files: list[RepoFile] | None = None,
+        repository_map: RepositoryMap | None = None,
     ) -> None:
         self.repo_path = Path(repo_path).expanduser().resolve()
         if not self.repo_path.is_dir():
@@ -44,10 +49,12 @@ class RuntimeToolContext:
         self.task = task
         self.policy = policy
         self.files = list(files) if files is not None else scan_repository(self.repo_path)
+        self.repository_map = repository_map or build_repository_map(self.files)
         self.selected_paths: list[str] = []
 
     def refresh_files(self) -> None:
         self.files = scan_repository(self.repo_path)
+        self.repository_map = build_repository_map(self.files)
 
     def select_path(self, path: str) -> None:
         if path not in self.selected_paths:
@@ -83,8 +90,32 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
             data={
                 "path": path,
                 "content": clipped,
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 "truncated": truncated,
                 "selected_paths": list(context.selected_paths),
+            },
+        )
+
+    if action.kind == "inspect_repository_map":
+        query = str(action.arguments.get("query") or context.task).strip()
+        limit = action.arguments.get("limit", MAX_SEARCH_RESULTS)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+            raise RuntimeToolError("inspect_repository_map limit must be an integer from 1 to 20.")
+        matches = rank_repository_map(
+            query,
+            context.repository_map,
+            seed_paths=context.selected_paths,
+            limit=limit,
+        )
+        return RuntimeToolResult(
+            summary=f"Mapped {context.repository_map.symbol_count} symbols; selected {len(matches)} relevant file(s).",
+            data={
+                "query": query,
+                "files_indexed": context.repository_map.files_indexed,
+                "symbols_indexed": context.repository_map.symbol_count,
+                "relations_indexed": context.repository_map.relation_count,
+                "parse_errors": context.repository_map.parse_error_count,
+                "matches": [match.to_dict() for match in matches],
             },
         )
 
@@ -127,6 +158,22 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
                 "selected_paths": list(context.selected_paths),
             },
         )
+
+    if action.kind == "apply_patch":
+        patch = parse_structured_patch(action.arguments)
+        allowed_paths = list(context.policy.allowed_edit_paths) or [patch.path]
+        result = apply_structured_patch(
+            context.repo_path,
+            patch,
+            task=context.task,
+            allowed_paths=allowed_paths,
+        )
+        if result.applied:
+            context.refresh_files()
+            context.select_path(patch.path)
+        data = result.to_dict()
+        data["diff"], data["diff_truncated"] = _clip(result.diff, MAX_DIFF_CHARS)
+        return RuntimeToolResult(summary=result.message, data=data, status=result.status)
 
     if action.kind in {"run_command", "validate"}:
         command = _required_string(action, "command")

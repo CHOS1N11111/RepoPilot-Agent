@@ -139,6 +139,13 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("run.agent_events || []", self.app_js)
         self.assertIn(".runtime-event", self.app_css)
 
+    def test_summary_exposes_repository_map_metrics_and_entries(self) -> None:
+        self.assertIn('id="symbolsIndexed"', self.index_html)
+        self.assertIn('id="repositoryMapList"', self.index_html)
+        self.assertIn("function renderRepositoryMap", self.app_js)
+        self.assertIn("report.repository_map?.symbols_indexed", self.app_js)
+        self.assertIn("repositoryMap.relevant_entries", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

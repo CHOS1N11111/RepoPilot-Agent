@@ -36,7 +36,7 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
 AGENT_SYSTEM_PROMPT = (
     "You are RepoPilot Agent's read-only repository exploration loop. "
     "Choose exactly one next action and return only JSON with this shape: "
-    '{"thought":"why this action is useful","action":"search_files|read_file|inspect_git_status|finish",'
+    '{"thought":"why this action is useful","action":"search_files|read_file|inspect_repository_map|inspect_git_status|finish",'
     '"query":"search query if action is search_files","path":"repo-relative path if action is read_file",'
     '"selected_paths":["repo-relative paths useful for the final proposal"],"summary":"brief finish summary"}. '
     "Use only read-only actions. Do not propose file edits here. "
@@ -52,6 +52,7 @@ def build_planner_prompt(
     context: str,
     context_summary: str = "",
     memory_context: list[MemoryContextItem] | None = None,
+    repository_map_context: str = "",
 ) -> str:
     return "\n".join(
         [
@@ -69,6 +70,9 @@ def build_planner_prompt(
                 "No related memory was found.",
             ),
             "",
+            "Task-relevant repository map:",
+            repository_map_context or "No repository map context was available.",
+            "",
             "Relevant repository context:",
             context,
             "",
@@ -83,6 +87,7 @@ def build_patch_prompt(
     context: str,
     context_summary: str = "",
     editable_paths: list[str] | None = None,
+    repository_map_context: str = "",
 ) -> str:
     plan_lines = [f"{step.order}. {step.title}: {step.detail}" for step in plan]
     editable = ", ".join(editable_paths or []) or "none"
@@ -98,6 +103,9 @@ def build_patch_prompt(
             "",
             "Files eligible for direct file_edits:",
             editable,
+            "",
+            "Task-relevant repository map:",
+            repository_map_context or "No repository map context was available.",
             "",
             "Relevant repository context:",
             context,
@@ -141,6 +149,7 @@ def build_agent_prompt(
             "Available read-only actions:",
             "- search_files: find repo files by task-focused query.",
             "- read_file: inspect one repo-relative file returned by search or initial context.",
+            "- inspect_repository_map: inspect task-relevant symbols, dependencies, and source/test relations.",
             "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
             "- finish: stop exploration and select the files most useful for planning/proposal.",
             "",

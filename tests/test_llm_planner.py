@@ -48,7 +48,13 @@ class LLMPlannerTests(unittest.TestCase):
             )
         ]
 
-        plan, metadata = create_plan_with_optional_llm("fix parser failure", hits, client, traces=traces)
+        plan, metadata = create_plan_with_optional_llm(
+            "fix parser failure",
+            hits,
+            client,
+            traces=traces,
+            repository_map_context="src/parser.py [Python]\n  function parse(value) (line 1)",
+        )
 
         self.assertEqual(metadata.source, "llm")
         self.assertEqual(metadata.model, "fake-planner")
@@ -57,6 +63,8 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(traces[0].name, "planner")
         self.assertTrue(traces[0].parsed)
         self.assertIn("Context budget summary", client.messages[1].content)
+        self.assertIn("Task-relevant repository map", client.messages[1].content)
+        self.assertIn("function parse(value)", client.messages[1].content)
         self.assertIn("src/parser.py", traces[0].context_summary)
 
     def test_create_plan_with_llm_includes_related_memory(self) -> None:
@@ -204,6 +212,7 @@ class LLMPlannerTests(unittest.TestCase):
             client,
             file_contents={"src/parser.py": "def parse(value):\n    return value\n"},
             traces=traces,
+            repository_map_context="src/parser.py [Python]\n  function parse(value) (line 1)",
         )
 
         self.assertEqual(metadata.source, "llm")
@@ -214,6 +223,8 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(traces[0].name, "patch_proposal")
         self.assertTrue(traces[0].parsed)
         self.assertIn("Files eligible for direct file_edits", client.messages[1].content)
+        self.assertIn("Task-relevant repository map", client.messages[1].content)
+        self.assertIn("function parse(value)", client.messages[1].content)
         self.assertIn("edit allowed", traces[0].context_summary)
 
     def test_patch_proposal_blocks_file_edits_when_context_is_truncated(self) -> None:
@@ -312,6 +323,9 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertTrue(report.patch_review.approved_for_apply)
         self.assertEqual([trace.name for trace in report.llm_traces], ["planner", "patch_proposal", "patch_review"])
         self.assertEqual(len(client.calls), 3)
+        self.assertGreater(report.repository_map["symbols_indexed"], 0)
+        self.assertIn("Task-relevant repository map", client.calls[0][1].content)
+        self.assertIn("Task-relevant repository map", client.calls[1][1].content)
 
     def test_workflow_iterative_agent_runs_before_plan_and_proposal(self) -> None:
         client = FakeLLMClient(
