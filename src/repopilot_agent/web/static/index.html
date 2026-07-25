@@ -110,6 +110,18 @@
           <input id="agentMaxSteps" type="number" min="1" max="12" step="1" value="6" />
         </label>
         <label>
+          Agent max tool calls
+          <input id="agentMaxToolCalls" type="number" min="1" max="24" step="1" value="12" />
+        </label>
+        <label>
+          Validation command limit
+          <input id="maxValidationCommands" type="number" min="1" max="16" step="1" value="4" />
+        </label>
+        <label>
+          Execution time budget (seconds)
+          <input id="executionTimeoutSeconds" type="number" min="1" max="3600" step="1" value="600" />
+        </label>
+        <label>
           Repair max attempts
           <input id="repairMaxAttempts" type="number" min="0" max="5" step="1" value="2" />
         </label>
@@ -157,6 +169,12 @@
           <pre id="taskRunSandbox" class="code-block compact">Not created</pre>
           <h2>Run Events</h2>
           <div id="taskRunEvents" class="timeline"></div>
+          <h2>Acceptance Criteria</h2>
+          <div id="taskRunCriteria" class="stack"></div>
+          <h2>Execution Budget</h2>
+          <div id="taskRunBudget" class="stack"></div>
+          <h2>Completion Evidence</h2>
+          <div id="taskRunEvidence" class="stack"></div>
           <h2>Local Feature Branch</h2>
           <div class="task-run-delivery">
             <input id="taskRunBranch" placeholder="feature/repopilot-task" />
@@ -180,6 +198,12 @@
           <div id="runtimeEventList" class="timeline"></div>
           <h2>Repository Map</h2>
           <div id="repositoryMapList" class="stack"></div>
+          <h2>Acceptance Criteria</h2>
+          <div id="acceptanceCriteriaList" class="stack"></div>
+          <h2>Execution Budget</h2>
+          <div id="executionBudgetList" class="stack"></div>
+          <h2>Completion Evidence</h2>
+          <div id="completionEvidenceList" class="stack"></div>
           <h2>Plan</h2>
           <ol id="planList" class="stack"></ol>
           <h2>Proposed Changes</h2>

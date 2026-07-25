@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import replace
 from pathlib import Path
 
 from .agent_loop import AgentLoopResult, run_agent_loop, select_agent_hits
+from .execution import (
+    ExecutionBudget,
+    ExecutionUsage,
+    build_acceptance_criteria,
+    execution_budget_state,
+    pending_completion_evidence,
+)
 from .llm.base import LLMClient, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
@@ -40,7 +48,11 @@ def run_workflow(
     agent_max_steps: int = 6,
     agent_run_id: str | None = None,
     agent_event_store: RuntimeEventStore | None = None,
+    execution_budget: ExecutionBudget | None = None,
 ) -> WorkflowReport:
+    started_at = time.monotonic()
+    budget = execution_budget or ExecutionBudget(max_agent_steps=agent_max_steps)
+    agent_step_limit = min(agent_max_steps, budget.max_agent_steps, budget.max_tool_calls)
     root = Path(repo_path).expanduser().resolve()
     files = scan_repository(root)
     hits = search_files(task, files, limit=search_limit)
@@ -85,7 +97,7 @@ def run_workflow(
                         hits,
                         llm_client,
                         traces=llm_traces,
-                        max_steps=agent_max_steps,
+                        max_steps=agent_step_limit,
                         runtime_run_id=agent_run_id,
                         runtime_store=runtime_store,
                         repository_map=repository_map,
@@ -150,6 +162,20 @@ def run_workflow(
 
     validation = run_validation(root, validation_commands or [])
     validation_feedback = build_validation_feedback(validation, task=task, repo_path=root)
+    proposed_paths = [edit.path for edit in patch_proposal.file_edits] if patch_proposal else []
+    planned_validation = list(validation_commands or [])
+    if not planned_validation and patch_proposal and patch_proposal.validation_plan:
+        planned_validation = list(patch_proposal.validation_plan.commands)
+    acceptance_criteria = build_acceptance_criteria(task, proposed_paths, planned_validation)
+    runtime_tool_calls = sum(
+        1 for event in (agent_result.events if agent_result else []) if event.event_type == "action_started"
+    )
+    usage = ExecutionUsage(
+        agent_steps=len(agent_result.steps) if agent_result else 0,
+        tool_calls=runtime_tool_calls,
+        validation_commands=len(validation),
+        elapsed_ms=max(int((time.monotonic() - started_at) * 1000), 0),
+    )
     summary = _build_summary(
         task,
         files_scanned=len(files),
@@ -178,6 +204,9 @@ def run_workflow(
             task,
             seed_paths=[hit.path for hit in hits],
         ),
+        acceptance_criteria=[criterion.to_dict() for criterion in acceptance_criteria],
+        execution_budget=execution_budget_state(budget, usage),
+        completion_evidence=pending_completion_evidence(acceptance_criteria).to_dict(),
         summary=summary,
     )
 

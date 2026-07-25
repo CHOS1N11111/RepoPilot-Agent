@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.git_tools import get_git_diff
+from repopilot_agent.execution import ExecutionBudget
 from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
 from repopilot_agent.models import (
@@ -32,11 +33,14 @@ from repopilot_agent.models import (
 )
 from repopilot_agent.repo_source import RepositorySource
 from repopilot_agent.task_runs import clear_task_runs, create_task_run, update_task_run
+from repopilot_agent.structured_patch import apply_structured_patch as apply_exact_patch
 from repopilot_agent.web_server import (
     RepoPilotRequestHandler,
     STATIC_DIR,
     _payload_approved_paths,
+    _payload_execution_budget,
     _payload_max_repair_attempts,
+    _validate_validation_budget,
 )
 from repopilot_agent.web_sessions import clear_proposal_sessions, create_proposal_session, proposal_session_to_record
 from repopilot_agent.worktree_sandbox import (
@@ -118,6 +122,37 @@ class ApprovedPathsPayloadTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     _payload_approved_paths(payload, self.edits)
                 self.assertIn(expected, str(raised.exception))
+
+
+class ExecutionBudgetPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.edits = [
+            FileEditProposal(path="notes.txt", new_content="new notes\n", rationale="Update notes."),
+            FileEditProposal(path="src/main.py", new_content="print('ok')\n", rationale="Update main."),
+        ]
+
+    def test_execution_budget_defaults_and_caps_user_values(self) -> None:
+        defaults = _payload_execution_budget({})
+        capped = _payload_execution_budget(
+            {
+                "agent_max_steps": "99",
+                "agent_max_tool_calls": "99",
+                "max_validation_commands": "99",
+                "execution_timeout_seconds": "9999",
+            }
+        )
+
+        self.assertEqual(defaults, ExecutionBudget())
+        self.assertEqual(capped.max_agent_steps, 12)
+        self.assertEqual(capped.max_tool_calls, 24)
+        self.assertEqual(capped.max_validation_commands, 16)
+        self.assertEqual(capped.max_elapsed_seconds, 3600)
+
+    def test_validation_commands_cannot_exceed_budget(self) -> None:
+        budget = ExecutionBudget(max_validation_commands=1)
+
+        with self.assertRaisesRegex(ValueError, "exceeds the configured limit"):
+            _validate_validation_budget(["python -m unittest", "python -m compileall src"], budget)
 
     def test_payload_approved_paths_rejects_unknown_or_unsafe_paths(self) -> None:
         cases = [
@@ -749,6 +784,14 @@ class WebServerTests(unittest.TestCase):
             root = Path(tmp)
             subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
             (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            (root / "tests").mkdir()
+            (root / "tests" / "test_smoke.py").write_text(
+                "import unittest\n\n"
+                "class SmokeTests(unittest.TestCase):\n"
+                "    def test_smoke(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
             server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -805,10 +848,141 @@ class WebServerTests(unittest.TestCase):
                 self.assertTrue(data["applied"])
                 self.assertEqual(data["changed_files"], ["notes.txt"])
                 self.assertEqual(data["validation"][0]["command"], "python -m unittest discover -s tests")
+                self.assertEqual(data["structured_patch_results"][0]["status"], "applied")
+                self.assertEqual(
+                    data["completion_evidence"]["status"],
+                    "passed",
+                    data["completion_evidence"],
+                )
+                self.assertEqual(data["execution_budget"]["usage"]["tool_calls"], 2)
+                self.assertEqual(data["execution_budget"]["usage"]["validation_commands"], 1)
                 self.assertTrue(data["rollback_available"])
                 self.assertTrue(any(event["step"] == "apply" for event in data["timeline"]))
                 self.assertTrue(any(event["step"] == "rollback" and event["status"] == "ready" for event in data["timeline"]))
                 self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "new\n")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_rejects_stale_structured_patch_without_overwriting_file(self) -> None:
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "notes.txt"
+            target.write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+            )
+            target.write_text("user change\n", encoding="utf-8")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=json.dumps({"proposal_id": session.proposal_id}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=5)
+                error = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 400)
+                self.assertIn("changed after proposal generation", error["error"])
+                self.assertEqual(target.read_text(encoding="utf-8"), "user change\n")
+                self.assertFalse(session.applied)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_multi_file_structured_patch_rolls_back_prior_write_on_late_conflict(self) -> None:
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.txt"
+            second = root / "second.txt"
+            first.write_text("old first\n", encoding="utf-8")
+            second.write_text("old second\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update both files",
+                file_edits=[
+                    FileEditProposal(path="first.txt", new_content="new first\n", rationale="Update first."),
+                    FileEditProposal(path="second.txt", new_content="new second\n", rationale="Update second."),
+                ],
+                validation_commands=[],
+                timeline=[],
+                allowed_paths=["first.txt", "second.txt"],
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def race_on_second(repo_path, structured_patch, **kwargs):
+                    if structured_patch.path == "second.txt":
+                        second.write_text("concurrent change\n", encoding="utf-8")
+                    return apply_exact_patch(repo_path, structured_patch, **kwargs)
+
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=json.dumps({"proposal_id": session.proposal_id}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch("repopilot_agent.web_server.apply_structured_patch", side_effect=race_on_second):
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(request, timeout=5)
+
+                self.assertEqual(raised.exception.code, 400)
+                self.assertEqual(first.read_text(encoding="utf-8"), "old first\n")
+                self.assertEqual(second.read_text(encoding="utf-8"), "concurrent change\n")
+                self.assertFalse(session.applied)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_apply_api_blocks_before_write_when_tool_budget_is_insufficient(self) -> None:
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "notes.txt"
+            target.write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[FileEditProposal(path="notes.txt", new_content="new\n", rationale="Update notes.")],
+                validation_commands=["python -m unittest"],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+                execution_budget=ExecutionBudget(max_tool_calls=1),
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=json.dumps({"proposal_id": session.proposal_id}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=5)
+                error = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 409)
+                self.assertIn("Tool-call budget", error["error"])
+                self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+                self.assertFalse(session.applied)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

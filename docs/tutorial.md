@@ -509,7 +509,7 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 3. Configure and test the LLM connection when model-backed edits are needed.
 4. Click `Start Sandboxed Task`.
 5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
-6. At `awaiting_approval`, inspect the Summary, LLM I/O, and proposed Diff tabs.
+6. At `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
 7. Select the approved files and click `Apply Proposal`.
 8. If validation fails, inspect the feedback and generate a bounded repair proposal.
 9. When the run reaches `completed`, inspect the final working Diff.
@@ -518,6 +518,12 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 Each task receives its own detached managed worktree. RepoPilot automatically selects that path in the repository controls, so proposal application, validation, rollback, Git inspection, and diff display all target the sandbox rather than the source worktree.
 
 Task runs are saved in the source repository's `.repopilot/memory.sqlite3`. RepoPilot adds `.repopilot/` to the clone's local Git `info/exclude`; it does not modify the tracked `.gitignore`. API keys are request-scoped and are not serialized into the task-run record.
+
+The advanced task settings include four execution limits: Agent steps, tool calls, validation commands, and elapsed seconds. Agent exploration consumes step and tool-call capacity. Applying an approved file and running a validation command also consume tool-call capacity. RepoPilot checks the remaining command and tool budget before writing, records elapsed usage, and preserves the proposal without applying it when the configured capacity is insufficient.
+
+Acceptance criteria are generated from the task, proposal file scope, and validation commands. After apply, the Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded. A missing automated validation command is shown as a manual-review recommendation rather than silently presented as automated proof.
+
+Existing UTF-8 proposal files are converted from full replacement content into exact-text structured hunks. Each patch carries the file's proposal-time SHA-256. If the file changes before approval, RepoPilot rejects the patch instead of overwriting the newer content. If a later file conflicts during a multi-file apply, earlier writes from that apply attempt are restored from the captured snapshots.
 
 `Pause` and `Cancel` are checkpoint operations. They take effect after the current safe operation returns, so they do not terminate an in-flight LLM HTTP request or interrupt a file write halfway through. Paused, cancelled, failed, and server-interrupted runs preserve their sandboxes. Use `Resume` to restart analysis with the current Web LLM settings or return to a saved approval checkpoint.
 

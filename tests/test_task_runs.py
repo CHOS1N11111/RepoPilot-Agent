@@ -12,6 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.memory import MemoryStore, default_memory_path
+from repopilot_agent.execution import (
+    ExecutionBudget,
+    ExecutionUsage,
+    build_acceptance_criteria,
+    pending_completion_evidence,
+)
 from repopilot_agent.task_runs import (
     TaskRunError,
     checkpoint_task_run,
@@ -101,6 +107,33 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(restored.status, "interrupted")
             self.assertEqual(restored.task, "fix login")
             self.assertEqual(store.list_task_runs(limit=1)[0]["run_id"], task_run.run_id)
+
+    def test_execution_contract_round_trips_through_persistent_task_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = build_acceptance_criteria("update docs", ["README.md"], [])
+            task_run = create_task_run(
+                tmp,
+                "update docs",
+                [],
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=4,
+                    max_tool_calls=7,
+                    max_validation_commands=2,
+                    max_elapsed_seconds=90,
+                ),
+            )
+            task_run.acceptance_criteria = criteria
+            task_run.execution_usage = ExecutionUsage(agent_steps=2, tool_calls=3, elapsed_ms=1200)
+            task_run.completion_evidence = pending_completion_evidence(criteria)
+
+            restored = task_run_from_record(task_run.to_record())
+            public = restored.to_public_dict()
+
+            self.assertEqual(restored.execution_budget.max_tool_calls, 7)
+            self.assertEqual(restored.execution_usage.agent_steps, 2)
+            self.assertEqual(restored.acceptance_criteria[0].criterion_id, "task_change")
+            self.assertEqual(restored.completion_evidence.status, "pending")
+            self.assertEqual(public["execution_budget"]["remaining"]["tool_calls"], 4)
 
     def test_repository_memory_uses_local_git_exclude(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

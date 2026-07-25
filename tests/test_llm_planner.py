@@ -369,6 +369,11 @@ class LLMPlannerTests(unittest.TestCase):
             ["agent_step_1", "agent_step_2", "agent_step_3", "planner", "patch_proposal"],
         )
         self.assertEqual(len(client.calls), 5)
+        self.assertEqual(report.execution_budget["limits"]["max_agent_steps"], 3)
+        self.assertEqual(report.execution_budget["usage"]["agent_steps"], 3)
+        self.assertFalse(report.execution_budget["exhausted"])
+        self.assertEqual(report.acceptance_criteria[0]["criterion_id"], "analysis_complete")
+        self.assertEqual(report.completion_evidence["status"], "passed")
 
 
 if __name__ == "__main__":

@@ -34,6 +34,9 @@ class StructuredPatch:
     hunks: list[PatchHunk]
     rationale: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass(frozen=True)
 class SyntaxCheck:
@@ -62,6 +65,71 @@ class StructuredPatchResult:
 
 def file_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def build_structured_patch(
+    path: str,
+    original: str,
+    updated: str,
+    *,
+    rationale: str = "",
+    context_lines: int = 2,
+) -> StructuredPatch:
+    """Convert a complete replacement into bounded, uniquely anchored exact-text hunks."""
+    normalized_path = _normalize_path(path)
+    if original == updated:
+        raise ValueError(f"Cannot build a structured patch for unchanged content: {normalized_path}")
+    if not original:
+        raise ValueError(f"Structured patch generation currently requires a non-empty file: {normalized_path}")
+    syntax_check = check_syntax(normalized_path, updated)
+    if syntax_check.status == "failed":
+        raise ValueError(syntax_check.message)
+
+    old_lines = original.splitlines(keepends=True)
+    new_lines = updated.splitlines(keepends=True)
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    groups = list(matcher.get_grouped_opcodes(n=max(context_lines, 0)))
+    hunks: list[PatchHunk] = []
+    for group in groups:
+        old_start, old_end = group[0][1], group[-1][2]
+        new_start, new_end = group[0][3], group[-1][4]
+        old_start, old_end, new_start, new_end = _expand_unique_hunk(
+            original,
+            old_lines,
+            new_lines,
+            old_start,
+            old_end,
+            new_start,
+            new_end,
+        )
+        old_text = "".join(old_lines[old_start:old_end])
+        new_text = "".join(new_lines[new_start:new_end])
+        if not old_text or original.count(old_text) != 1:
+            return StructuredPatch(
+                path=normalized_path,
+                expected_sha256=file_sha256(original),
+                hunks=[PatchHunk(original, updated)],
+                rationale=rationale.strip(),
+            )
+        hunks.append(PatchHunk(old_text, new_text))
+    if not hunks:
+        raise ValueError(f"No changed hunks were generated for: {normalized_path}")
+    return StructuredPatch(
+        path=normalized_path,
+        expected_sha256=file_sha256(original),
+        hunks=hunks,
+        rationale=rationale.strip(),
+    )
+
+
+def structured_patch_from_record(record: object) -> StructuredPatch:
+    return parse_structured_patch(record)
+
+
+def current_file_sha256(repo_path: str | Path, path: str) -> str:
+    root = Path(repo_path).expanduser().resolve()
+    target = _safe_existing_target(root, path)
+    return file_sha256(_read_utf8(target, path))
 
 
 def parse_structured_patch(arguments: object) -> StructuredPatch:
@@ -269,6 +337,32 @@ def _build_diff(path: str, original: str, updated: str) -> str:
             tofile=f"b/{path}",
         )
     )
+
+
+def _expand_unique_hunk(
+    original: str,
+    old_lines: list[str],
+    new_lines: list[str],
+    old_start: int,
+    old_end: int,
+    new_start: int,
+    new_end: int,
+) -> tuple[int, int, int, int]:
+    while True:
+        old_text = "".join(old_lines[old_start:old_end])
+        if old_text and original.count(old_text) == 1:
+            return old_start, old_end, new_start, new_end
+        expanded = False
+        if old_start > 0 and new_start > 0 and old_lines[old_start - 1] == new_lines[new_start - 1]:
+            old_start -= 1
+            new_start -= 1
+            expanded = True
+        if old_end < len(old_lines) and new_end < len(new_lines) and old_lines[old_end] == new_lines[new_end]:
+            old_end += 1
+            new_end += 1
+            expanded = True
+        if not expanded:
+            return old_start, old_end, new_start, new_end
 
 
 def _normalize_path(path: str) -> str:

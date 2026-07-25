@@ -146,6 +146,29 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("report.repository_map?.symbols_indexed", self.app_js)
         self.assertIn("repositoryMap.relevant_entries", self.app_js)
 
+    def test_validation_aware_execution_controls_and_evidence_are_visible(self) -> None:
+        for element_id in [
+            "agentMaxToolCalls",
+            "maxValidationCommands",
+            "executionTimeoutSeconds",
+            "acceptanceCriteriaList",
+            "executionBudgetList",
+            "completionEvidenceList",
+            "taskRunCriteria",
+            "taskRunBudget",
+            "taskRunEvidence",
+        ]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        for payload_key in [
+            "agent_max_tool_calls",
+            "max_validation_commands",
+            "execution_timeout_seconds",
+        ]:
+            self.assertIn(payload_key, self.app_js)
+        self.assertIn("function renderAcceptanceCriteria", self.app_js)
+        self.assertIn("function renderExecutionBudget", self.app_js)
+        self.assertIn("function renderCompletionEvidence", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

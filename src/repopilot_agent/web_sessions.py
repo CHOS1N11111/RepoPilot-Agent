@@ -4,11 +4,24 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
+from .execution import (
+    AcceptanceCriterion,
+    CompletionEvidence,
+    ExecutionBudget,
+    ExecutionUsage,
+    build_acceptance_criteria,
+    completion_from_record,
+    criteria_from_records,
+    execution_budget_state,
+    pending_completion_evidence,
+)
 from .models import FileEditProposal, ValidationFailureDetail, ValidationFeedback, ValidationResult
 from .patch_apply import FileRollbackSnapshot
+from .structured_patch import StructuredPatch, build_structured_patch, structured_patch_from_record
 
 
 DEFAULT_MAX_REPAIR_ATTEMPTS = 2
@@ -41,6 +54,11 @@ class ProposalSession:
     rollback_snapshot: list[FileRollbackSnapshot] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None
+    structured_patches: list[StructuredPatch] = field(default_factory=list)
+    acceptance_criteria: list[AcceptanceCriterion] = field(default_factory=list)
+    execution_budget: ExecutionBudget = field(default_factory=ExecutionBudget)
+    execution_usage: ExecutionUsage = field(default_factory=ExecutionUsage)
+    completion_evidence: CompletionEvidence | None = None
 
     def repair_budget_remaining(self) -> int:
         return max(self.max_repair_attempts - self.repair_attempt, 0)
@@ -75,6 +93,19 @@ class ProposalSession:
             "timeline": [asdict(event) for event in self.timeline],
             "validation": [asdict(result) for result in self.validation],
             "validation_feedback": asdict(self.validation_feedback) if self.validation_feedback else None,
+            "structured_patches": [
+                {
+                    "path": patch.path,
+                    "expected_sha256": patch.expected_sha256,
+                    "hunk_count": len(patch.hunks),
+                }
+                for patch in self.structured_patches
+            ],
+            "acceptance_criteria": [criterion.to_dict() for criterion in self.acceptance_criteria],
+            "execution_budget": execution_budget_state(self.execution_budget, self.execution_usage),
+            "completion_evidence": (
+                self.completion_evidence.to_dict() if self.completion_evidence else None
+            ),
         }
 
 
@@ -91,8 +122,17 @@ def create_proposal_session(
     parent_proposal_id: str | None = None,
     repair_attempt: int = 0,
     max_repair_attempts: int = DEFAULT_MAX_REPAIR_ATTEMPTS,
+    acceptance_criteria: list[AcceptanceCriterion] | None = None,
+    execution_budget: ExecutionBudget | None = None,
+    execution_usage: ExecutionUsage | None = None,
 ) -> ProposalSession:
     proposal_id = uuid4().hex
+    criteria = acceptance_criteria or build_acceptance_criteria(
+        task,
+        [edit.path for edit in file_edits],
+        validation_commands,
+    )
+    budget = execution_budget or ExecutionBudget()
     session = ProposalSession(
         proposal_id=proposal_id,
         repo_path=repo_path,
@@ -105,6 +145,11 @@ def create_proposal_session(
         max_repair_attempts=max(_int_value(max_repair_attempts, DEFAULT_MAX_REPAIR_ATTEMPTS), 0),
         allowed_paths=allowed_paths or [edit.path for edit in file_edits],
         timeline=timeline,
+        structured_patches=_build_session_structured_patches(repo_path, file_edits),
+        acceptance_criteria=criteria,
+        execution_budget=budget,
+        execution_usage=execution_usage or ExecutionUsage(),
+        completion_evidence=pending_completion_evidence(criteria),
     )
     _SESSIONS[proposal_id] = session
     return session
@@ -143,6 +188,13 @@ def proposal_session_to_record(session: ProposalSession) -> dict[str, Any]:
         "rollback_snapshot": [asdict(snapshot) for snapshot in session.rollback_snapshot],
         "validation": [asdict(result) for result in session.validation],
         "validation_feedback": asdict(session.validation_feedback) if session.validation_feedback else None,
+        "structured_patches": [patch.to_dict() for patch in session.structured_patches],
+        "acceptance_criteria": [criterion.to_dict() for criterion in session.acceptance_criteria],
+        "execution_budget": session.execution_budget.to_dict(),
+        "execution_usage": session.execution_usage.to_dict(),
+        "completion_evidence": (
+            session.completion_evidence.to_dict() if session.completion_evidence else None
+        ),
     }
 
 
@@ -169,7 +221,29 @@ def proposal_session_from_record(record: dict[str, Any]) -> ProposalSession:
         rollback_snapshot=[_rollback_snapshot(item) for item in record.get("rollback_snapshot", [])],
         validation=[_validation_result(item) for item in record.get("validation", [])],
         validation_feedback=_validation_feedback(record.get("validation_feedback")),
+        structured_patches=[
+            structured_patch_from_record(item)
+            for item in record.get("structured_patches", [])
+            if isinstance(item, dict)
+        ],
+        acceptance_criteria=criteria_from_records(record.get("acceptance_criteria")),
+        execution_budget=ExecutionBudget.from_dict(record.get("execution_budget")),
+        execution_usage=ExecutionUsage.from_dict(record.get("execution_usage")),
+        completion_evidence=completion_from_record(record.get("completion_evidence")),
     )
+    if not session.acceptance_criteria:
+        session.acceptance_criteria = build_acceptance_criteria(
+            session.task,
+            [edit.path for edit in session.file_edits],
+            session.validation_commands,
+        )
+    if session.completion_evidence is None:
+        session.completion_evidence = pending_completion_evidence(session.acceptance_criteria)
+    if not session.structured_patches and not session.applied:
+        session.structured_patches = _build_session_structured_patches(
+            session.repo_path,
+            session.file_edits,
+        )
     return cache_proposal_session(session)
 
 
@@ -198,6 +272,29 @@ def build_report_timeline(report: Any, proposal_id: str | None = None) -> list[T
     if review:
         status = "done" if review.approved_for_apply else "warning"
         events.append(TimelineEvent("review", status, f"Review risk: {review.risk_level}. {review.summary}"))
+    criteria = getattr(report, "acceptance_criteria", [])
+    if criteria:
+        events.append(
+            TimelineEvent(
+                "acceptance",
+                "ready",
+                f"Defined {len(criteria)} acceptance criterion/criteria for this task.",
+            )
+        )
+    budget = getattr(report, "execution_budget", {})
+    if budget:
+        usage = budget.get("usage", {})
+        status = "warning" if budget.get("exhausted") else "ready"
+        events.append(
+            TimelineEvent(
+                "budget",
+                status,
+                (
+                    f"Used {usage.get('agent_steps', 0)} agent step(s) and "
+                    f"{usage.get('tool_calls', 0)} tool call(s)."
+                ),
+            )
+        )
     if proposal_id:
         events.append(TimelineEvent("approval", "pending", f"Waiting for approval on proposal {proposal_id}."))
     return events
@@ -205,6 +302,36 @@ def build_report_timeline(report: Any, proposal_id: str | None = None) -> list[T
 
 def append_timeline(session: ProposalSession, step: str, status: str, detail: str) -> None:
     session.timeline.append(TimelineEvent(step, status, detail))
+
+
+def _build_session_structured_patches(
+    repo_path: str,
+    edits: list[FileEditProposal],
+) -> list[StructuredPatch]:
+    root = Path(repo_path).expanduser().resolve()
+    patches: list[StructuredPatch] = []
+    for edit in edits:
+        relative = PurePosixPath(edit.path.replace("\\", "/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Unsafe proposal path: {edit.path}")
+        target = root / Path(*relative.parts)
+        if not target.is_file():
+            continue
+        try:
+            original = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        if not original or original == edit.new_content:
+            continue
+        patches.append(
+            build_structured_patch(
+                edit.path,
+                original,
+                edit.new_content,
+                rationale=edit.rationale,
+            )
+        )
+    return patches
 
 
 def _file_edit(data: dict[str, Any]) -> FileEditProposal:

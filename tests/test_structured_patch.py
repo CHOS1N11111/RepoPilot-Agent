@@ -12,12 +12,39 @@ from repopilot_agent.structured_patch import (
     PatchHunk,
     StructuredPatch,
     apply_structured_patch,
+    build_structured_patch,
     file_sha256,
     parse_structured_patch,
 )
 
 
 class StructuredPatchTests(unittest.TestCase):
+    def test_builder_creates_localized_patch_that_reconstructs_updated_file(self) -> None:
+        original = "header\n\ndef value():\n    return 1\n\nfooter\n"
+        updated = "header\n\ndef value():\n    return 2\n\nfooter\n"
+        patch = build_structured_patch("module.py", original, updated, rationale="Fix value.")
+
+        self.assertEqual(patch.expected_sha256, file_sha256(original))
+        self.assertEqual(patch.rationale, "Fix value.")
+        self.assertLess(len(patch.hunks[0].old_text), len(original))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp, "module.py")
+            target.write_text(original, encoding="utf-8")
+            result = apply_structured_patch(tmp, patch)
+
+            self.assertEqual(result.status, "applied")
+            self.assertEqual(target.read_text(encoding="utf-8"), updated)
+
+    def test_builder_expands_repeated_text_until_hunk_is_unique(self) -> None:
+        original = "first\nvalue = 1\n\nsecond\nvalue = 1\n"
+        updated = "first\nvalue = 1\n\nsecond\nvalue = 2\n"
+
+        patch = build_structured_patch("settings.txt", original, updated, context_lines=0)
+
+        self.assertEqual(len(patch.hunks), 1)
+        self.assertEqual(original.count(patch.hunks[0].old_text), 1)
+        self.assertIn("second", patch.hunks[0].old_text)
+
     def test_exact_hunks_apply_with_hash_readback_and_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp, "module.py")

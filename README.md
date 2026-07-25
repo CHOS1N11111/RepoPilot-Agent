@@ -21,12 +21,14 @@ Task or GitHub issue
 -> related memory lookup
 -> deterministic or LLM plan
 -> patch proposal
+-> proposal-scoped acceptance criteria
 -> LLM self-review
 -> proposed diff preview
 -> human approval
 -> protected file application
 -> validation rerun
 -> validation feedback and repair proposal
+-> completion evidence check
 -> resumable task completion
 -> Git diff, PR readiness, and PR draft support
 ```
@@ -39,7 +41,8 @@ flowchart LR
     C --> M["Related memory"]
     M --> D["Plan"]
     D --> E["Patch proposal"]
-    E --> F["LLM self-review"]
+    E --> C1["Acceptance criteria"]
+    C1 --> F["LLM self-review"]
     F --> G["Proposed diff"]
     G --> H{"Human approval"}
     H -->|Approve| I["Protected apply"]
@@ -48,7 +51,9 @@ flowchart LR
     J --> L{"Validation passed?"}
     L -->|No| R["Repair proposal"]
     R --> G
-    L -->|Yes| T["Completed task run"]
+    L -->|Yes| C2{"Evidence complete?"}
+    C2 -->|No| X["Needs attention"]
+    C2 -->|Yes| T["Completed task run"]
     T --> K["Local branch, Git diff, and PR draft"]
 ```
 
@@ -62,6 +67,7 @@ flowchart LR
 - Reproducible deterministic and LLM evaluation suites with explicit scoring and aggregate metrics.
 - Managed detached Git worktree sandboxes for isolated proposal application and validation.
 - Persistent sandboxed task runs with background execution, progress polling, safe pause/resume/cancel checkpoints, and restart recovery.
+- Validation-aware completion with explicit acceptance criteria, execution budgets, and evidence for changed files, approval scope, and validation results.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
@@ -95,6 +101,8 @@ flowchart LR
 | Evaluation             | Scores retrieval, proposals, validation, Agent steps, LLM calls, latency, failures, and fallbacks.    |
 | Worktree sandbox       | Creates isolated committed snapshots and guards dirty-source and destructive-removal operations.      |
 | Task orchestration     | Runs the Agent in a sandbox, persists progress, waits for approval, validates, repairs, and resumes.   |
+| Execution control      | Enforces Agent-step, tool-call, validation-command, and elapsed-time budgets with visible usage.       |
+| Completion evidence    | Requires approved changes and passing required validation before a task run is marked complete.        |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and PR readiness.    |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -109,6 +117,7 @@ src/repopilot_agent/
   search.py             lightweight relevance search
   repository_map.py     symbols, dependencies, source/test relations, and task ranking
   structured_patch.py   hash-guarded exact-text hunks and syntax/readback verification
+  execution.py          acceptance criteria, execution budgets, usage, and completion evidence
   agent_loop.py         LLM exploration adapter for the typed runtime
   runtime/
     models.py           action, observation, event, policy, and run contracts
@@ -196,6 +205,7 @@ The web UI supports:
 - 🧾 Proposed diff preview before file writes.
 - 🖐️ Human-approved patch application by server-side `proposal_id`.
 - Per-file approval controls so users can apply only selected proposal edits.
+- Acceptance criteria, execution budget usage, and completion evidence in both Summary and Task Run views.
 - SQLite-backed proposal sessions so apply, revert, timeline, and trace history can survive web server restarts.
 - Rollback controls for reverting applied proposal edits from an internal pre-apply snapshot.
 - Validation feedback panel with suspected files, bounded failure excerpts, repair steps, and repair proposal generation.
@@ -262,6 +272,10 @@ Sandbox -> Explore -> Approval -> Apply -> Validate -> Complete
 ```
 
 When an apply-ready proposal is available, the run stops at `awaiting_approval`. Review the proposal and diff in the Summary tab, select the approved files, and use the existing protected Apply action. Passing validation completes the run; failed validation changes it to `repair_pending`, where the bounded repair workflow can generate another human-reviewed proposal.
+
+RepoPilot derives an acceptance contract from the task, approved proposal paths, and selected validation commands. The Task Run and Summary views show each criterion, configured limits, current usage, and final evidence. A run reaches `completed` only when at least one approved file changed, every changed file stayed inside the approved scope, and every required allowlisted validation command exited successfully. When no automated command is available, manual diff review remains visible as advisory evidence.
+
+The Web settings expose limits for Agent steps, tool calls, validation commands, and elapsed execution time. RepoPilot checks command and tool budgets before applying files, records actual usage, and refuses completion when a configured budget is exceeded.
 
 Task-run state is saved in the source repository's local SQLite database and restored after a server restart. Active work cannot be resumed in the middle of an interrupted provider request, so a restored active run is marked `interrupted` and can be restarted from its last safe sandbox checkpoint. Pause and cancel requests use the same checkpoints and preserve the sandbox for inspection.
 
@@ -484,6 +498,8 @@ GitHub PR creation follows the same rule: RepoPilot checks readiness first, bloc
 - It never persists task-run API credentials and never commits or pushes task-run changes automatically.
 - Side-effect runtime actions require action-scoped approval and an explicit file or command allowlist.
 - Structured runtime patches require the SHA-256 observed during file read, exact hunk occurrence counts, pre-write syntax checks for Python and JSON, and post-write readback verification.
+- Approved full-file proposals are converted into bounded exact-text hunks when possible; stale hashes or ambiguous matches stop the apply, and multi-file failures restore earlier writes from snapshots.
+- Task runs are marked complete only after required acceptance evidence passes and the execution budget remains within its configured limits.
 - Completed runtime actions are idempotent; interrupted reservations stop for recovery inspection instead of executing again automatically.
 - 🧯 It keeps deterministic fallbacks for invalid or unavailable LLM output.
 - 🔍 It exposes LLM traces and self-review output so decisions are inspectable.
@@ -523,4 +539,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, a typed and persistent agent runtime, policy-gated tools, idempotent action recovery, iterative LLM exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, protected patch application, per-file Web approval controls, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, explicit local branch delivery, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, a typed and persistent agent runtime, policy-gated tools, idempotent action recovery, iterative LLM exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, hash-guarded proposal patches, protected patch application, per-file Web approval controls, acceptance criteria, execution budgets, completion evidence, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, explicit local branch delivery, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.

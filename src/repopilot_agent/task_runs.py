@@ -10,6 +10,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .execution import (
+    AcceptanceCriterion,
+    CompletionEvidence,
+    ExecutionBudget,
+    ExecutionUsage,
+    completion_from_record,
+    criteria_from_records,
+    execution_budget_state,
+)
 from .worktree_sandbox import WorktreeSandboxError, list_worktree_sandboxes
 
 
@@ -75,6 +84,10 @@ class TaskRun:
     cancel_requested: bool = False
     resume_status: str | None = None
     events: list[TaskRunEvent] = field(default_factory=list)
+    acceptance_criteria: list[AcceptanceCriterion] = field(default_factory=list)
+    execution_budget: ExecutionBudget = field(default_factory=ExecutionBudget)
+    execution_usage: ExecutionUsage = field(default_factory=ExecutionUsage)
+    completion_evidence: CompletionEvidence | None = None
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -90,6 +103,11 @@ class TaskRun:
         data["can_approve"] = self.status == "awaiting_approval" and bool(self.proposal_id)
         data["can_repair"] = self.status == "repair_pending"
         data["can_create_branch"] = self.status == "completed" and not self.delivery_branch
+        data["execution_budget"] = execution_budget_state(self.execution_budget, self.execution_usage)
+        data["acceptance_criteria"] = [item.to_dict() for item in self.acceptance_criteria]
+        data["completion_evidence"] = (
+            self.completion_evidence.to_dict() if self.completion_evidence else None
+        )
         return data
 
 
@@ -101,6 +119,7 @@ def create_task_run(
     source_repo: str | Path,
     task: str,
     validation_commands: list[str],
+    execution_budget: ExecutionBudget | None = None,
 ) -> TaskRun:
     now = _now()
     task_run = TaskRun(
@@ -111,6 +130,7 @@ def create_task_run(
         created_at=now,
         updated_at=now,
         events=[TaskRunEvent("queued", "Task run queued.", now)],
+        execution_budget=execution_budget or ExecutionBudget(),
     )
     return cache_task_run(task_run)
 
@@ -156,6 +176,10 @@ def task_run_from_record(record: dict[str, Any], mark_interrupted: bool = False)
         cancel_requested=bool(record.get("cancel_requested")),
         resume_status=_optional_string(record.get("resume_status")),
         events=events,
+        acceptance_criteria=criteria_from_records(record.get("acceptance_criteria")),
+        execution_budget=ExecutionBudget.from_dict(record.get("execution_budget")),
+        execution_usage=ExecutionUsage.from_dict(record.get("execution_usage")),
+        completion_evidence=completion_from_record(record.get("completion_evidence")),
     )
     if mark_interrupted and task_run.status in ACTIVE_TASK_RUN_STATUSES:
         update_task_run(

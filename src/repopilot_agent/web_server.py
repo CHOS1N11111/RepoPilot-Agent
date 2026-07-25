@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import threading
+import time
 from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +13,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .execution import (
+    ExecutionBudget,
+    ExecutionUsage,
+    build_acceptance_criteria,
+    completion_from_record,
+    criteria_from_records,
+    evaluate_completion,
+    execution_budget_state,
+)
 from .git_tools import get_git_diff, inspect_repository
 from .git_summary import build_git_workflow_summary, build_pull_request_readiness
 from .github_tools import create_github_pull_request, inspect_github_repository
@@ -19,7 +29,7 @@ from .llm.base import LLMError, LLMMessage
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path, ensure_local_state_ignored
 from .models import FileEditProposal
-from .patch_apply import apply_file_edits, capture_file_snapshots, revert_file_snapshots
+from .patch_apply import ApplyResult, apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from .repo_source import resolve_repository_reference, sync_repository_reference
 from .runtime import SQLiteRuntimeStore
 from .safety import SafetyCheckError
@@ -38,6 +48,7 @@ from .task_runs import (
 )
 from .validation_feedback import build_validation_feedback
 from .validator import run_validation
+from .structured_patch import apply_structured_patch, current_file_sha256
 from .web_sessions import (
     DEFAULT_MAX_REPAIR_ATTEMPTS,
     ProposalSession,
@@ -67,6 +78,10 @@ _SESSION_PUBLIC_KEYS = (
     "repair_budget_remaining",
     "next_repair_attempt",
     "repair_budget_exhausted",
+    "structured_patches",
+    "acceptance_criteria",
+    "execution_budget",
+    "completion_evidence",
 )
 
 
@@ -193,6 +208,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if not isinstance(validation, list) or not all(isinstance(item, str) for item in validation):
             self._send_json({"error": "validation must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
             return
+        try:
+            execution_budget = _payload_execution_budget(payload)
+            _validate_validation_budget(validation, execution_budget)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         repo_source = self._resolve_payload_repository_or_error(payload)
         if repo_source is None:
             return
@@ -226,6 +247,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 iterative_agent=_payload_iterative_agent(payload),
                 agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
+                execution_budget=execution_budget,
             )
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -259,6 +281,11 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if session.applied:
             self._send_json({"error": "Proposal has already been applied."}, status=HTTPStatus.BAD_REQUEST)
             return
+        try:
+            approved_paths = _payload_approved_paths(payload, session.file_edits)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         task_run = None
         task_run_id = str(payload.get("task_run_id") or "").strip()
         if task_run_id:
@@ -279,10 +306,65 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     status=HTTPStatus.CONFLICT,
                 )
                 return
+        active_budget = task_run.execution_budget if task_run else session.execution_budget
+        active_usage = task_run.execution_usage if task_run else session.execution_usage
+        current_budget_state = execution_budget_state(active_budget, active_usage)
+        if current_budget_state["exhausted"]:
+            if task_run:
+                update_task_run(
+                    task_run,
+                    "awaiting_approval",
+                    "Execution budget is exhausted; approved edits were not applied.",
+                    error="; ".join(current_budget_state["exhausted_reasons"]),
+                )
+                self._persist_task_run(task_run)
+            self._send_json(
+                {
+                    "error": "Execution budget is exhausted; approved edits were not applied.",
+                    "execution_budget": current_budget_state,
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if active_usage.validation_commands + len(session.validation_commands) > active_budget.max_validation_commands:
+            if task_run:
+                update_task_run(
+                    task_run,
+                    "awaiting_approval",
+                    "Validation budget is insufficient; approved edits were not applied.",
+                )
+                self._persist_task_run(task_run)
+            self._send_json(
+                {
+                    "error": "Validation command budget would be exceeded before approved edits can be verified.",
+                    "execution_budget": execution_budget_state(active_budget, active_usage),
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        required_tool_calls = len(approved_paths) + len(session.validation_commands)
+        if active_usage.tool_calls + required_tool_calls > active_budget.max_tool_calls:
+            if task_run:
+                update_task_run(
+                    task_run,
+                    "awaiting_approval",
+                    "Tool-call budget is insufficient; approved edits were not applied.",
+                )
+                self._persist_task_run(task_run)
+            self._send_json(
+                {
+                    "error": "Tool-call budget would be exceeded before approved edits can be applied and verified.",
+                    "execution_budget": execution_budget_state(active_budget, active_usage),
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if task_run:
             update_task_run(task_run, "applying", "Applying the human-approved proposal in the task sandbox.")
             self._persist_task_run(task_run)
+        automated_started = time.monotonic()
+        structured_patch_results: list[dict[str, Any]] = []
         try:
-            approved_paths = _payload_approved_paths(payload, session.file_edits)
             approved_path_set = set(approved_paths)
             approved_edits = [edit for edit in session.file_edits if edit.path in approved_path_set]
             session.approved_paths = approved_paths
@@ -294,17 +376,58 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 f"Approved {len(approved_edits)} of {len(session.file_edits)} proposed file edit(s).",
             )
             rollback_snapshot = capture_file_snapshots(session.repo_path, approved_edits)
-            result = apply_file_edits(
-                session.repo_path,
-                approved_edits,
-                task=session.task,
-                allowed_paths=session.allowed_paths,
-            )
+            patches_by_path = {patch.path: patch for patch in session.structured_patches}
+            approved_patches = [patches_by_path[path] for path in approved_paths if path in patches_by_path]
+            if len(approved_patches) == len(approved_edits):
+                for patch in approved_patches:
+                    current_hash = current_file_sha256(session.repo_path, patch.path)
+                    if current_hash != patch.expected_sha256:
+                        raise ValueError(
+                            f"Structured patch conflict for {patch.path}: the file changed after proposal generation."
+                        )
+                changed_files: list[str] = []
+                diff_parts: list[str] = []
+                try:
+                    for structured_patch in approved_patches:
+                        patch_result = apply_structured_patch(
+                            session.repo_path,
+                            structured_patch,
+                            task=session.task,
+                            allowed_paths=session.allowed_paths,
+                        )
+                        structured_patch_results.append(patch_result.to_dict())
+                        if patch_result.status != "applied":
+                            raise ValueError(
+                                f"Structured patch for {structured_patch.path} did not apply: {patch_result.message}"
+                            )
+                        changed_files.append(structured_patch.path)
+                        diff_parts.append(patch_result.diff)
+                except Exception:
+                    applied_snapshots = [
+                        snapshot for snapshot in rollback_snapshot if snapshot.path in changed_files
+                    ]
+                    if applied_snapshots:
+                        revert_file_snapshots(session.repo_path, applied_snapshots)
+                    raise
+                result = ApplyResult(
+                    applied=bool(changed_files),
+                    changed_files=changed_files,
+                    diff="\n".join(part for part in diff_parts if part),
+                    message=f"Applied {len(changed_files)} approved structured patch(es).",
+                )
+            else:
+                result = apply_file_edits(
+                    session.repo_path,
+                    approved_edits,
+                    task=session.task,
+                    allowed_paths=session.allowed_paths,
+                )
             session.applied = True
             session.reverted = False
             session.applied_paths = result.changed_files
             session.rollback_snapshot = rollback_snapshot if result.applied else []
-            append_timeline(session, "apply", "done", result.message)
+            apply_mode = "structured hunks" if structured_patch_results else "compatible file edits"
+            append_timeline(session, "apply", "done", f"{result.message} Mode: {apply_mode}.")
             if session.rollback_snapshot:
                 append_timeline(
                     session,
@@ -355,6 +478,24 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     append_timeline(session, "validation", "done", f"Ran {len(validation)} validation command(s).")
             else:
                 append_timeline(session, "validation", "skipped", "No validation command was configured.")
+            session.execution_usage = active_usage.add(
+                tool_calls=len(result.changed_files) + len(session.validation),
+                validation_commands=len(session.validation),
+                elapsed_ms=max(int((time.monotonic() - automated_started) * 1000), 0),
+            )
+            session.completion_evidence = evaluate_completion(
+                session.acceptance_criteria,
+                changed_files=result.changed_files,
+                approved_paths=approved_paths,
+                validation=session.validation,
+                diff=result.diff,
+            )
+            append_timeline(
+                session,
+                "acceptance",
+                "done" if session.completion_evidence.status == "passed" else "warning",
+                session.completion_evidence.summary,
+            )
         except SafetyCheckError as exc:
             append_timeline(session, "safety", "blocked", "Pre-apply safety check blocked this proposal.")
             self._persist_session(session)
@@ -393,6 +534,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         data["validation_feedback"] = (
             asdict(session.validation_feedback) if session.validation_feedback else None
         )
+        data["structured_patch_results"] = structured_patch_results
         public_session = session.to_public_dict()
         data["timeline"] = public_session["timeline"]
         data["rollback_available"] = public_session["rollback_available"]
@@ -409,12 +551,24 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_result["timeline"] = data["timeline"]
             task_result["validation"] = data["validation"]
             task_result["validation_feedback"] = data["validation_feedback"]
+            task_result["completion_evidence"] = public_session["completion_evidence"]
+            task_result["execution_budget"] = public_session["execution_budget"]
+            task_run.acceptance_criteria = list(session.acceptance_criteria)
+            task_run.execution_usage = session.execution_usage
+            task_run.completion_evidence = session.completion_evidence
+            execution_exhausted = bool(public_session["execution_budget"]["exhausted"])
             if failed or rejected:
                 next_status = "repair_pending"
                 message = "Validation needs attention. Review feedback and generate a bounded repair proposal."
-            else:
+            elif execution_exhausted:
+                next_status = "failed"
+                message = "Execution evidence passed, but the configured execution budget was exceeded."
+            elif session.completion_evidence and session.completion_evidence.status == "passed":
                 next_status = "completed"
-                message = "Approved changes were applied and validation completed successfully."
+                message = "Approved changes, validation, and required acceptance criteria completed successfully."
+            else:
+                next_status = "failed"
+                message = "Approved edits finished, but required completion evidence is incomplete."
             task_run.result = task_result
             task_run.error = None
             if task_run.cancel_requested:
@@ -609,6 +763,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 iterative_agent=_payload_iterative_agent(payload),
                 agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
+                execution_budget=session.execution_budget,
             )
         except Exception as exc:
             if task_run:
@@ -634,6 +789,16 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 parent_proposal_id=proposal_id,
                 repair_attempt=next_repair_attempt,
                 max_repair_attempts=session.max_repair_attempts,
+                acceptance_criteria=session.acceptance_criteria,
+                execution_budget=session.execution_budget,
+                execution_usage=session.execution_usage.add(
+                    agent_steps=int(report.execution_budget.get("usage", {}).get("agent_steps", 0)),
+                    tool_calls=int(report.execution_budget.get("usage", {}).get("tool_calls", 0)),
+                    validation_commands=int(
+                        report.execution_budget.get("usage", {}).get("validation_commands", 0)
+                    ),
+                    elapsed_ms=int(report.execution_budget.get("usage", {}).get("elapsed_ms", 0)),
+                ),
             )
             repair_proposal_id = repair_session.proposal_id
             append_timeline(
@@ -945,6 +1110,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             _payload_max_repair_attempts(payload)
+            execution_budget = _payload_execution_budget(payload)
+            _validate_validation_budget(validation, execution_budget)
             llm_client = _payload_llm_client(payload)
         except (ValueError, LLMError) as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -952,7 +1119,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         repo_source = self._resolve_payload_repository_or_error(payload)
         if repo_source is None:
             return
-        task_run = create_task_run(repo_source.local_path, task, validation)
+        task_run = create_task_run(
+            repo_source.local_path,
+            task,
+            validation,
+            execution_budget=execution_budget,
+        )
         try:
             self._persist_task_run(task_run)
             self._launch_task_run_worker(task_run, payload, llm_client, reuse_sandbox=False)
@@ -1145,15 +1317,22 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 memory_context=memory_context,
                 agent_run_id=task_run.run_id,
                 agent_event_store=runtime_store,
+                execution_budget=task_run.execution_budget,
+            )
+            task_run.acceptance_criteria = criteria_from_records(report.acceptance_criteria)
+            task_run.execution_usage = ExecutionUsage.from_dict(
+                report.execution_budget.get("usage")
             )
             timeline = build_report_timeline(report)
             proposal = report.patch_proposal
             proposal_id = None
             proposal_session = None
-            if proposal and proposal.file_edits and proposal.apply_ready:
+            budget_exhausted = bool(report.execution_budget.get("exhausted"))
+            if proposal and proposal.file_edits and proposal.apply_ready and not budget_exhausted:
                 validation_commands = task_run.validation_commands or (
                     proposal.validation_plan.commands if proposal.validation_plan else []
                 )
+                _validate_validation_budget(validation_commands, task_run.execution_budget)
                 proposal_session = create_proposal_session(
                     repo_path=report.repo_path,
                     task=task_run.task,
@@ -1162,7 +1341,15 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     timeline=timeline,
                     allowed_paths=[file.path for file in proposal.files],
                     max_repair_attempts=_payload_max_repair_attempts(payload),
+                    acceptance_criteria=build_acceptance_criteria(
+                        task_run.task,
+                        [edit.path for edit in proposal.file_edits],
+                        validation_commands,
+                    ),
+                    execution_budget=task_run.execution_budget,
+                    execution_usage=task_run.execution_usage,
                 )
+                task_run.acceptance_criteria = list(proposal_session.acceptance_criteria)
                 proposal_id = proposal_session.proposal_id
                 append_timeline(
                     proposal_session,
@@ -1210,10 +1397,22 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_run.result = data
             task_run.proposal_id = proposal_id
             task_run.history_run_id = history_run_id
+            task_run.completion_evidence = (
+                proposal_session.completion_evidence
+                if proposal_session
+                else completion_from_record(report.completion_evidence)
+            )
             if task_run.cancel_requested:
                 checkpoint_task_run(task_run, "awaiting_approval" if proposal_id else "completed")
             elif task_run.pause_requested and proposal_id:
                 checkpoint_task_run(task_run, "awaiting_approval")
+            elif budget_exhausted:
+                update_task_run(
+                    task_run,
+                    "failed",
+                    "Execution budget was exhausted before the approval checkpoint.",
+                    error="; ".join(report.execution_budget.get("exhausted_reasons", [])),
+                )
             elif proposal_id:
                 update_task_run(task_run, "awaiting_approval", "Proposal ready. Waiting for human approval.")
             else:
@@ -1286,6 +1485,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             max_repair_attempts = _payload_max_repair_attempts(payload)
+            execution_budget = _payload_execution_budget(payload)
+            _validate_validation_budget(validation, execution_budget)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -1322,6 +1523,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 iterative_agent=_payload_iterative_agent(payload),
                 agent_max_steps=_payload_agent_max_steps(payload),
                 use_memory=_payload_use_memory(payload),
+                execution_budget=execution_budget,
             )
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -1331,6 +1533,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         proposal = report.patch_proposal
         if proposal and proposal.file_edits and proposal.apply_ready:
             validation_commands = validation or (proposal.validation_plan.commands if proposal.validation_plan else [])
+            _validate_validation_budget(validation_commands, execution_budget)
             session = create_proposal_session(
                 repo_path=report.repo_path,
                 task=task,
@@ -1339,6 +1542,13 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 timeline=timeline,
                 allowed_paths=[file.path for file in proposal.files],
                 max_repair_attempts=max_repair_attempts,
+                acceptance_criteria=build_acceptance_criteria(
+                    task,
+                    [edit.path for edit in proposal.file_edits],
+                    validation_commands,
+                ),
+                execution_budget=execution_budget,
+                execution_usage=ExecutionUsage.from_dict(report.execution_budget.get("usage")),
             )
             proposal_id = session.proposal_id
             append_timeline(session, "approval", "pending", f"Waiting for approval on proposal {proposal_id}.")
@@ -1620,6 +1830,61 @@ def _payload_agent_max_steps(payload: dict[str, Any]) -> int:
     if value <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
     return min(value, 12)
+
+
+def _payload_execution_budget(payload: dict[str, Any]) -> ExecutionBudget:
+    return ExecutionBudget(
+        max_agent_steps=_payload_agent_max_steps(payload),
+        max_tool_calls=_payload_positive_int(
+            payload,
+            "agent_max_tool_calls",
+            default=12,
+            maximum=24,
+            label="Agent max tool calls",
+        ),
+        max_validation_commands=_payload_positive_int(
+            payload,
+            "max_validation_commands",
+            default=4,
+            maximum=16,
+            label="Validation command limit",
+        ),
+        max_elapsed_seconds=_payload_positive_int(
+            payload,
+            "execution_timeout_seconds",
+            default=600,
+            maximum=3600,
+            label="Execution timeout",
+        ),
+    )
+
+
+def _payload_positive_int(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    maximum: int,
+    label: str,
+) -> int:
+    raw = payload.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be an integer.") from exc
+    if value <= 0:
+        raise ValueError(f"{label} must be greater than 0.")
+    return min(value, maximum)
+
+
+def _validate_validation_budget(commands: list[str], budget: ExecutionBudget) -> None:
+    if len(commands) > budget.max_validation_commands:
+        raise ValueError(
+            f"Validation command count {len(commands)} exceeds the configured limit "
+            f"of {budget.max_validation_commands}."
+        )
 
 
 def _payload_max_repair_attempts(payload: dict[str, Any]) -> int:

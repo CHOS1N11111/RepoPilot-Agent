@@ -334,6 +334,12 @@ function renderTaskRun(taskRun) {
     ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
     : "No delivery branch created.";
   renderTaskRunPhases(taskRun);
+  $("taskRunCriteria").innerHTML = renderAcceptanceCriteria(
+    taskRun.acceptance_criteria || [],
+    taskRun.completion_evidence
+  );
+  $("taskRunBudget").innerHTML = renderExecutionBudget(taskRun.execution_budget);
+  $("taskRunEvidence").innerHTML = renderCompletionEvidence(taskRun.completion_evidence);
   const events = taskRun.events || [];
   $("taskRunEvents").innerHTML = events.length
     ? events
@@ -549,6 +555,9 @@ function buildWorkflowPayload() {
     use_memory: !$("disableMemory").checked,
     iterative_agent: $("iterativeAgent").checked,
     agent_max_steps: $("agentMaxSteps").value.trim(),
+    agent_max_tool_calls: $("agentMaxToolCalls").value.trim(),
+    max_validation_commands: $("maxValidationCommands").value.trim(),
+    execution_timeout_seconds: $("executionTimeoutSeconds").value.trim(),
     max_repair_attempts: $("repairMaxAttempts").value.trim(),
   };
 }
@@ -938,6 +947,12 @@ function renderReport(report, payload) {
   $("agentStepList").innerHTML = renderAgentSteps(report.agent_steps || []);
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
+  $("acceptanceCriteriaList").innerHTML = renderAcceptanceCriteria(
+    report.acceptance_criteria || [],
+    report.completion_evidence
+  );
+  $("executionBudgetList").innerHTML = renderExecutionBudget(report.execution_budget);
+  $("completionEvidenceList").innerHTML = renderCompletionEvidence(report.completion_evidence);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
@@ -989,6 +1004,63 @@ function renderRepositoryMap(repositoryMap) {
     </div>`;
   }).join("");
   return metrics + (entries || item("No task-specific map entries were ranked."));
+}
+
+function renderAcceptanceCriteria(criteria, completionEvidence) {
+  if (!criteria || criteria.length === 0) {
+    return item("No explicit acceptance criteria were generated for this run.");
+  }
+  const evidenceById = new Map(
+    (completionEvidence?.criteria || []).map((entry) => [entry.criterion_id, entry])
+  );
+  return criteria.map((criterion) => {
+    const evidence = evidenceById.get(criterion.criterion_id);
+    const status = evidence?.status || "pending";
+    const tagClass = status === "passed" ? "ok" : status === "failed" ? "danger" : "warn";
+    return `<div class="item">
+      <div class="item-title">${escapeHtml(criterion.description)}
+        <span class="tag">${escapeHtml(criterion.kind || "criterion")}</span>
+        <span class="tag ${tagClass}">${escapeHtml(status)}</span>
+      </div>
+      <p><small>${criterion.required ? "Required" : "Advisory"}${evidence?.summary ? ` - ${escapeHtml(evidence.summary)}` : ""}</small></p>
+    </div>`;
+  }).join("");
+}
+
+function renderExecutionBudget(budgetState) {
+  if (!budgetState?.limits || !budgetState?.usage) {
+    return item("No execution budget data is available.");
+  }
+  const limits = budgetState.limits;
+  const usage = budgetState.usage;
+  const reasons = (budgetState.exhausted_reasons || [])
+    .map((reason) => `<li>${escapeHtml(reason)}</li>`)
+    .join("");
+  return `<div class="item">
+    <div class="item-title">Execution Budget
+      <span class="tag ${budgetState.exhausted ? "danger" : "ok"}">${budgetState.exhausted ? "exhausted" : "within budget"}</span>
+    </div>
+    <p>Agent steps ${escapeHtml(usage.agent_steps)}/${escapeHtml(limits.max_agent_steps)}; tool calls ${escapeHtml(usage.tool_calls)}/${escapeHtml(limits.max_tool_calls)}.</p>
+    <p>Validation ${escapeHtml(usage.validation_commands)}/${escapeHtml(limits.max_validation_commands)}; active time ${escapeHtml(Math.round((usage.elapsed_ms || 0) / 1000))}/${escapeHtml(limits.max_elapsed_seconds)} seconds.</p>
+    ${reasons ? `<ul>${reasons}</ul>` : ""}
+  </div>`;
+}
+
+function renderCompletionEvidence(evidence) {
+  if (!evidence) {
+    return item("Completion evidence has not been collected.");
+  }
+  const statusClass = evidence.status === "passed" ? "ok" : evidence.status === "failed" ? "danger" : "warn";
+  const files = renderList(evidence.changed_files, "No changed files recorded.");
+  const validation = renderList(evidence.validation_commands, "No automated validation command recorded.");
+  return `<div class="item">
+    <div class="item-title">${escapeHtml(evidence.summary || "Completion evidence")}
+      <span class="tag ${statusClass}">${escapeHtml(evidence.status || "pending")}</span>
+    </div>
+    <p><small>Diff evidence: ${evidence.diff_available ? "available" : "not available"}</small></p>
+    <strong>Changed files</strong><ul>${files}</ul>
+    <strong>Validation commands</strong><ul>${validation}</ul>
+  </div>`;
 }
 
 function renderMemoryContext(memory) {
@@ -1558,7 +1630,7 @@ function buildLlmInputPreview(report, payload) {
     .slice(0, 5)
     .map((hit) => `Path: ${hit.path}\nScore: ${hit.score}\nReasons: ${hit.reasons.join(", ")}\nPreview:\n${hit.preview}`)
     .join("\n\n---\n\n");
-  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nUse memory: ${payload.use_memory}\nIterative agent: ${payload.iterative_agent}\nAgent max steps: ${payload.agent_max_steps || "(default)"}\nModel: ${payload.model || "(default)"}\nTimeout: ${payload.timeout_seconds || "(default)"} seconds\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
+  return `Repository source: ${payload.repo_source}\nRepository input: ${payload.repo}\nGitHub URL: ${payload.github_url || "(none)"}\nBranch: ${payload.branch || "(default)"}\nUse LLM: ${payload.use_llm}\nUse memory: ${payload.use_memory}\nIterative agent: ${payload.iterative_agent}\nAgent max steps: ${payload.agent_max_steps || "(default)"}\nAgent max tool calls: ${payload.agent_max_tool_calls || "(default)"}\nValidation command limit: ${payload.max_validation_commands || "(default)"}\nExecution timeout: ${payload.execution_timeout_seconds || "(default)"} seconds\nModel: ${payload.model || "(default)"}\nLLM timeout: ${payload.timeout_seconds || "(default)"} seconds\nTask: ${payload.task}\n\nRelevant context:\n${context || "No context selected."}`;
 }
 
 function buildLlmOutputPreview(report) {

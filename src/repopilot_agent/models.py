@@ -384,6 +384,9 @@ class WorkflowReport:
     validation_feedback: ValidationFeedback | None = None
     memory_context: list[MemoryContextItem] = field(default_factory=list)
     repository_map: dict[str, Any] = field(default_factory=dict)
+    acceptance_criteria: list[dict[str, Any]] = field(default_factory=list)
+    execution_budget: dict[str, Any] = field(default_factory=dict)
+    completion_evidence: dict[str, Any] = field(default_factory=dict)
     summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
