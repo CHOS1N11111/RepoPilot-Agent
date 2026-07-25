@@ -169,6 +169,17 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("function renderExecutionBudget", self.app_js)
         self.assertIn("function renderCompletionEvidence", self.app_js)
 
+    def test_autonomous_repair_controls_and_progress_are_visible(self) -> None:
+        for element_id in ["autoRepair", "repairLoopList", "taskRunRepairLoop"]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        self.assertIn("auto_repair: $(\"autoRepair\").checked", self.app_js)
+        self.assertIn("function buildRepairAutomationPayload", self.app_js)
+        self.assertIn("function renderRepairLoop", self.app_js)
+        self.assertIn("repair_stop_reason", self.app_js)
+        self.assertIn('"diagnosing", "replanning"', self.app_js)
+        self.assertIn('taskRun.status === "repair_pending"', self.app_js)
+        self.assertIn('status === "failed" && taskRun.repair_stop_reason', self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

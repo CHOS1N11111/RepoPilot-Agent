@@ -511,7 +511,7 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
 6. At `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
 7. Select the approved files and click `Apply Proposal`.
-8. If validation fails, inspect the feedback and generate a bounded repair proposal.
+8. Leave `Auto-generate repairs` enabled to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
 9. When the run reaches `completed`, inspect the final working Diff.
 10. Optionally enter a feature branch name and click `Create Branch`.
 
@@ -524,6 +524,10 @@ The advanced task settings include four execution limits: Agent steps, tool call
 Acceptance criteria are generated from the task, proposal file scope, and validation commands. After apply, the Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded. A missing automated validation command is shown as a manual-review recommendation rather than silently presented as automated proof.
 
 Existing UTF-8 proposal files are converted from full replacement content into exact-text structured hunks. Each patch carries the file's proposal-time SHA-256. If the file changes before approval, RepoPilot rejects the patch instead of overwriting the newer content. If a later file conflicts during a multi-file apply, earlier writes from that apply attempt are restored from the captured snapshots.
+
+When automatic repair is enabled, the apply request passes the current LLM settings directly to a background worker. The API key remains request-scoped and is not stored in SQLite. The task moves from `validating` to `diagnosing`, then `replanning`. A successful generation returns the task to `awaiting_approval`; inspect the new diff before approving it. RepoPilot never automatically applies a generated repair.
+
+The Repair Loop panels show each attempt's trigger failure fingerprint, proposal fingerprint, resulting failure fingerprint, status, and affected paths. Fingerprints are hashes of normalized evidence, not complete test logs. The loop stops with an explicit reason when validation repeats unchanged, a proposal repeats, a proposal is a no-op, no safe proposal is generated, or retry/execution capacity is exhausted. Stopped LLM analyses remain available in History, including their traces.
 
 `Pause` and `Cancel` are checkpoint operations. They take effect after the current safe operation returns, so they do not terminate an in-flight LLM HTTP request or interrupt a file write halfway through. Paused, cancelled, failed, and server-interrupted runs preserve their sandboxes. Use `Resume` to restart analysis with the current Web LLM settings or return to a saved approval checkpoint.
 

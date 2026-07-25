@@ -30,6 +30,8 @@ from repopilot_agent.task_runs import (
     task_run_from_record,
     update_task_run,
 )
+from repopilot_agent.models import ValidationResult
+from repopilot_agent.repair_loop import record_validation_outcome
 from repopilot_agent.worktree_sandbox import create_worktree_sandbox, remove_worktree_sandbox
 
 
@@ -134,6 +136,26 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(restored.acceptance_criteria[0].criterion_id, "task_change")
             self.assertEqual(restored.completion_evidence.status, "pending")
             self.assertEqual(public["execution_budget"]["remaining"]["tool_calls"], 4)
+
+    def test_repair_loop_state_round_trips_with_automation_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [], auto_repair_enabled=True)
+            task_run.repair_history, _ = record_validation_outcome(
+                [],
+                attempt=0,
+                validation=[ValidationResult("python -m unittest", True, 1, "", "failed")],
+                summary="Validation failed.",
+            )
+            task_run.repair_stop_reason = "repeated_validation_failure"
+            task_run.repair_stop_message = "No progress."
+
+            restored = task_run_from_record(task_run.to_record())
+            public = restored.to_public_dict()
+
+            self.assertTrue(restored.auto_repair_enabled)
+            self.assertEqual(restored.repair_history, task_run.repair_history)
+            self.assertEqual(public["repair_stop_reason"], "repeated_validation_failure")
+            self.assertEqual(public["repair_stop_message"], "No progress.")
 
     def test_repository_memory_uses_local_git_exclude(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

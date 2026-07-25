@@ -29,9 +29,18 @@ from repopilot_agent.models import (
     PatchProposalMetadata,
     PlanMetadata,
     ValidationFeedback,
+    ValidationResult,
     WorkflowReport,
 )
 from repopilot_agent.repo_source import RepositorySource
+from repopilot_agent.repair_loop import (
+    STOP_EXECUTION_BUDGET,
+    STOP_REPEATED_FAILURE,
+    STOP_REPEATED_PROPOSAL,
+    RepairLoopStopped,
+    record_repair_proposal,
+    record_validation_outcome,
+)
 from repopilot_agent.task_runs import clear_task_runs, create_task_run, update_task_run
 from repopilot_agent.structured_patch import apply_structured_patch as apply_exact_patch
 from repopilot_agent.web_server import (
@@ -40,6 +49,7 @@ from repopilot_agent.web_server import (
     _payload_approved_paths,
     _payload_execution_budget,
     _payload_max_repair_attempts,
+    _remaining_repair_execution_budget,
     _validate_validation_budget,
 )
 from repopilot_agent.web_sessions import clear_proposal_sessions, create_proposal_session, proposal_session_to_record
@@ -49,6 +59,7 @@ from repopilot_agent.worktree_sandbox import (
     WorktreeSandbox,
     remove_worktree_sandbox,
 )
+from repopilot_agent.validator import run_validation
 
 
 class FakeLLMClient(LLMClient):
@@ -153,6 +164,30 @@ class ExecutionBudgetPayloadTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "exceeds the configured limit"):
             _validate_validation_budget(["python -m unittest", "python -m compileall src"], budget)
+
+    def test_iterative_repair_requires_capacity_after_apply_and_validation_reserve(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="repair notes",
+                file_edits=[FileEditProposal("notes.txt", "new\n", "Repair notes.")],
+                validation_commands=["python -m unittest"],
+                timeline=[],
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=2,
+                    max_tool_calls=2,
+                    max_validation_commands=1,
+                    max_elapsed_seconds=60,
+                ),
+            )
+
+            non_iterative = _remaining_repair_execution_budget(session, iterative_agent=False)
+            self.assertEqual(non_iterative.max_tool_calls, 1)
+            with self.assertRaises(RepairLoopStopped) as raised:
+                _remaining_repair_execution_budget(session, iterative_agent=True)
+            self.assertEqual(raised.exception.reason, STOP_EXECUTION_BUDGET)
 
     def test_payload_approved_paths_rejects_unknown_or_unsafe_paths(self) -> None:
         cases = [
@@ -1976,6 +2011,352 @@ class WebServerTests(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=5)
                 server.server_close()
+
+
+    def test_failed_task_apply_launches_automatic_repair_without_persisting_credentials(self) -> None:
+        clear_task_runs()
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[FileEditProposal("notes.txt", "new\n", "Update notes.")],
+                validation_commands=["python -m unittest missing_auto_repair_suite"],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+                auto_repair_enabled=True,
+            )
+            task_run = create_task_run(
+                root,
+                "update notes",
+                session.validation_commands,
+                auto_repair_enabled=True,
+            )
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Proposal ready.",
+                proposal_id=session.proposal_id,
+                sandbox_path=str(root),
+                result={"proposal_id": session.proposal_id},
+            )
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                payload = {
+                    "repo": str(root),
+                    "repo_source": "local",
+                    "proposal_id": session.proposal_id,
+                    "task_run_id": task_run.run_id,
+                    "source_repo": str(root),
+                    "approved_paths": ["notes.txt"],
+                    "auto_repair": True,
+                    "use_llm": True,
+                    "api_key": "request-only-secret-key",
+                }
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_auto_repair_worker") as launch:
+                    with urlopen(request, timeout=10) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["task_run"]["status"], "diagnosing")
+                self.assertTrue(data["task_run"]["auto_repair_enabled"])
+                self.assertEqual(data["repair_history"][0]["status"], "validation_failed")
+                launch.assert_called_once()
+                persisted = store.get_task_run(task_run.run_id)
+                self.assertNotIn("request-only-secret-key", json.dumps(persisted))
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+                clear_proposal_sessions()
+
+    def test_repeated_failure_stops_task_before_another_automatic_repair(self) -> None:
+        clear_task_runs()
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            (root / "test_fail.py").write_text(
+                "import unittest\n\n"
+                "class LoopTests(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        self.assertEqual(1, 2)\n",
+                encoding="utf-8",
+            )
+            command = "python -m unittest test_fail"
+            initial_validation = run_validation(root, [command])
+            history, initial = record_validation_outcome(
+                [],
+                attempt=0,
+                validation=initial_validation,
+                summary="Initial failure.",
+            )
+            repair_edit = FileEditProposal("notes.txt", "new\n", "Repair notes.")
+            history, _ = record_repair_proposal(
+                history,
+                attempt=1,
+                trigger_failure_fingerprint=initial.fingerprint,
+                edits=[repair_edit],
+                summary="First repair.",
+            )
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="repair notes",
+                root_task="update notes",
+                file_edits=[repair_edit],
+                validation_commands=[command],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+                repair_attempt=1,
+                max_repair_attempts=2,
+                repair_history=history,
+                auto_repair_enabled=True,
+            )
+            task_run = create_task_run(root, "update notes", [command], auto_repair_enabled=True)
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Repair proposal ready.",
+                proposal_id=session.proposal_id,
+                sandbox_path=str(root),
+                result={"proposal_id": session.proposal_id},
+            )
+            MemoryStore(default_memory_path(root)).save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=json.dumps(
+                        {
+                            "repo": str(root),
+                            "repo_source": "local",
+                            "proposal_id": session.proposal_id,
+                            "task_run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "approved_paths": ["notes.txt"],
+                            "auto_repair": True,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_auto_repair_worker") as launch:
+                    with urlopen(request, timeout=10) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(data["task_run"]["status"], "failed")
+                self.assertEqual(data["repair_stop_reason"], STOP_REPEATED_FAILURE)
+                self.assertEqual(data["repair_history"][-1]["status"], "stopped")
+                launch.assert_not_called()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+                clear_proposal_sessions()
+
+    def test_automatic_repair_worker_generates_proposal_but_waits_for_human_approval(self) -> None:
+        clear_task_runs()
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True, text=True)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            failing_test = root / "test_fail.py"
+            failing_test.write_text(
+                "import unittest\n\n"
+                "class AutoRepairTests(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        self.assertTrue(False)\n",
+                encoding="utf-8",
+            )
+            command = "python -m unittest test_fail"
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="update notes",
+                file_edits=[FileEditProposal("notes.txt", "new\n", "Update notes.")],
+                validation_commands=[command],
+                timeline=[],
+                allowed_paths=["notes.txt"],
+                auto_repair_enabled=True,
+            )
+            task_run = create_task_run(root, "update notes", [command], auto_repair_enabled=True)
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Proposal ready.",
+                proposal_id=session.proposal_id,
+                sandbox_path=str(root),
+                result={"proposal_id": session.proposal_id},
+            )
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            fake = FakeLLMClient(
+                [
+                    '{"steps":[{"title":"Inspect failure","detail":"Review test_fail.py."}]}',
+                    '{"objective":"Repair failed validation","files":[{"path":"test_fail.py",'
+                    '"change_type":"test","rationale":"test_fail.py contains the failure.",'
+                    '"suggested_actions":["Correct the failing assertion"],"confidence":"high"}],'
+                    '"risks":[],"validation_suggestions":["python -m unittest test_fail"],'
+                    '"ready_for_patch":true,"file_edits":[{"path":"test_fail.py",'
+                    '"new_content":"import unittest\\n\\nclass AutoRepairTests(unittest.TestCase):\\n'
+                    '    def test_failure(self):\\n        self.assertTrue(True)\\n",'
+                    '"rationale":"Repair the failed validation."}]}',
+                    '{"summary":"The repair targets the failing validation.","risk_level":"low",'
+                    '"concerns":[],"suggested_tests":["python -m unittest test_fail"],'
+                    '"approved_for_apply":true}',
+                ]
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/apply",
+                    data=json.dumps(
+                        {
+                            "repo": str(root),
+                            "repo_source": "local",
+                            "proposal_id": session.proposal_id,
+                            "task_run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "approved_paths": ["notes.txt"],
+                            "auto_repair": True,
+                            "use_llm": True,
+                            "api_key": "request-only-auto-key",
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch("repopilot_agent.web_server.OpenAICompatibleClient", return_value=fake):
+                    with urlopen(request, timeout=10) as response:
+                        applied = json.loads(response.read().decode("utf-8"))
+                    deadline = time.time() + 10
+                    while task_run.status in {"diagnosing", "replanning"} and time.time() < deadline:
+                        time.sleep(0.05)
+
+                self.assertEqual(applied["task_run"]["status"], "diagnosing")
+                self.assertEqual(task_run.status, "awaiting_approval")
+                self.assertNotEqual(task_run.proposal_id, session.proposal_id)
+                self.assertEqual(task_run.repair_history[-1].status, "proposal_ready")
+                self.assertEqual(fake.responses, [])
+                self.assertIn("self.assertTrue(False)", failing_test.read_text(encoding="utf-8"))
+                self.assertNotIn("request-only-auto-key", json.dumps(store.get_task_run(task_run.run_id)))
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+                clear_proposal_sessions()
+
+    def test_repair_api_stops_when_llm_repeats_an_earlier_proposal(self) -> None:
+        clear_proposal_sessions()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "notes.txt").write_text("old\n", encoding="utf-8")
+            first_failure = [ValidationResult("python -m unittest", True, 1, "", "first failure")]
+            changed_failure = [ValidationResult("python -m unittest", True, 1, "", "changed failure")]
+            history, initial = record_validation_outcome(
+                [],
+                attempt=0,
+                validation=first_failure,
+                summary="Initial failure.",
+            )
+            repeated_edit = FileEditProposal("notes.txt", "repair\n", "Repair notes.")
+            history, _ = record_repair_proposal(
+                history,
+                attempt=1,
+                trigger_failure_fingerprint=initial.fingerprint,
+                edits=[repeated_edit],
+                summary="First repair.",
+            )
+            history, _ = record_validation_outcome(
+                history,
+                attempt=1,
+                validation=changed_failure,
+                summary="Failure changed.",
+            )
+            session = create_proposal_session(
+                repo_path=str(root),
+                task="repair notes",
+                root_task="update notes",
+                file_edits=[FileEditProposal("notes.txt", "old\n", "Applied state.")],
+                validation_commands=["python -m unittest"],
+                timeline=[],
+                repair_attempt=1,
+                max_repair_attempts=3,
+                repair_history=history,
+            )
+            session.applied = True
+            session.validation = changed_failure
+            session.validation_feedback = ValidationFeedback(
+                summary="Validation changed but still fails.",
+                failures=[],
+                suspected_files=["notes.txt"],
+                repair_steps=["Try a different repair."],
+                repair_task="repair notes after changed validation failure",
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                fake = FakeLLMClient(
+                    [
+                        '{"steps":[{"title":"Inspect notes","detail":"Review notes.txt."}]}',
+                        '{"objective":"Repeat repair","files":[{"path":"notes.txt","change_type":"bugfix",'
+                        '"rationale":"notes.txt remains relevant.","suggested_actions":["Repeat repair"],'
+                        '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest"],'
+                        '"ready_for_patch":true,"file_edits":[{"path":"notes.txt","new_content":"repair\\n",'
+                        '"rationale":"Repair notes."}]}',
+                        '{"summary":"Focused repair.","risk_level":"low","concerns":[],'
+                        '"suggested_tests":["python -m unittest"],"approved_for_apply":true}',
+                    ]
+                )
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/repair/propose",
+                    data=json.dumps(
+                        {"proposal_id": session.proposal_id, "use_llm": True, "api_key": "test-key"}
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch("repopilot_agent.web_server.OpenAICompatibleClient", return_value=fake):
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(request, timeout=10)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 409)
+                self.assertEqual(data["repair_stop_reason"], STOP_REPEATED_PROPOSAL)
+                self.assertEqual(data["repair_history"][-1]["status"], "stopped")
+                self.assertEqual((root / "notes.txt").read_text(encoding="utf-8"), "old\n")
+                saved_repairs = [
+                    item for item in MemoryStore(default_memory_path(root)).list_runs() if item["mode"] == "repair"
+                ]
+                self.assertEqual(len(saved_repairs), 1)
+                saved_detail = MemoryStore(default_memory_path(root)).get_run(saved_repairs[0]["id"])
+                self.assertEqual(len(saved_detail["llm_traces"]), 3)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_proposal_sessions()
 
 
 if __name__ == "__main__":

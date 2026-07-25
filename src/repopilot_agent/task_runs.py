@@ -19,6 +19,7 @@ from .execution import (
     criteria_from_records,
     execution_budget_state,
 )
+from .repair_loop import RepairAttemptRecord, repair_attempts_from_records
 from .worktree_sandbox import WorktreeSandboxError, list_worktree_sandboxes
 
 
@@ -29,6 +30,8 @@ TASK_RUN_STATUSES = {
     "awaiting_approval",
     "applying",
     "validating",
+    "diagnosing",
+    "replanning",
     "repair_pending",
     "pausing",
     "paused",
@@ -45,6 +48,8 @@ ACTIVE_TASK_RUN_STATUSES = {
     "exploring",
     "applying",
     "validating",
+    "diagnosing",
+    "replanning",
     "pausing",
     "cancelling",
 }
@@ -88,6 +93,10 @@ class TaskRun:
     execution_budget: ExecutionBudget = field(default_factory=ExecutionBudget)
     execution_usage: ExecutionUsage = field(default_factory=ExecutionUsage)
     completion_evidence: CompletionEvidence | None = None
+    repair_history: list[RepairAttemptRecord] = field(default_factory=list)
+    repair_stop_reason: str | None = None
+    repair_stop_message: str = ""
+    auto_repair_enabled: bool = False
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,6 +117,7 @@ class TaskRun:
         data["completion_evidence"] = (
             self.completion_evidence.to_dict() if self.completion_evidence else None
         )
+        data["repair_history"] = [item.to_dict() for item in self.repair_history]
         return data
 
 
@@ -120,6 +130,7 @@ def create_task_run(
     task: str,
     validation_commands: list[str],
     execution_budget: ExecutionBudget | None = None,
+    auto_repair_enabled: bool = False,
 ) -> TaskRun:
     now = _now()
     task_run = TaskRun(
@@ -131,6 +142,7 @@ def create_task_run(
         updated_at=now,
         events=[TaskRunEvent("queued", "Task run queued.", now)],
         execution_budget=execution_budget or ExecutionBudget(),
+        auto_repair_enabled=auto_repair_enabled,
     )
     return cache_task_run(task_run)
 
@@ -180,6 +192,10 @@ def task_run_from_record(record: dict[str, Any], mark_interrupted: bool = False)
         execution_budget=ExecutionBudget.from_dict(record.get("execution_budget")),
         execution_usage=ExecutionUsage.from_dict(record.get("execution_usage")),
         completion_evidence=completion_from_record(record.get("completion_evidence")),
+        repair_history=repair_attempts_from_records(record.get("repair_history")),
+        repair_stop_reason=_optional_string(record.get("repair_stop_reason")),
+        repair_stop_message=str(record.get("repair_stop_message") or ""),
+        auto_repair_enabled=bool(record.get("auto_repair_enabled", False)),
     )
     if mark_interrupted and task_run.status in ACTIVE_TASK_RUN_STATUSES:
         update_task_run(

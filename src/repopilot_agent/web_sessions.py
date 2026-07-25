@@ -21,6 +21,7 @@ from .execution import (
 )
 from .models import FileEditProposal, ValidationFailureDetail, ValidationFeedback, ValidationResult
 from .patch_apply import FileRollbackSnapshot
+from .repair_loop import RepairAttemptRecord, repair_attempts_from_records
 from .structured_patch import StructuredPatch, build_structured_patch, structured_patch_from_record
 
 
@@ -59,6 +60,11 @@ class ProposalSession:
     execution_budget: ExecutionBudget = field(default_factory=ExecutionBudget)
     execution_usage: ExecutionUsage = field(default_factory=ExecutionUsage)
     completion_evidence: CompletionEvidence | None = None
+    root_task: str = ""
+    repair_history: list[RepairAttemptRecord] = field(default_factory=list)
+    repair_stop_reason: str | None = None
+    repair_stop_message: str = ""
+    auto_repair_enabled: bool = False
 
     def repair_budget_remaining(self) -> int:
         return max(self.max_repair_attempts - self.repair_attempt, 0)
@@ -106,6 +112,11 @@ class ProposalSession:
             "completion_evidence": (
                 self.completion_evidence.to_dict() if self.completion_evidence else None
             ),
+            "root_task": self.root_task or self.task,
+            "repair_history": [item.to_dict() for item in self.repair_history],
+            "repair_stop_reason": self.repair_stop_reason,
+            "repair_stop_message": self.repair_stop_message,
+            "auto_repair_enabled": self.auto_repair_enabled,
         }
 
 
@@ -125,6 +136,11 @@ def create_proposal_session(
     acceptance_criteria: list[AcceptanceCriterion] | None = None,
     execution_budget: ExecutionBudget | None = None,
     execution_usage: ExecutionUsage | None = None,
+    root_task: str | None = None,
+    repair_history: list[RepairAttemptRecord] | None = None,
+    repair_stop_reason: str | None = None,
+    repair_stop_message: str = "",
+    auto_repair_enabled: bool = False,
 ) -> ProposalSession:
     proposal_id = uuid4().hex
     criteria = acceptance_criteria or build_acceptance_criteria(
@@ -150,6 +166,11 @@ def create_proposal_session(
         execution_budget=budget,
         execution_usage=execution_usage or ExecutionUsage(),
         completion_evidence=pending_completion_evidence(criteria),
+        root_task=(root_task or task).strip(),
+        repair_history=list(repair_history or []),
+        repair_stop_reason=repair_stop_reason,
+        repair_stop_message=repair_stop_message,
+        auto_repair_enabled=auto_repair_enabled,
     )
     _SESSIONS[proposal_id] = session
     return session
@@ -195,6 +216,11 @@ def proposal_session_to_record(session: ProposalSession) -> dict[str, Any]:
         "completion_evidence": (
             session.completion_evidence.to_dict() if session.completion_evidence else None
         ),
+        "root_task": session.root_task or session.task,
+        "repair_history": [item.to_dict() for item in session.repair_history],
+        "repair_stop_reason": session.repair_stop_reason,
+        "repair_stop_message": session.repair_stop_message,
+        "auto_repair_enabled": session.auto_repair_enabled,
     }
 
 
@@ -230,6 +256,11 @@ def proposal_session_from_record(record: dict[str, Any]) -> ProposalSession:
         execution_budget=ExecutionBudget.from_dict(record.get("execution_budget")),
         execution_usage=ExecutionUsage.from_dict(record.get("execution_usage")),
         completion_evidence=completion_from_record(record.get("completion_evidence")),
+        root_task=str(record.get("root_task") or record.get("task") or ""),
+        repair_history=repair_attempts_from_records(record.get("repair_history")),
+        repair_stop_reason=_optional_string(record.get("repair_stop_reason")),
+        repair_stop_message=str(record.get("repair_stop_message") or ""),
+        auto_repair_enabled=bool(record.get("auto_repair_enabled", False)),
     )
     if not session.acceptance_criteria:
         session.acceptance_criteria = build_acceptance_criteria(

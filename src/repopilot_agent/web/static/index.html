@@ -78,6 +78,10 @@
             <input id="iterativeAgent" type="checkbox" />
             Iterative agent
           </label>
+          <label class="checkbox">
+            <input id="autoRepair" type="checkbox" checked />
+            Auto-generate repairs
+          </label>
         </div>
 
         <label>
@@ -175,6 +179,8 @@
           <div id="taskRunBudget" class="stack"></div>
           <h2>Completion Evidence</h2>
           <div id="taskRunEvidence" class="stack"></div>
+          <h2>Repair Loop</h2>
+          <div id="taskRunRepairLoop" class="stack"></div>
           <h2>Local Feature Branch</h2>
           <div class="task-run-delivery">
             <input id="taskRunBranch" placeholder="feature/repopilot-task" />
@@ -222,6 +228,8 @@
           <div id="validationList" class="stack"></div>
           <h2>Validation Feedback</h2>
           <div id="validationFeedbackList" class="stack"></div>
+          <h2>Repair Loop</h2>
+          <div id="repairLoopList" class="stack"></div>
           <div class="toolbar">
             <button id="generateRepairProposal" class="secondary" disabled>Generate Repair Proposal</button>
           </div>

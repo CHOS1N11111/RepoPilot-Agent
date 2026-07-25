@@ -31,6 +31,20 @@ from .memory import MemoryStore, default_memory_path, ensure_local_state_ignored
 from .models import FileEditProposal
 from .patch_apply import ApplyResult, apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from .repo_source import resolve_repository_reference, sync_repository_reference
+from .repair_loop import (
+    STOP_EXECUTION_BUDGET,
+    STOP_NO_PROPOSAL,
+    STOP_NO_REPOSITORY_CHANGE,
+    STOP_REPAIR_BUDGET,
+    RepairAttemptRecord,
+    RepairLoopStopped,
+    latest_failure_fingerprint,
+    mark_repair_attempt_stopped,
+    proposal_changes_repository,
+    record_repair_proposal,
+    record_validation_outcome,
+    validation_feedback_fingerprint,
+)
 from .runtime import SQLiteRuntimeStore
 from .safety import SafetyCheckError
 from .task_runs import (
@@ -52,6 +66,7 @@ from .structured_patch import apply_structured_patch, current_file_sha256
 from .web_sessions import (
     DEFAULT_MAX_REPAIR_ATTEMPTS,
     ProposalSession,
+    TimelineEvent,
     append_timeline,
     build_report_timeline,
     create_proposal_session,
@@ -82,6 +97,11 @@ _SESSION_PUBLIC_KEYS = (
     "acceptance_criteria",
     "execution_budget",
     "completion_evidence",
+    "root_task",
+    "repair_history",
+    "repair_stop_reason",
+    "repair_stop_message",
+    "auto_repair_enabled",
 )
 
 
@@ -281,6 +301,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if session.applied:
             self._send_json({"error": "Proposal has already been applied."}, status=HTTPStatus.BAD_REQUEST)
             return
+        auto_repair_launch = False
         try:
             approved_paths = _payload_approved_paths(payload, session.file_edits)
         except ValueError as exc:
@@ -306,6 +327,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     status=HTTPStatus.CONFLICT,
                 )
                 return
+            if "auto_repair" in payload:
+                task_run.auto_repair_enabled = _payload_auto_repair(payload)
+                session.auto_repair_enabled = task_run.auto_repair_enabled
         active_budget = task_run.execution_budget if task_run else session.execution_budget
         active_usage = task_run.execution_usage if task_run else session.execution_usage
         current_budget_state = execution_budget_state(active_budget, active_usage)
@@ -483,6 +507,36 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 validation_commands=len(session.validation),
                 elapsed_ms=max(int((time.monotonic() - automated_started) * 1000), 0),
             )
+            if session.validation_feedback:
+                session.repair_history, repair_decision = record_validation_outcome(
+                    session.repair_history,
+                    attempt=session.repair_attempt,
+                    validation=session.validation,
+                    summary=session.validation_feedback.summary,
+                )
+                if not repair_decision.accepted:
+                    session.repair_stop_reason = repair_decision.stop_reason
+                    session.repair_stop_message = repair_decision.message
+                    append_timeline(session, "repair", "stopped", repair_decision.message)
+                elif session.repair_budget_exhausted():
+                    session.repair_stop_reason = STOP_REPAIR_BUDGET
+                    session.repair_stop_message = (
+                        f"Repair retry budget exhausted ({session.repair_attempt}/"
+                        f"{session.max_repair_attempts})."
+                    )
+                    append_timeline(session, "repair", "stopped", session.repair_stop_message)
+                else:
+                    session.repair_stop_reason = None
+                    session.repair_stop_message = ""
+            elif session.repair_attempt > 0 and session.validation_commands:
+                session.repair_history, _ = record_validation_outcome(
+                    session.repair_history,
+                    attempt=session.repair_attempt,
+                    validation=session.validation,
+                    summary="Validation passed after the approved repair.",
+                )
+                session.repair_stop_reason = None
+                session.repair_stop_message = ""
             session.completion_evidence = evaluate_completion(
                 session.acceptance_criteria,
                 changed_files=result.changed_files,
@@ -556,10 +610,25 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_run.acceptance_criteria = list(session.acceptance_criteria)
             task_run.execution_usage = session.execution_usage
             task_run.completion_evidence = session.completion_evidence
+            task_run.repair_history = list(session.repair_history)
+            task_run.repair_stop_reason = session.repair_stop_reason
+            task_run.repair_stop_message = session.repair_stop_message
             execution_exhausted = bool(public_session["execution_budget"]["exhausted"])
             if failed or rejected:
-                next_status = "repair_pending"
-                message = "Validation needs attention. Review feedback and generate a bounded repair proposal."
+                if session.repair_stop_reason:
+                    next_status = "failed"
+                    message = session.repair_stop_message or "The repair loop stopped without progress."
+                elif task_run.auto_repair_enabled and bool(payload.get("use_llm")):
+                    next_status = "diagnosing"
+                    message = "Validation failed. The Agent is diagnosing the failure for a bounded repair."
+                    auto_repair_launch = True
+                else:
+                    next_status = "repair_pending"
+                    message = (
+                        "Validation needs attention. Review feedback and generate a bounded repair proposal."
+                        if not task_run.auto_repair_enabled
+                        else "Validation needs attention. Enable LLM use to generate the next repair automatically."
+                    )
             elif execution_exhausted:
                 next_status = "failed"
                 message = "Execution evidence passed, but the configured execution budget was exceeded."
@@ -573,8 +642,10 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_run.error = None
             if task_run.cancel_requested:
                 checkpoint_task_run(task_run, next_status)
-            elif task_run.pause_requested and next_status == "repair_pending":
-                checkpoint_task_run(task_run, next_status)
+                auto_repair_launch = False
+            elif task_run.pause_requested and next_status in {"repair_pending", "diagnosing"}:
+                checkpoint_task_run(task_run, "repair_pending")
+                auto_repair_launch = False
             else:
                 task_run.pause_requested = False
                 update_task_run(task_run, next_status, message)
@@ -589,6 +660,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             data["memory_error"] = str(exc)
         self._send_json(data)
+        if auto_repair_launch and task_run:
+            self._launch_auto_repair_worker(task_run, session, payload)
 
     def _handle_revert(self) -> None:
         payload = self._read_json()
@@ -691,18 +764,6 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if session.validation_feedback is None:
             self._send_json({"error": "No validation feedback is available for this proposal."}, status=HTTPStatus.BAD_REQUEST)
             return
-        if session.repair_budget_exhausted():
-            append_timeline(
-                session,
-                "repair",
-                "blocked",
-                f"Repair retry budget exhausted ({session.repair_attempt}/{session.max_repair_attempts}).",
-            )
-            self._persist_session(session)
-            data = session.to_public_dict()
-            data["error"] = "Repair retry budget exhausted for this proposal."
-            self._send_json(data, status=HTTPStatus.BAD_REQUEST)
-            return
 
         task_run = None
         task_run_id = str(payload.get("task_run_id") or "").strip()
@@ -724,125 +785,327 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     status=HTTPStatus.CONFLICT,
                 )
                 return
-
-        use_llm = bool(payload.get("use_llm"))
-        llm_client = None
-        if use_llm and payload.get("api_key"):
-            try:
-                llm_client = OpenAICompatibleClient(
-                    api_key=str(payload.get("api_key")),
-                    base_url=str(payload.get("base_url") or "") or None,
-                    model=str(payload.get("model") or "") or None,
-                    json_mode=_payload_json_mode(payload),
-                    timeout_seconds=_payload_llm_timeout_seconds(payload),
-                )
-            except LLMError as exc:
-                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-                return
-
-        next_repair_attempt = session.repair_attempt + 1
-        repair_task = _repair_task_with_budget(
-            session.validation_feedback.repair_task,
-            next_repair_attempt,
-            session.max_repair_attempts,
-        )
-        if task_run:
-            update_task_run(task_run, "exploring", "Agent is analyzing validation feedback for a repair proposal.")
-            self._persist_task_run(task_run)
         try:
-            report = run_workflow(
-                session.repo_path,
-                repair_task,
-                validation_commands=[],
-                use_llm=use_llm,
-                llm_client=llm_client,
-                llm_model=str(payload.get("model") or "") or None,
-                allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
-                llm_json_mode=_payload_json_mode(payload),
-                llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
-                iterative_agent=_payload_iterative_agent(payload),
-                agent_max_steps=_payload_agent_max_steps(payload),
-                use_memory=_payload_use_memory(payload),
-                execution_budget=session.execution_budget,
-            )
-        except Exception as exc:
+            llm_client = _payload_llm_client(payload)
+            data = self._generate_repair_proposal(session, payload, task_run, llm_client)
+        except RepairLoopStopped as exc:
+            data = session.to_public_dict()
+            data["error"] = str(exc)
             if task_run:
+                data["task_run"] = task_run.to_public_dict()
+            status = HTTPStatus.BAD_REQUEST if exc.reason == STOP_REPAIR_BUDGET else HTTPStatus.CONFLICT
+            self._send_json(data, status=status)
+            return
+        except LLMError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:
+            if task_run and task_run.status not in {"cancelled", "paused", "failed"}:
                 update_task_run(task_run, "repair_pending", "Repair proposal generation failed.", error=str(exc))
                 self._persist_task_run(task_run)
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        self._send_json(data)
 
-        repair_proposal_id = None
-        timeline = build_report_timeline(report)
-        proposal = report.patch_proposal
-        if proposal and proposal.file_edits and proposal.apply_ready:
-            validation_commands = session.validation_commands or (
-                proposal.validation_plan.commands if proposal.validation_plan else []
+    def _generate_repair_proposal(
+        self,
+        session: ProposalSession,
+        payload: dict[str, Any],
+        task_run: TaskRun | None,
+        llm_client: OpenAICompatibleClient | None,
+    ) -> dict[str, Any]:
+        if session.repair_stop_reason:
+            raise RepairLoopStopped(
+                session.repair_stop_reason,
+                session.repair_stop_message or "The repair loop has already stopped.",
             )
-            repair_session = create_proposal_session(
-                repo_path=report.repo_path,
-                task=repair_task,
-                file_edits=proposal.file_edits,
-                validation_commands=validation_commands,
-                timeline=timeline,
-                allowed_paths=[file.path for file in proposal.files],
-                parent_proposal_id=proposal_id,
-                repair_attempt=next_repair_attempt,
-                max_repair_attempts=session.max_repair_attempts,
-                acceptance_criteria=session.acceptance_criteria,
-                execution_budget=session.execution_budget,
-                execution_usage=session.execution_usage.add(
-                    agent_steps=int(report.execution_budget.get("usage", {}).get("agent_steps", 0)),
-                    tool_calls=int(report.execution_budget.get("usage", {}).get("tool_calls", 0)),
-                    validation_commands=int(
-                        report.execution_budget.get("usage", {}).get("validation_commands", 0)
-                    ),
-                    elapsed_ms=int(report.execution_budget.get("usage", {}).get("elapsed_ms", 0)),
-                ),
+        if session.repair_budget_exhausted():
+            message = (
+                f"Repair retry budget exhausted ({session.repair_attempt}/"
+                f"{session.max_repair_attempts})."
             )
-            repair_proposal_id = repair_session.proposal_id
-            append_timeline(
-                repair_session,
-                "approval",
-                "pending",
-                f"Waiting for approval on repair proposal {repair_proposal_id}.",
-            )
-            self._persist_session(repair_session)
-            if task_run:
-                self._memory(task_run.source_repo).save_proposal_session(
-                    proposal_session_to_record(repair_session)
-                )
-            append_timeline(
+            self._stop_repair_loop(session, task_run, STOP_REPAIR_BUDGET, message)
+            raise RepairLoopStopped(STOP_REPAIR_BUDGET, message)
+
+        try:
+            remaining_budget = _remaining_repair_execution_budget(
                 session,
-                "repair",
-                "done",
-                (
-                    f"Generated repair attempt {next_repair_attempt}/"
-                    f"{session.max_repair_attempts}: {repair_proposal_id}."
-                ),
+                iterative_agent=_payload_iterative_agent(payload),
             )
-            self._persist_session(session)
-            timeline = repair_session.timeline
+        except RepairLoopStopped as exc:
+            self._stop_repair_loop(session, task_run, exc.reason, str(exc))
+            raise
+
+        next_repair_attempt = session.repair_attempt + 1
+        trigger_fingerprint = latest_failure_fingerprint(session.repair_history)
+        if not trigger_fingerprint:
+            trigger_fingerprint = validation_feedback_fingerprint(session.validation_feedback)
+        repair_task = _repair_task_with_history(
+            session.validation_feedback.repair_task,
+            root_task=session.root_task or session.task,
+            history=session.repair_history,
+            attempt=next_repair_attempt,
+            max_attempts=session.max_repair_attempts,
+        )
+        if task_run:
+            update_task_run(task_run, "diagnosing", "Agent is normalizing validation evidence for repair.")
+            self._persist_task_run(task_run)
+            if checkpoint_task_run(task_run, "repair_pending"):
+                self._persist_task_run(task_run)
+                raise TaskRunError("Repair generation stopped at the diagnosis checkpoint.")
+            update_task_run(task_run, "replanning", "Agent is re-reading the sandbox and generating a repair proposal.")
+            self._persist_task_run(task_run)
+
+        report = run_workflow(
+            session.repo_path,
+            repair_task,
+            validation_commands=[],
+            use_llm=bool(payload.get("use_llm")),
+            llm_client=llm_client,
+            llm_model=str(payload.get("model") or "") or None,
+            allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
+            llm_json_mode=_payload_json_mode(payload),
+            llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
+            iterative_agent=_payload_iterative_agent(payload),
+            agent_max_steps=min(_payload_agent_max_steps(payload), remaining_budget.max_agent_steps),
+            use_memory=_payload_use_memory(payload),
+            execution_budget=remaining_budget,
+        )
+        report_usage = ExecutionUsage.from_dict(report.execution_budget.get("usage"))
+        cumulative_usage = session.execution_usage.add(
+            agent_steps=report_usage.agent_steps,
+            tool_calls=report_usage.tool_calls,
+            validation_commands=report_usage.validation_commands,
+            elapsed_ms=report_usage.elapsed_ms,
+        )
+        cumulative_budget_state = execution_budget_state(session.execution_budget, cumulative_usage)
+        if task_run and checkpoint_task_run(task_run, "repair_pending"):
+            self._persist_task_run(task_run)
+            raise TaskRunError("Repair generation stopped after the replanning checkpoint.")
+        if cumulative_budget_state["exhausted"]:
+            message = "Repair analysis exceeded the execution budget: " + "; ".join(
+                cumulative_budget_state["exhausted_reasons"]
+            )
+            self._stop_repair_loop(session, task_run, STOP_EXECUTION_BUDGET, message)
+            self._persist_stopped_repair_report(
+                report,
+                session,
+                task_run,
+                repair_task,
+                next_repair_attempt,
+                STOP_EXECUTION_BUDGET,
+                message,
+            )
+            raise RepairLoopStopped(STOP_EXECUTION_BUDGET, message)
+
+        proposal = report.patch_proposal
+        if not proposal or not proposal.file_edits or not proposal.apply_ready:
+            message = "Repair analysis did not produce an apply-ready proposal."
+            session.repair_history = mark_repair_attempt_stopped(
+                session.repair_history,
+                attempt=next_repair_attempt,
+                summary=message,
+            )
+            self._stop_repair_loop(session, task_run, STOP_NO_PROPOSAL, message)
+            self._persist_stopped_repair_report(
+                report,
+                session,
+                task_run,
+                repair_task,
+                next_repair_attempt,
+                STOP_NO_PROPOSAL,
+                message,
+            )
+            raise RepairLoopStopped(STOP_NO_PROPOSAL, message)
+
+        session.repair_history, proposal_decision = record_repair_proposal(
+            session.repair_history,
+            attempt=next_repair_attempt,
+            trigger_failure_fingerprint=trigger_fingerprint,
+            edits=proposal.file_edits,
+            summary=proposal.objective,
+        )
+        if not proposal_decision.accepted:
+            self._stop_repair_loop(
+                session,
+                task_run,
+                proposal_decision.stop_reason or STOP_NO_PROPOSAL,
+                proposal_decision.message,
+            )
+            self._persist_stopped_repair_report(
+                report,
+                session,
+                task_run,
+                repair_task,
+                next_repair_attempt,
+                proposal_decision.stop_reason or STOP_NO_PROPOSAL,
+                proposal_decision.message,
+            )
+            raise RepairLoopStopped(
+                proposal_decision.stop_reason or STOP_NO_PROPOSAL,
+                proposal_decision.message,
+            )
+        if not proposal_changes_repository(report.repo_path, proposal.file_edits):
+            message = "The repair proposal would not change the current repository state."
+            session.repair_history = mark_repair_attempt_stopped(
+                session.repair_history,
+                attempt=next_repair_attempt,
+                summary=message,
+            )
+            self._stop_repair_loop(session, task_run, STOP_NO_REPOSITORY_CHANGE, message)
+            self._persist_stopped_repair_report(
+                report,
+                session,
+                task_run,
+                repair_task,
+                next_repair_attempt,
+                STOP_NO_REPOSITORY_CHANGE,
+                message,
+            )
+            raise RepairLoopStopped(STOP_NO_REPOSITORY_CHANGE, message)
+
+        validation_commands = session.validation_commands or (
+            proposal.validation_plan.commands if proposal.validation_plan else []
+        )
+        repair_session = create_proposal_session(
+            repo_path=report.repo_path,
+            task=repair_task,
+            file_edits=proposal.file_edits,
+            validation_commands=validation_commands,
+            timeline=build_report_timeline(report),
+            allowed_paths=[file.path for file in proposal.files],
+            parent_proposal_id=session.proposal_id,
+            repair_attempt=next_repair_attempt,
+            max_repair_attempts=session.max_repair_attempts,
+            acceptance_criteria=session.acceptance_criteria,
+            execution_budget=session.execution_budget,
+            execution_usage=cumulative_usage,
+            root_task=session.root_task or session.task,
+            repair_history=session.repair_history,
+            auto_repair_enabled=session.auto_repair_enabled,
+        )
+        append_timeline(
+            repair_session,
+            "approval",
+            "pending",
+            f"Waiting for approval on repair proposal {repair_session.proposal_id}.",
+        )
+        self._persist_session(repair_session)
+        append_timeline(
+            session,
+            "repair",
+            "done",
+            (
+                f"Generated repair attempt {next_repair_attempt}/"
+                f"{session.max_repair_attempts}: {repair_session.proposal_id}."
+            ),
+        )
+        self._persist_session(session)
 
         data = report.to_dict()
-        data["proposal_id"] = repair_proposal_id
-        data["parent_proposal_id"] = proposal_id
+        data["proposal_id"] = repair_session.proposal_id
+        data["parent_proposal_id"] = session.proposal_id
         data["repair_task"] = repair_task
-        data["repair_attempt"] = next_repair_attempt
-        data["max_repair_attempts"] = session.max_repair_attempts
-        data["repair_budget_remaining"] = max(session.max_repair_attempts - next_repair_attempt, 0)
-        data["next_repair_attempt"] = (
-            next_repair_attempt + 1 if next_repair_attempt < session.max_repair_attempts else None
-        )
-        data["repair_budget_exhausted"] = False
-        data["timeline"] = [asdict(event) for event in timeline]
+        data["timeline"] = [asdict(event) for event in repair_session.timeline]
+        _add_session_public_fields(data, repair_session)
         try:
             data["run_id"] = self._memory(report.repo_path).create_run(
                 repo_path=report.repo_path,
                 task=repair_task,
                 mode="repair",
                 report=report,
-                proposal_id=repair_proposal_id,
+                proposal_id=repair_session.proposal_id,
+                timeline=data["timeline"],
+            )
+        except Exception as exc:
+            data["memory_error"] = str(exc)
+
+        if task_run:
+            self._memory(task_run.source_repo).save_proposal_session(
+                proposal_session_to_record(repair_session)
+            )
+            task_result = dict(task_run.result or {})
+            task_result["repair_report"] = data
+            task_run.result = task_result
+            task_run.proposal_id = repair_session.proposal_id
+            task_run.error = None
+            task_run.execution_usage = cumulative_usage
+            task_run.repair_history = list(repair_session.repair_history)
+            task_run.repair_stop_reason = None
+            task_run.repair_stop_message = ""
+            if task_run.cancel_requested:
+                checkpoint_task_run(task_run, "awaiting_approval")
+            elif task_run.pause_requested:
+                checkpoint_task_run(task_run, "awaiting_approval")
+            else:
+                update_task_run(
+                    task_run,
+                    "awaiting_approval",
+                    f"Repair proposal {next_repair_attempt}/{session.max_repair_attempts} is ready for approval.",
+                )
+            self._persist_task_run(task_run)
+            data["task_run"] = task_run.to_public_dict()
+        return data
+
+    def _stop_repair_loop(
+        self,
+        session: ProposalSession,
+        task_run: TaskRun | None,
+        reason: str,
+        message: str,
+    ) -> None:
+        session.repair_stop_reason = reason
+        session.repair_stop_message = message
+        append_timeline(session, "repair", "stopped", message)
+        self._persist_session(session)
+        if task_run:
+            task_run.repair_history = list(session.repair_history)
+            task_run.repair_stop_reason = reason
+            task_run.repair_stop_message = message
+            task_result = dict(task_run.result or {})
+            task_result["repair_stop"] = {"reason": reason, "message": message}
+            update_task_run(
+                task_run,
+                "failed",
+                message,
+                result=task_result,
+                error=f"Repair loop stopped: {reason}",
+            )
+            self._persist_task_run(task_run)
+
+    def _persist_stopped_repair_report(
+        self,
+        report: Any,
+        session: ProposalSession,
+        task_run: TaskRun | None,
+        repair_task: str,
+        attempt: int,
+        reason: str,
+        message: str,
+    ) -> None:
+        timeline = build_report_timeline(report)
+        timeline.append(TimelineEvent("repair", "stopped", message))
+        data = report.to_dict()
+        data.update(
+            {
+                "proposal_id": None,
+                "parent_proposal_id": session.proposal_id,
+                "repair_task": repair_task,
+                "repair_attempt": attempt,
+                "max_repair_attempts": session.max_repair_attempts,
+                "repair_history": [item.to_dict() for item in session.repair_history],
+                "repair_stop_reason": reason,
+                "repair_stop_message": message,
+                "timeline": [asdict(event) for event in timeline],
+            }
+        )
+        try:
+            data["run_id"] = self._memory(report.repo_path).create_run(
+                repo_path=report.repo_path,
+                task=repair_task,
+                mode="repair",
+                report=report,
+                proposal_id=None,
                 timeline=data["timeline"],
             )
         except Exception as exc:
@@ -851,27 +1114,42 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_result = dict(task_run.result or {})
             task_result["repair_report"] = data
             task_run.result = task_result
-            task_run.proposal_id = repair_proposal_id or task_run.proposal_id
-            task_run.error = None
-            if task_run.cancel_requested:
-                checkpoint_task_run(task_run, "awaiting_approval" if repair_proposal_id else "repair_pending")
-            elif task_run.pause_requested:
-                checkpoint_task_run(task_run, "awaiting_approval" if repair_proposal_id else "repair_pending")
-            elif repair_proposal_id:
-                update_task_run(
-                    task_run,
-                    "awaiting_approval",
-                    f"Repair proposal {next_repair_attempt}/{session.max_repair_attempts} is ready for approval.",
-                )
-            else:
+            self._persist_task_run(task_run)
+
+    def _launch_auto_repair_worker(
+        self,
+        task_run: TaskRun,
+        session: ProposalSession,
+        payload: dict[str, Any],
+    ) -> None:
+        worker = threading.Thread(
+            target=self._execute_auto_repair,
+            args=(task_run, session, dict(payload)),
+            name=f"repopilot-repair-{task_run.run_id[:8]}-{session.repair_attempt + 1}",
+            daemon=True,
+        )
+        worker.start()
+
+    def _execute_auto_repair(
+        self,
+        task_run: TaskRun,
+        session: ProposalSession,
+        payload: dict[str, Any],
+    ) -> None:
+        try:
+            llm_client = _payload_llm_client(payload)
+            self._generate_repair_proposal(session, payload, task_run, llm_client)
+        except RepairLoopStopped:
+            return
+        except Exception as exc:
+            if task_run.status not in {"cancelled", "failed"}:
                 update_task_run(
                     task_run,
                     "repair_pending",
-                    "Repair analysis completed without an apply-ready proposal.",
+                    "Automatic repair generation failed; manual retry remains available.",
+                    error=str(exc),
                 )
-            self._persist_task_run(task_run)
-            data["task_run"] = task_run.to_public_dict()
-        self._send_json(data)
+                self._persist_task_run(task_run)
 
     def _handle_llm_test(self) -> None:
         payload = self._read_json()
@@ -1124,6 +1402,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task,
             validation,
             execution_budget=execution_budget,
+            auto_repair_enabled=_payload_auto_repair(payload),
         )
         try:
             self._persist_task_run(task_run)
@@ -1348,6 +1627,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     ),
                     execution_budget=task_run.execution_budget,
                     execution_usage=task_run.execution_usage,
+                    root_task=task_run.task,
+                    repair_history=task_run.repair_history,
+                    auto_repair_enabled=task_run.auto_repair_enabled,
                 )
                 task_run.acceptance_criteria = list(proposal_session.acceptance_criteria)
                 proposal_id = proposal_session.proposal_id
@@ -1784,6 +2066,10 @@ def _payload_use_memory(payload: dict[str, Any]) -> bool:
     return _payload_bool(payload.get("use_memory"), default=True)
 
 
+def _payload_auto_repair(payload: dict[str, Any]) -> bool:
+    return _payload_bool(payload.get("auto_repair"), default=True)
+
+
 def _payload_llm_client(payload: dict[str, Any]) -> OpenAICompatibleClient | None:
     if not bool(payload.get("use_llm")) or not payload.get("api_key"):
         return None
@@ -1910,6 +2196,74 @@ def _repair_task_with_budget(task: str, attempt: int, max_attempts: int) -> str:
             ),
         ]
     ).strip()
+
+
+def _repair_task_with_history(
+    task: str,
+    *,
+    root_task: str,
+    history: list[RepairAttemptRecord],
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    base = _repair_task_with_budget(task, attempt, max_attempts)
+    prior = [
+        (
+            f"- Attempt {item.attempt}: {item.status}; "
+            f"failure={_short_fingerprint(item.result_failure_fingerprint or item.trigger_failure_fingerprint)}; "
+            f"proposal={_short_fingerprint(item.proposal_fingerprint)}; {item.summary}"
+        )
+        for item in history[-5:]
+    ]
+    sections = [
+        base,
+        f"Root objective: {root_task.strip() or '(not provided)'}",
+        "Prior repair outcomes:\n" + ("\n".join(prior) if prior else "- No previous repair attempt."),
+        "Generate a materially different, narrow proposal. Do not repeat a prior proposal fingerprint.",
+    ]
+    combined = "\n\n".join(sections).strip()
+    return combined if len(combined) <= 7500 else combined[:7470].rstrip() + "\n... repair history truncated ..."
+
+
+def _remaining_repair_execution_budget(
+    session: ProposalSession,
+    *,
+    iterative_agent: bool,
+) -> ExecutionBudget:
+    state = execution_budget_state(session.execution_budget, session.execution_usage)
+    if state["exhausted"]:
+        raise RepairLoopStopped(
+            STOP_EXECUTION_BUDGET,
+            "Execution budget is already exhausted: " + "; ".join(state["exhausted_reasons"]),
+        )
+    remaining = state["remaining"]
+    required_validation = len(session.validation_commands)
+    reserved_tools = 1 + required_validation
+    reasons: list[str] = []
+    if remaining["validation_commands"] < required_validation:
+        reasons.append("insufficient validation-command capacity for the next repair")
+    if remaining["tool_calls"] < reserved_tools:
+        reasons.append("insufficient tool-call capacity to apply and validate the next repair")
+    if remaining["elapsed_ms"] <= 0:
+        reasons.append("no elapsed-time capacity remains")
+    available_agent_steps = remaining["agent_steps"]
+    available_agent_tools = remaining["tool_calls"] - reserved_tools
+    if iterative_agent and available_agent_steps <= 0:
+        reasons.append("no Agent-step capacity remains for iterative repair exploration")
+    if iterative_agent and available_agent_tools <= 0:
+        reasons.append("no tool-call capacity remains for iterative repair exploration")
+    if reasons:
+        raise RepairLoopStopped(STOP_EXECUTION_BUDGET, "; ".join(reasons) + ".")
+    return ExecutionBudget(
+        max_agent_steps=max(available_agent_steps, 1),
+        max_tool_calls=max(available_agent_tools, 1),
+        max_validation_commands=max(remaining["validation_commands"], 1),
+        max_elapsed_seconds=max((remaining["elapsed_ms"] + 999) // 1000, 1),
+    )
+
+
+def _short_fingerprint(value: str) -> str:
+    return value[:12] if value else "none"
 
 
 def _add_session_public_fields(data: dict[str, Any], session: ProposalSession) -> None:

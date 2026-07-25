@@ -271,6 +271,14 @@ function updateTaskRun(taskRun) {
   renderTaskRun(taskRun);
   adoptTaskRunSandbox(taskRun);
   const report = currentTaskRunReport(taskRun);
+  const manualRepairAvailable = taskRun.status === "repair_pending"
+    && taskRun.proposal_id && report?.validation_feedback && !taskRun.repair_stop_reason;
+  if (["diagnosing", "replanning", "failed", "completed", "cancelled"].includes(taskRun.status)) {
+    state.repairParentId = null;
+  } else if (manualRepairAvailable) {
+    state.repairParentId = taskRun.proposal_id;
+  }
+  $("generateRepairProposal").disabled = !state.repairParentId;
   const reportKey = report
     ? `${taskRun.proposal_id || "none"}:${taskRun.history_run_id || "analysis"}`
     : null;
@@ -340,6 +348,7 @@ function renderTaskRun(taskRun) {
   );
   $("taskRunBudget").innerHTML = renderExecutionBudget(taskRun.execution_budget);
   $("taskRunEvidence").innerHTML = renderCompletionEvidence(taskRun.completion_evidence);
+  $("taskRunRepairLoop").innerHTML = renderRepairLoop(taskRun);
   const events = taskRun.events || [];
   $("taskRunEvents").innerHTML = events.length
     ? events
@@ -369,10 +378,11 @@ function renderTaskRunPhases(taskRun) {
 function taskRunPhaseIndex(taskRun) {
   const status = taskRun.status === "paused" ? taskRun.resume_status : taskRun.status;
   if (["queued", "creating_sandbox"].includes(status)) return 0;
+  if (status === "failed" && taskRun.repair_stop_reason) return 4;
   if (["exploring", "pausing", "cancelling", "interrupted", "failed"].includes(status)) return 1;
   if (status === "awaiting_approval") return 2;
   if (status === "applying") return 3;
-  if (["validating", "repair_pending"].includes(status)) return 4;
+  if (["validating", "diagnosing", "replanning", "repair_pending"].includes(status)) return 4;
   return 5;
 }
 
@@ -441,6 +451,7 @@ async function applyProposal() {
     const result = await postJson("/api/apply", {
       ...buildRepositoryPayload(),
       ...taskRunLinkPayload(),
+      ...buildRepairAutomationPayload(),
       proposal_id: state.proposalId,
       approved_paths: approvedPaths,
     });
@@ -454,7 +465,9 @@ async function applyProposal() {
     $("diffOutput").textContent = result.diff || "No diff.";
     $("validationList").innerHTML = renderValidation(result.validation || []);
     $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback, result);
-    state.repairParentId = result.validation_feedback && !result.repair_budget_exhausted ? state.proposalId : null;
+    const autoRepairRunning = ["diagnosing", "replanning"].includes(result.task_run?.status);
+    state.repairParentId = result.validation_feedback && !result.repair_budget_exhausted
+      && !result.repair_stop_reason && !autoRepairRunning ? state.proposalId : null;
     state.rollbackAvailable = Boolean(result.rollback_available);
     state.proposalApplied = true;
     $("generateRepairProposal").disabled = !state.repairParentId;
@@ -559,6 +572,19 @@ function buildWorkflowPayload() {
     max_validation_commands: $("maxValidationCommands").value.trim(),
     execution_timeout_seconds: $("executionTimeoutSeconds").value.trim(),
     max_repair_attempts: $("repairMaxAttempts").value.trim(),
+    auto_repair: $("autoRepair").checked,
+  };
+}
+
+function buildRepairAutomationPayload() {
+  return {
+    auto_repair: $("autoRepair").checked,
+    use_llm: $("useLlm").checked,
+    ...buildLlmPayload(),
+    no_llm_fallback: $("disableFallback").checked,
+    use_memory: !$("disableMemory").checked,
+    iterative_agent: $("iterativeAgent").checked,
+    agent_max_steps: $("agentMaxSteps").value.trim(),
   };
 }
 
@@ -934,7 +960,10 @@ async function clearHistory() {
 
 function renderReport(report, payload) {
   state.proposalId = report.proposal_id || null;
-  state.repairParentId = report.validation_feedback && state.proposalId && !report.repair_budget_exhausted ? state.proposalId : null;
+  const repairInProgress = ["diagnosing", "replanning"].includes(report.task_run?.status);
+  state.repairParentId = report.validation_feedback && state.proposalId
+    && !report.repair_budget_exhausted && !report.repair_stop_reason && !repairInProgress
+    ? state.proposalId : null;
   state.rollbackAvailable = Boolean(report.rollback_available);
   state.proposalApplied = false;
   state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));
@@ -953,6 +982,7 @@ function renderReport(report, payload) {
   );
   $("executionBudgetList").innerHTML = renderExecutionBudget(report.execution_budget);
   $("completionEvidenceList").innerHTML = renderCompletionEvidence(report.completion_evidence);
+  $("repairLoopList").innerHTML = renderRepairLoop(report);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
   $("proposalOutput").textContent = JSON.stringify(
@@ -1254,9 +1284,11 @@ function renderValidationFeedback(feedback, repairState = {}) {
       <pre>${escapeHtml(failure.output_excerpt || "")}</pre>
     </div>`)
     .join("");
-  const repairTag = repairState.repair_budget_exhausted
-    ? '<span class="tag danger">budget exhausted</span>'
-    : '<span class="tag danger">repair available</span>';
+  const repairTag = repairState.repair_stop_reason
+    ? `<span class="tag danger">stopped: ${escapeHtml(repairState.repair_stop_reason)}</span>`
+    : repairState.repair_budget_exhausted
+      ? '<span class="tag danger">budget exhausted</span>'
+      : '<span class="tag danger">repair available</span>';
   return `<div class="item">
     <div class="item-title">Failure Analysis ${repairTag}</div>
     <p>${escapeHtml(feedback.summary || "")}</p>
@@ -1275,11 +1307,51 @@ function renderRepairBudget(repairState = {}) {
   const maxAttempts = Number(repairState.max_repair_attempts) || 0;
   const currentAttempt = Number(repairState.repair_attempt) || 0;
   const remaining = Number(repairState.repair_budget_remaining ?? Math.max(maxAttempts - currentAttempt, 0));
+  if (repairState.repair_stop_reason) {
+    return `<p><strong>Repair stopped:</strong> ${escapeHtml(repairState.repair_stop_message || repairState.repair_stop_reason)}</p>`;
+  }
   if (maxAttempts <= 0 || repairState.repair_budget_exhausted) {
     return `<p><strong>Repair budget:</strong> exhausted (${escapeHtml(currentAttempt)}/${escapeHtml(maxAttempts)}).</p>`;
   }
   const nextAttempt = repairState.next_repair_attempt ?? currentAttempt + 1;
   return `<p><strong>Repair budget:</strong> next attempt ${escapeHtml(nextAttempt)}/${escapeHtml(maxAttempts)}; ${escapeHtml(remaining)} remaining.</p>`;
+}
+
+function renderRepairLoop(repairState = {}) {
+  const history = repairState.repair_history || [];
+  const automation = repairState.auto_repair_enabled
+    ? '<span class="tag ok">automatic generation enabled</span>'
+    : '<span class="tag">manual generation</span>';
+  const stopped = repairState.repair_stop_reason
+    ? `<div class="item">
+        <div class="item-title">Loop stopped <span class="tag danger">${escapeHtml(repairState.repair_stop_reason)}</span></div>
+        <p>${escapeHtml(repairState.repair_stop_message || "No stop detail was recorded.")}</p>
+      </div>`
+    : "";
+  const attempts = history.map((attempt) => {
+    const trigger = shortFingerprint(attempt.trigger_failure_fingerprint);
+    const proposal = shortFingerprint(attempt.proposal_fingerprint);
+    const result = shortFingerprint(attempt.result_failure_fingerprint);
+    const paths = renderList(attempt.proposal_paths, "No proposal paths recorded.");
+    const statusClass = attempt.status === "completed"
+      ? "ok"
+      : attempt.status === "stopped" || attempt.status === "validation_failed" ? "danger" : "warn";
+    return `<div class="item">
+      <div class="item-title">Repair attempt ${escapeHtml(attempt.attempt)}
+        <span class="tag ${statusClass}">${escapeHtml(attempt.status || "unknown")}</span>
+      </div>
+      <p>${escapeHtml(attempt.summary || "No summary recorded.")}</p>
+      <p><small>Trigger ${escapeHtml(trigger)}; proposal ${escapeHtml(proposal)}; result ${escapeHtml(result)}</small></p>
+      <strong>Proposal paths</strong><ul>${paths}</ul>
+    </div>`;
+  }).join("");
+  return `<div class="item"><div class="item-title">Repair Control ${automation}</div>${renderRepairBudget(repairState)}</div>`
+    + stopped
+    + (attempts || item("No repair attempt has run."));
+}
+
+function shortFingerprint(value) {
+  return value ? String(value).slice(0, 12) : "none";
 }
 
 function renderDelivery(data) {

@@ -27,7 +27,9 @@ Task or GitHub issue
 -> human approval
 -> protected file application
 -> validation rerun
--> validation feedback and repair proposal
+-> validation failure diagnosis and re-planning
+-> bounded repair proposal
+-> repeated-failure and repeated-proposal detection
 -> completion evidence check
 -> resumable task completion
 -> Git diff, PR readiness, and PR draft support
@@ -49,7 +51,11 @@ flowchart LR
     H -->|Reject| E
     I --> J["Validation rerun"]
     J --> L{"Validation passed?"}
-    L -->|No| R["Repair proposal"]
+    L -->|No| D1["Diagnose failure"]
+    D1 --> P1["Re-plan"]
+    P1 --> NP{"New progress?"}
+    NP -->|No| ST["Stop with evidence"]
+    NP -->|Yes| R["Repair proposal"]
     R --> G
     L -->|Yes| C2{"Evidence complete?"}
     C2 -->|No| X["Needs attention"]
@@ -68,6 +74,8 @@ flowchart LR
 - Managed detached Git worktree sandboxes for isolated proposal application and validation.
 - Persistent sandboxed task runs with background execution, progress polling, safe pause/resume/cancel checkpoints, and restart recovery.
 - Validation-aware completion with explicit acceptance criteria, execution budgets, and evidence for changed files, approval scope, and validation results.
+- Automatic bounded repair generation after failed task-run validation, while keeping every repair patch behind human approval.
+- No-progress detection for repeated validation failures, repeated proposals, no-op changes, and exhausted repair or execution budgets.
 - ✅ Strict LLM JSON schema parsing for plans, patch proposals, and patch reviews.
 - 🔍 LLM call traces with prompt previews, raw outputs, parse status, fallback state, and latency.
 - 🧠 Local memory reuse for related previous runs, validation outcomes, and task summaries.
@@ -103,6 +111,7 @@ flowchart LR
 | Task orchestration     | Runs the Agent in a sandbox, persists progress, waits for approval, validates, repairs, and resumes.   |
 | Execution control      | Enforces Agent-step, tool-call, validation-command, and elapsed-time budgets with visible usage.       |
 | Completion evidence    | Requires approved changes and passing required validation before a task run is marked complete.        |
+| Repair loop            | Diagnoses failures, re-plans, proposes a bounded repair, detects repetition, and records stop evidence. |
 | 🌿 Git                 | Inspects branch/upstream/ahead/behind, changed files, latest commit, diff stats, and PR readiness.    |
 | 🔗 GitHub              | Reads issues, PRs, reviews, and CI/check status from the repository remote.                           |
 
@@ -118,6 +127,7 @@ src/repopilot_agent/
   repository_map.py     symbols, dependencies, source/test relations, and task ranking
   structured_patch.py   hash-guarded exact-text hunks and syntax/readback verification
   execution.py          acceptance criteria, execution budgets, usage, and completion evidence
+  repair_loop.py        repair fingerprints, attempt history, progress decisions, and stop reasons
   agent_loop.py         LLM exploration adapter for the typed runtime
   runtime/
     models.py           action, observation, event, policy, and run contracts
@@ -271,11 +281,13 @@ By default sandboxes live under the operating system's temporary directory. Set 
 Sandbox -> Explore -> Approval -> Apply -> Validate -> Complete
 ```
 
-When an apply-ready proposal is available, the run stops at `awaiting_approval`. Review the proposal and diff in the Summary tab, select the approved files, and use the existing protected Apply action. Passing validation completes the run; failed validation changes it to `repair_pending`, where the bounded repair workflow can generate another human-reviewed proposal.
+When an apply-ready proposal is available, the run stops at `awaiting_approval`. Review the proposal and diff in the Summary tab, select the approved files, and use the existing protected Apply action. Passing validation completes the run. When LLM use and `Auto-generate repairs` are enabled, failed validation moves through `diagnosing` and `replanning` in the background, then returns to `awaiting_approval` with another human-reviewed proposal. With automation disabled, the run remains `repair_pending` for manual generation.
 
 RepoPilot derives an acceptance contract from the task, approved proposal paths, and selected validation commands. The Task Run and Summary views show each criterion, configured limits, current usage, and final evidence. A run reaches `completed` only when at least one approved file changed, every changed file stayed inside the approved scope, and every required allowlisted validation command exited successfully. When no automated command is available, manual diff review remains visible as advisory evidence.
 
 The Web settings expose limits for Agent steps, tool calls, validation commands, and elapsed execution time. RepoPilot checks command and tool budgets before applying files, records actual usage, and refuses completion when a configured budget is exceeded.
+
+The repair loop fingerprints normalized validation failures and proposed file contents. It stops when an approved repair produces the same failure, the LLM repeats an earlier proposal, a proposal would not change the repository, no apply-ready proposal is produced, or a repair/execution budget is exhausted. Every attempt and stop reason is persisted and shown in the Repair Loop panels. Automatic generation never applies the repair: the new diff still requires explicit approval.
 
 Task-run state is saved in the source repository's local SQLite database and restored after a server restart. Active work cannot be resumed in the middle of an interrupted provider request, so a restored active run is marked `interrupted` and can be restarted from its last safe sandbox checkpoint. Pause and cancel requests use the same checkpoints and preserve the sandbox for inspection.
 
@@ -385,10 +397,13 @@ When validation fails, RepoPilot builds a bounded failure context instead of pas
 - Failed commands are summarized with exit code, extracted signals, and truncated output excerpts.
 - Python and JavaScript-like file paths are extracted from tracebacks and command targets.
 - Repair steps are generated from common signals such as assertion failures, import failures, syntax errors, and rejected commands.
-- The web UI can generate a follow-up repair proposal from the failed validation context.
+- Sandboxed task runs can automatically diagnose the latest failure and generate a follow-up repair proposal.
+- The manual `Generate Repair Proposal` action remains available when automation is disabled or automatic generation fails.
 - Repair proposals still require human approval and use the same protected apply path as normal proposals.
 - Repair attempts are counted on proposal sessions and capped by the web UI's `Repair max attempts` setting.
-- When the retry budget is exhausted, RepoPilot keeps the failure analysis visible but blocks new repair proposal generation.
+- Failure and proposal fingerprints detect repeated outcomes without persisting complete validation logs in the repair state.
+- Stopped repair analyses retain their LLM traces in local History for inspection.
+- When a retry or execution budget is exhausted, RepoPilot keeps the failure analysis visible but blocks new repair proposal generation.
 
 ## Evaluations
 
@@ -496,6 +511,7 @@ GitHub PR creation follows the same rule: RepoPilot checks readiness first, bloc
 - It refuses to delete dirty sandboxes unless the user explicitly requests forced removal.
 - It creates delivery branches only inside registered managed worktrees and only after explicit confirmation.
 - It never persists task-run API credentials and never commits or pushes task-run changes automatically.
+- API credentials used by automatic repair stay in the request-scoped background worker and are not serialized into task runs, proposal sessions, repair history, or saved reports.
 - Side-effect runtime actions require action-scoped approval and an explicit file or command allowlist.
 - Structured runtime patches require the SHA-256 observed during file read, exact hunk occurrence counts, pre-write syntax checks for Python and JSON, and post-write readback verification.
 - Approved full-file proposals are converted into bounded exact-text hunks when possible; stale hashes or ambiguous matches stop the apply, and multi-file failures restore earlier writes from snapshots.
@@ -539,4 +555,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Status
 
-RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, a typed and persistent agent runtime, policy-gated tools, idempotent action recovery, iterative LLM exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, hash-guarded proposal patches, protected patch application, per-file Web approval controls, acceptance criteria, execution budgets, completion evidence, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, explicit local branch delivery, validation planning, validation runner, validation feedback and bounded repair proposal generation, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
+RepoPilot Agent currently includes the CLI workflow, repository scanner, task-aware retrieval, a typed and persistent agent runtime, policy-gated tools, idempotent action recovery, iterative LLM exploration, related memory reuse, pinned memory, memory controls, deterministic planner, optional LLM planner, bounded LLM context management, strict LLM schema parsing, prompt templates, LLM call tracing, persisted LLM trace history, LLM patch proposal generation, LLM patch self-review, structured pre-apply safety checks, hash-guarded proposal patches, protected patch application, per-file Web approval controls, acceptance criteria, execution budgets, completion evidence, persisted proposal sessions, rollback snapshots, managed Git worktree sandboxes, persistent sandboxed task-run orchestration, safe pause/resume/cancel checkpoints, automatic bounded repair generation, repair progress fingerprints, no-progress stop decisions, explicit local branch delivery, validation planning, validation runner, reproducible workflow evaluations, Git workflow awareness, PR readiness checks, delivery draft generation, explicit GitHub PR creation, GitHub workflow awareness, SQLite-backed local memory, local web UI, timeline events, root launcher, and unit tests.
