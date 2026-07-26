@@ -289,7 +289,7 @@ The Web settings expose limits for Agent steps, tool calls, validation commands,
 
 The repair loop fingerprints normalized validation failures and proposed file contents. It stops when an approved repair produces the same failure, the LLM repeats an earlier proposal, a proposal would not change the repository, no apply-ready proposal is produced, or a repair/execution budget is exhausted. Every attempt and stop reason is persisted and shown in the Repair Loop panels. Automatic generation never applies the repair: the new diff still requires explicit approval.
 
-Task-run state is saved in the source repository's local SQLite database and restored after a server restart. Active work cannot be resumed in the middle of an interrupted provider request, so a restored active run is marked `interrupted` and can be restarted from its last safe sandbox checkpoint. Pause and cancel requests use the same checkpoints and preserve the sandbox for inspection.
+Task-run state is saved in the source repository's local SQLite database. Start the Web server from that repository or pass `python repopilot.py serve --repo PATH`; RepoPilot scans every persisted active task before serving requests. It marks unfinished work as `interrupted`, records the previous state, detection time, and `server_restart` reason, and persists a new task event. No LLM call, tool, validation command, or file operation is resumed automatically. Repeated scans are idempotent, and repositories selected later in the Web UI receive the same check when their task history is loaded. The interruption notice keeps the sandbox available for inspection before the existing Resume or Cancel action is chosen.
 
 After a successful run, `Create Branch` can attach the sandbox to a validated local feature branch. This requires explicit confirmation and works only for a registered RepoPilot worktree. It does not stage, commit, push, or create a pull request.
 
@@ -476,7 +476,7 @@ RepoPilot stores local web workflow history in SQLite under:
 .repopilot/memory.sqlite3
 ```
 
-The memory layer records run metadata, tasks, summaries, proposal metadata, proposal sessions, task-run checkpoints, proposed diffs, LLM traces, validation results, runtime action reservations, and ordered events. API keys are not stored. The web UI exposes this through the History and Task Run tabs, where previous runs, saved LLM trace history, runtime events, persisted proposal state, and resumable task state can be inspected.
+The memory layer records run metadata, tasks, summaries, proposal metadata, proposal sessions, task-run checkpoints, interruption metadata, proposed diffs, LLM traces, validation results, runtime action reservations, and ordered events. API keys are not stored. The web UI exposes this through the History and Task Run tabs, where previous runs, saved LLM trace history, runtime events, persisted proposal state, and resumable task state can be inspected.
 
 RepoPilot adds `.repopilot/` to the clone's local Git `info/exclude` before writing state. This keeps local memory out of `git status` without changing or committing the repository's `.gitignore`.
 

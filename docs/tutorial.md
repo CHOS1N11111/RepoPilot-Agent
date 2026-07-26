@@ -191,6 +191,12 @@ Start the local server:
 python repopilot.py serve
 ```
 
+The current directory is checked for unfinished task runs during startup. When serving from another directory, select the repository explicitly:
+
+```bash
+python repopilot.py serve --repo "C:/path/to/repository"
+```
+
 Open:
 
 ```text
@@ -529,7 +535,9 @@ When automatic repair is enabled, the apply request passes the current LLM setti
 
 The Repair Loop panels show each attempt's trigger failure fingerprint, proposal fingerprint, resulting failure fingerprint, status, and affected paths. Fingerprints are hashes of normalized evidence, not complete test logs. The loop stops with an explicit reason when validation repeats unchanged, a proposal repeats, a proposal is a no-op, no safe proposal is generated, or retry/execution capacity is exhausted. Stopped LLM analyses remain available in History, including their traces.
 
-`Pause` and `Cancel` are checkpoint operations. They take effect after the current safe operation returns, so they do not terminate an in-flight LLM HTTP request or interrupt a file write halfway through. Paused, cancelled, failed, and server-interrupted runs preserve their sandboxes. Use `Resume` to restart analysis with the current Web LLM settings or return to a saved approval checkpoint.
+`Pause` and `Cancel` are checkpoint operations. They take effect after the current safe operation returns, so they do not terminate an in-flight LLM HTTP request or interrupt a file write halfway through. Paused, cancelled, failed, and server-interrupted runs preserve their sandboxes.
+
+At Web server startup, RepoPilot scans the repository selected by `serve --repo` for task records left in an active state. Those records become `interrupted` with the previous state, UTC detection timestamp, and `server_restart` reason saved in SQLite. The Task Run tab shows these details in a dedicated notice. This detection step never resumes a worker, calls an LLM, runs validation, or changes sandbox files. Loading a different repository's Task Run history performs the same idempotent check. Inspect the preserved sandbox before using the existing `Resume` or `Cancel` action.
 
 Branch creation is intentionally separate from task execution. It is available only after successful completion, requires explicit confirmation, validates the branch name, and verifies that the destination is a registered RepoPilot worktree. RepoPilot leaves the diff uncommitted and unpushed for manual review.
 

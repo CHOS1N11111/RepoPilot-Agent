@@ -180,6 +180,15 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn('taskRun.status === "repair_pending"', self.app_js)
         self.assertIn('status === "failed" && taskRun.repair_stop_reason', self.app_js)
 
+    def test_interrupted_task_state_has_a_dedicated_notice(self) -> None:
+        self.assertIn('id="taskRunInterruption"', self.index_html)
+        self.assertIn("function renderTaskRunInterruption", self.app_js)
+        self.assertIn("taskRun.interrupted_from", self.app_js)
+        self.assertIn("taskRun.interrupted_at", self.app_js)
+        self.assertIn("taskRun.interruption_reason", self.app_js)
+        self.assertIn('"interrupted", "awaiting_approval"', self.app_js)
+        self.assertIn(".interruption-notice", self.app_css)
+
 
 if __name__ == "__main__":
     unittest.main()

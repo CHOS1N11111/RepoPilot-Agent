@@ -306,6 +306,23 @@ class MemoryStore:
             ).fetchall()
         return [_loads(row["data_json"], {}) for row in rows]
 
+    def list_task_runs_by_status(self, statuses: set[str] | frozenset[str]) -> list[dict[str, Any]]:
+        normalized = sorted({str(status).strip() for status in statuses if str(status).strip()})
+        if not normalized:
+            return []
+        placeholders = ", ".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT data_json
+                FROM task_runs
+                WHERE status IN ({placeholders})
+                ORDER BY updated_at DESC
+                """,
+                normalized,
+            ).fetchall()
+        return [_loads(row["data_json"], {}) for row in rows]
+
     def reserve_agent_runtime_action(
         self,
         runtime_run_id: str,

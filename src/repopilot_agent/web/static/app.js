@@ -273,7 +273,7 @@ function updateTaskRun(taskRun) {
   const report = currentTaskRunReport(taskRun);
   const manualRepairAvailable = taskRun.status === "repair_pending"
     && taskRun.proposal_id && report?.validation_feedback && !taskRun.repair_stop_reason;
-  if (["diagnosing", "replanning", "failed", "completed", "cancelled"].includes(taskRun.status)) {
+  if (["diagnosing", "replanning", "failed", "completed", "cancelled", "interrupted"].includes(taskRun.status)) {
     state.repairParentId = null;
   } else if (manualRepairAvailable) {
     state.repairParentId = taskRun.proposal_id;
@@ -287,7 +287,7 @@ function updateTaskRun(taskRun) {
     state.lastReport = report;
     renderReport(report, state.taskRunPayload || buildWorkflowPayload());
   }
-  if (["completed", "cancelled", "failed", "paused", "awaiting_approval", "repair_pending"].includes(taskRun.status)) {
+  if (["completed", "cancelled", "failed", "paused", "interrupted", "awaiting_approval", "repair_pending"].includes(taskRun.status)) {
     stopTaskRunPolling();
   }
 }
@@ -328,9 +328,12 @@ function adoptTaskRunSandbox(taskRun) {
 }
 
 function renderTaskRun(taskRun) {
+  const status = String(taskRun.status || "unknown");
   $("taskRunId").textContent = taskRun.run_id || "Not started";
-  $("taskRunStatus").textContent = String(taskRun.status || "unknown").replaceAll("_", " ");
+  $("taskRunStatus").textContent = status.replaceAll("_", " ");
+  $("taskRunStatus").classList.toggle("warning", status === "interrupted");
   $("taskRunMessage").textContent = taskRun.message || "";
+  renderTaskRunInterruption(taskRun);
   $("taskRunSandbox").textContent = taskRun.sandbox_path
     ? `${taskRun.sandbox_path}\nHEAD ${taskRun.sandbox_head || "unknown"}`
     : "Not created";
@@ -361,6 +364,24 @@ function renderTaskRun(taskRun) {
         )
         .join("")
     : item("No task-run events yet.");
+}
+
+function renderTaskRunInterruption(taskRun) {
+  const notice = $("taskRunInterruption");
+  if (taskRun.status !== "interrupted") {
+    notice.hidden = true;
+    notice.innerHTML = "";
+    return;
+  }
+  const previous = String(taskRun.interrupted_from || "unknown").replaceAll("_", " ");
+  const reason = String(taskRun.interruption_reason || "server restart").replaceAll("_", " ");
+  const detected = formatTime(taskRun.interrupted_at) || "unknown time";
+  notice.innerHTML = `
+    <strong>Execution interrupted</strong>
+    <span>Previous state: ${escapeHtml(previous)} | Detected: ${escapeHtml(detected)} | Reason: ${escapeHtml(reason)}</span>
+    <span>No work resumed automatically. Inspect the preserved sandbox before choosing Resume or Cancel.</span>
+  `;
+  notice.hidden = false;
 }
 
 function renderTaskRunPhases(taskRun) {

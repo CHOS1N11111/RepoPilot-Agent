@@ -48,12 +48,14 @@ from .repair_loop import (
 from .runtime import SQLiteRuntimeStore
 from .safety import SafetyCheckError
 from .task_runs import (
+    ACTIVE_TASK_RUN_STATUSES,
     TaskRun,
     TaskRunError,
     checkpoint_task_run,
     create_task_run,
     create_task_run_branch,
     get_task_run,
+    mark_task_run_interrupted,
     prepare_task_run_resume,
     request_task_run_cancel,
     request_task_run_pause,
@@ -105,9 +107,34 @@ _SESSION_PUBLIC_KEYS = (
 )
 
 
-def run_web_server(host: str = "127.0.0.1", port: int = 8765) -> None:
+def recover_interrupted_task_runs(source_repo: str | Path) -> list[TaskRun]:
+    source = Path(source_repo).expanduser().resolve()
+    memory_path = default_memory_path(source)
+    if not memory_path.is_file():
+        return []
+    store = MemoryStore(memory_path)
+    recovered: list[TaskRun] = []
+    for record in store.list_task_runs_by_status(ACTIVE_TASK_RUN_STATUSES):
+        run_id = str(record.get("run_id") or "").strip()
+        if not run_id or get_task_run(run_id) is not None:
+            continue
+        task_run = task_run_from_record(record)
+        mark_task_run_interrupted(task_run)
+        store.save_task_run(task_run.to_record())
+        recovered.append(task_run)
+    return recovered
+
+
+def run_web_server(host: str = "127.0.0.1", port: int = 8765, repo: str | Path = ".") -> None:
     server = ThreadingHTTPServer((host, port), RepoPilotRequestHandler)
+    try:
+        interrupted = recover_interrupted_task_runs(repo)
+    except Exception as exc:
+        interrupted = []
+        print(f"Warning: unfinished task-run recovery scan failed: {exc}")
     print(f"RepoPilot web UI running at http://{host}:{port}")
+    if interrupted:
+        print(f"Marked {len(interrupted)} unfinished task run(s) as interrupted.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1422,6 +1449,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             limit = 20
         try:
             source_repo = self._task_run_source_from_query(params)
+            recover_interrupted_task_runs(source_repo)
             records = self._memory(source_repo).list_task_runs(limit=limit)
             task_runs = []
             for record in records:

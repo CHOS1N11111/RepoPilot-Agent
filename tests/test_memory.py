@@ -13,6 +13,23 @@ from repopilot_agent.models import LLMCallTrace, PlanMetadata, ValidationResult,
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_list_task_runs_by_status_returns_all_matching_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.sqlite3")
+            for index, status in enumerate(["exploring", "completed", "validating"]):
+                store.save_task_run(
+                    {
+                        "run_id": f"task-{index}",
+                        "source_repo": tmp,
+                        "status": status,
+                    }
+                )
+
+            active = store.list_task_runs_by_status({"exploring", "validating"})
+
+            self.assertEqual({item["run_id"] for item in active}, {"task-0", "task-2"})
+            self.assertEqual(store.list_task_runs_by_status(set()), [])
+
     def test_save_and_read_proposal_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "memory.sqlite3"

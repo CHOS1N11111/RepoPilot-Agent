@@ -24,6 +24,7 @@ from repopilot_agent.task_runs import (
     clear_task_runs,
     create_task_run,
     create_task_run_branch,
+    mark_task_run_interrupted,
     prepare_task_run_resume,
     request_task_run_cancel,
     request_task_run_pause,
@@ -108,7 +109,28 @@ class TaskRunStateTests(unittest.TestCase):
 
             self.assertEqual(restored.status, "interrupted")
             self.assertEqual(restored.task, "fix login")
+            self.assertEqual(restored.interrupted_from, "exploring")
+            self.assertEqual(restored.resume_status, "exploring")
+            self.assertEqual(restored.interruption_reason, "server_restart")
+            self.assertIsNotNone(restored.interrupted_at)
+            self.assertIn("No work was resumed automatically", restored.message)
             self.assertEqual(store.list_task_runs(limit=1)[0]["run_id"], task_run.run_id)
+
+    def test_interrupt_marking_is_idempotent_for_non_active_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [])
+            update_task_run(task_run, "validating", "Running validation.")
+
+            mark_task_run_interrupted(task_run)
+            event_count = len(task_run.events)
+            detected_at = task_run.interrupted_at
+            mark_task_run_interrupted(task_run)
+
+            self.assertEqual(task_run.status, "interrupted")
+            self.assertEqual(task_run.interrupted_from, "validating")
+            self.assertEqual(task_run.resume_status, "validating")
+            self.assertEqual(task_run.interrupted_at, detected_at)
+            self.assertEqual(len(task_run.events), event_count)
 
     def test_execution_contract_round_trips_through_persistent_task_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

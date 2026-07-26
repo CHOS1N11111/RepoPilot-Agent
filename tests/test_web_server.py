@@ -18,8 +18,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from repopilot_agent.git_tools import get_git_diff
+from repopilot_agent.cli import main as cli_main
 from repopilot_agent.execution import ExecutionBudget
+from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
 from repopilot_agent.models import (
@@ -51,6 +52,8 @@ from repopilot_agent.web_server import (
     _payload_max_repair_attempts,
     _remaining_repair_execution_budget,
     _validate_validation_budget,
+    recover_interrupted_task_runs,
+    run_web_server,
 )
 from repopilot_agent.web_sessions import clear_proposal_sessions, create_proposal_session, proposal_session_to_record
 from repopilot_agent.worktree_sandbox import (
@@ -229,6 +232,91 @@ class WebServerTests(unittest.TestCase):
         self.assertTrue((STATIC_DIR / "index.html").is_file())
         self.assertTrue((STATIC_DIR / "app.css").is_file())
         self.assertTrue((STATIC_DIR / "app.js").is_file())
+
+    def test_startup_recovery_marks_only_uncached_active_task_runs(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = MemoryStore(default_memory_path(root))
+            active = create_task_run(root, "inspect auth", [])
+            update_task_run(active, "exploring", "Exploring repository.")
+            waiting = create_task_run(root, "review patch", [])
+            update_task_run(waiting, "awaiting_approval", "Proposal ready.", proposal_id="proposal-1")
+            store.save_task_run(active.to_record())
+            store.save_task_run(waiting.to_record())
+            clear_task_runs()
+            live = create_task_run(root, "inspect current worker", [])
+            update_task_run(live, "validating", "Validation is running in this process.")
+            store.save_task_run(live.to_record())
+
+            recovered = recover_interrupted_task_runs(root)
+            repeated = recover_interrupted_task_runs(root)
+            stored_active = store.get_task_run(active.run_id)
+            stored_waiting = store.get_task_run(waiting.run_id)
+
+            self.assertEqual([item.run_id for item in recovered], [active.run_id])
+            self.assertEqual(repeated, [])
+            self.assertEqual(stored_active["status"], "interrupted")
+            self.assertEqual(stored_active["interrupted_from"], "exploring")
+            self.assertEqual(stored_active["interruption_reason"], "server_restart")
+            self.assertEqual(stored_waiting["status"], "awaiting_approval")
+            self.assertEqual(store.get_task_run(live.run_id)["status"], "validating")
+        clear_task_runs()
+
+    def test_run_web_server_scans_selected_repository_before_serving(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("repopilot_agent.web_server.ThreadingHTTPServer") as server_class,
+                patch("repopilot_agent.web_server.recover_interrupted_task_runs", return_value=[]) as recover,
+            ):
+                server_class.return_value.serve_forever.side_effect = KeyboardInterrupt
+
+                run_web_server("127.0.0.1", 0, tmp)
+
+            recover.assert_called_once_with(tmp)
+            server_class.return_value.serve_forever.assert_called_once_with()
+            server_class.return_value.server_close.assert_called_once_with()
+
+    def test_serve_cli_passes_repository_to_startup_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(sys, "argv", ["repopilot", "serve", "--port", "9123", "--repo", tmp]),
+                patch("repopilot_agent.cli.run_web_server") as run_server,
+            ):
+                exit_code = cli_main()
+
+            self.assertEqual(exit_code, 0)
+            run_server.assert_called_once_with("127.0.0.1", 9123, tmp)
+
+    def test_task_run_list_api_persists_interrupted_state(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_run = create_task_run(root, "inspect auth", [])
+            update_task_run(task_run, "diagnosing", "Diagnosing validation failure.")
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            clear_task_runs()
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                query = urlencode({"source_repo": str(root), "limit": "5"})
+                with urlopen(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs?{query}",
+                    timeout=5,
+                ) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                restored = data["task_runs"][0]
+                self.assertEqual(restored["status"], "interrupted")
+                self.assertEqual(restored["interrupted_from"], "diagnosing")
+                self.assertEqual(store.get_task_run(task_run.run_id)["status"], "interrupted")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
 
     def test_task_run_start_persists_state_without_credentials(self) -> None:
         clear_task_runs()

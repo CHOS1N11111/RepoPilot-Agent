@@ -289,6 +289,29 @@ button:disabled:hover {
   font-weight: 800;
 }
 
+.task-run-status.warning {
+  color: var(--warn);
+}
+
+.interruption-notice {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0 4px;
+  padding: 11px 12px;
+  border-left: 4px solid var(--warn);
+  background: #fff8e6;
+  color: var(--text);
+}
+
+.interruption-notice[hidden] {
+  display: none;
+}
+
+.interruption-notice span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .task-run-phases {
   display: grid;
   grid-template-columns: repeat(6, minmax(92px, 1fr));

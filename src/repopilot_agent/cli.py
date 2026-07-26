@@ -176,6 +176,11 @@ def main() -> int:
     serve_parser = subparsers.add_parser("serve", help="Start the local RepoPilot web UI.")
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host for the local web server.")
     serve_parser.add_argument("--port", type=int, default=8765, help="Port for the local web server.")
+    serve_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository whose unfinished task runs are checked during server startup.",
+    )
 
     args = parser.parse_args()
     if args.command == "run":
@@ -206,7 +211,7 @@ def main() -> int:
     if args.command == "github":
         return _handle_github_command(args)
     if args.command == "serve":
-        run_web_server(args.host, args.port)
+        run_web_server(args.host, args.port, args.repo)
         return 0
     return 1
 

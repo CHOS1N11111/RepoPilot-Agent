@@ -97,6 +97,9 @@ class TaskRun:
     repair_stop_reason: str | None = None
     repair_stop_message: str = ""
     auto_repair_enabled: bool = False
+    interrupted_from: str | None = None
+    interrupted_at: str | None = None
+    interruption_reason: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -196,15 +199,34 @@ def task_run_from_record(record: dict[str, Any], mark_interrupted: bool = False)
         repair_stop_reason=_optional_string(record.get("repair_stop_reason")),
         repair_stop_message=str(record.get("repair_stop_message") or ""),
         auto_repair_enabled=bool(record.get("auto_repair_enabled", False)),
+        interrupted_from=_optional_string(record.get("interrupted_from")),
+        interrupted_at=_optional_string(record.get("interrupted_at")),
+        interruption_reason=_optional_string(record.get("interruption_reason")),
     )
     if mark_interrupted and task_run.status in ACTIVE_TASK_RUN_STATUSES:
-        update_task_run(
-            task_run,
-            "interrupted",
-            "The server stopped while this task was active. Resume it to restart from a safe checkpoint.",
-            error="Task execution was interrupted by a server restart.",
-        )
+        mark_task_run_interrupted(task_run)
     return cache_task_run(task_run)
+
+
+def mark_task_run_interrupted(
+    task_run: TaskRun,
+    reason: str = "server_restart",
+) -> TaskRun:
+    if task_run.status not in ACTIVE_TASK_RUN_STATUSES:
+        return task_run
+    previous_status = task_run.status
+    detected_at = _now()
+    if not task_run.resume_status:
+        task_run.resume_status = previous_status
+    return update_task_run(
+        task_run,
+        "interrupted",
+        "The server stopped while this task was active. No work was resumed automatically.",
+        error="Task execution was interrupted by a server restart.",
+        interrupted_from=previous_status,
+        interrupted_at=detected_at,
+        interruption_reason=reason,
+    )
 
 
 def update_task_run(
