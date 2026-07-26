@@ -19,7 +19,12 @@ from repopilot_agent.execution import (
     pending_completion_evidence,
 )
 from repopilot_agent.task_runs import (
+    RESUME_CHECKPOINT_APPROVAL,
+    RESUME_CHECKPOINT_BLOCKED,
+    RESUME_CHECKPOINT_INSPECTION,
+    RESUME_CHECKPOINT_SANDBOX,
     TaskRunError,
+    build_task_run_resume_plan,
     checkpoint_task_run,
     clear_task_runs,
     create_task_run,
@@ -78,10 +83,21 @@ class TaskRunStateTests(unittest.TestCase):
             request_task_run_pause(task_run)
             self.assertEqual(task_run.status, "paused")
             self.assertEqual(task_run.resume_status, "awaiting_approval")
+            self.assertEqual(task_run.resume_checkpoint, RESUME_CHECKPOINT_APPROVAL)
 
-            prepare_task_run_resume(task_run)
+            with self.assertRaises(TaskRunError):
+                prepare_task_run_resume(task_run, RESUME_CHECKPOINT_APPROVAL, confirmed=False)
+            prepare_task_run_resume(task_run, RESUME_CHECKPOINT_APPROVAL, confirmed=True)
             self.assertEqual(task_run.status, "awaiting_approval")
             self.assertEqual(task_run.proposal_id, "proposal-1")
+            self.assertIsNone(task_run.resume_checkpoint)
+            self.assertEqual(task_run.last_resume_checkpoint, RESUME_CHECKPOINT_APPROVAL)
+            self.assertEqual(task_run.resume_count, 1)
+            self.assertIsNotNone(task_run.last_resumed_at)
+
+            restored = task_run_from_record(task_run.to_record())
+            self.assertEqual(restored.last_resume_checkpoint, RESUME_CHECKPOINT_APPROVAL)
+            self.assertEqual(restored.resume_count, 1)
 
     def test_cancel_request_stops_at_safe_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -112,6 +128,7 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(restored.interrupted_from, "exploring")
             self.assertEqual(restored.resume_status, "exploring")
             self.assertEqual(restored.interruption_reason, "server_restart")
+            self.assertEqual(restored.resume_checkpoint, RESUME_CHECKPOINT_SANDBOX)
             self.assertIsNotNone(restored.interrupted_at)
             self.assertIn("No work was resumed automatically", restored.message)
             self.assertEqual(store.list_task_runs(limit=1)[0]["run_id"], task_run.run_id)
@@ -131,6 +148,53 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(task_run.resume_status, "validating")
             self.assertEqual(task_run.interrupted_at, detected_at)
             self.assertEqual(len(task_run.events), event_count)
+
+    def test_interrupted_write_phase_requires_sandbox_inspection_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [])
+            update_task_run(task_run, "applying", "Applying proposal.", sandbox_path=tmp)
+
+            mark_task_run_interrupted(task_run)
+            plan = build_task_run_resume_plan(task_run)
+
+            self.assertEqual(plan.checkpoint, RESUME_CHECKPOINT_INSPECTION)
+            self.assertTrue(plan.allowed)
+            self.assertTrue(plan.reuse_sandbox)
+            self.assertTrue(plan.requires_clean_sandbox)
+
+    def test_interrupted_replanning_uses_inspection_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [])
+            update_task_run(task_run, "replanning", "Preparing repair.", sandbox_path=tmp)
+
+            mark_task_run_interrupted(task_run)
+
+            self.assertEqual(task_run.resume_checkpoint, RESUME_CHECKPOINT_INSPECTION)
+
+    def test_interrupted_cancellation_has_no_resume_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [])
+            update_task_run(task_run, "cancelling", "Cancellation in progress.", sandbox_path=tmp)
+
+            mark_task_run_interrupted(task_run)
+            public = task_run.to_public_dict()
+
+            self.assertEqual(public["resume_checkpoint"], RESUME_CHECKPOINT_BLOCKED)
+            self.assertFalse(public["can_resume"])
+            self.assertIn("Cancellation was in progress", public["resume_blocked_reason"])
+
+    def test_resume_rejects_stale_checkpoint_without_changing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [])
+            update_task_run(task_run, "exploring", "Exploring.", sandbox_path=tmp)
+            mark_task_run_interrupted(task_run)
+
+            with self.assertRaises(TaskRunError) as raised:
+                prepare_task_run_resume(task_run, RESUME_CHECKPOINT_APPROVAL, confirmed=True)
+
+            self.assertIn("checkpoint changed", str(raised.exception))
+            self.assertEqual(task_run.status, "interrupted")
+            self.assertEqual(task_run.resume_count, 0)
 
     def test_execution_contract_round_trips_through_persistent_task_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

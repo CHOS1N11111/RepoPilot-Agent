@@ -49,6 +49,7 @@ from .runtime import SQLiteRuntimeStore
 from .safety import SafetyCheckError
 from .task_runs import (
     ACTIVE_TASK_RUN_STATUSES,
+    RESUME_CHECKPOINT_SOURCE,
     TaskRun,
     TaskRunError,
     checkpoint_task_run,
@@ -61,6 +62,7 @@ from .task_runs import (
     request_task_run_pause,
     task_run_from_record,
     update_task_run,
+    validate_task_run_resume_request,
 )
 from .validation_feedback import build_validation_feedback
 from .validator import run_validation
@@ -1505,22 +1507,37 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if task_run is None:
             return
         try:
-            llm_client = _payload_llm_client(payload)
-            prepare_task_run_resume(task_run)
+            requested_checkpoint = str(payload.get("resume_checkpoint") or "").strip()
+            plan = validate_task_run_resume_request(
+                task_run,
+                requested_checkpoint,
+                _payload_bool(payload.get("confirm_resume"), default=False),
+            )
+            if plan.requires_sandbox:
+                if not task_run.sandbox_path or not Path(task_run.sandbox_path).is_dir():
+                    raise TaskRunError("The saved task sandbox no longer exists.")
+                if plan.requires_clean_sandbox and not inspect_repository(task_run.sandbox_path).clean:
+                    raise TaskRunError(
+                        "The task sandbox has uncommitted changes. Inspect or revert them before resuming."
+                    )
+            elif plan.checkpoint == RESUME_CHECKPOINT_SOURCE:
+                if not Path(task_run.source_repo).is_dir():
+                    raise TaskRunError("The source repository no longer exists.")
+                if not inspect_repository(task_run.source_repo).clean:
+                    raise TaskRunError(
+                        "The source repository has uncommitted changes. Commit or revert them before resuming."
+                    )
+            llm_client = _payload_llm_client(payload) if plan.target_status == "queued" else None
+            prepare_task_run_resume(task_run, requested_checkpoint, confirmed=True)
             self._persist_task_run(task_run)
             if task_run.status not in {"awaiting_approval", "repair_pending"}:
-                if task_run.sandbox_path and not inspect_repository(task_run.sandbox_path).clean:
-                    raise TaskRunError(
-                        "The task sandbox has uncommitted changes. Inspect or revert them before resuming analysis."
-                    )
                 self._launch_task_run_worker(
                     task_run,
                     payload,
                     llm_client,
-                    reuse_sandbox=bool(task_run.sandbox_path),
+                    reuse_sandbox=plan.reuse_sandbox,
                 )
-        except (TaskRunError, LLMError, ValueError, FileNotFoundError) as exc:
-            update_task_run(task_run, "failed", "Task run could not be resumed safely.", error=str(exc))
+        except (TaskRunError, LLMError, ValueError, FileNotFoundError, RuntimeError) as exc:
             self._persist_task_run(task_run)
             self._send_json({"error": str(exc), "task_run": task_run.to_public_dict()}, status=HTTPStatus.CONFLICT)
             return

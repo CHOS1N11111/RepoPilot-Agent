@@ -56,6 +56,13 @@ ACTIVE_TASK_RUN_STATUSES = {
 
 RESUMABLE_TASK_RUN_STATUSES = {"paused", "cancelled", "failed", "interrupted"}
 
+RESUME_CHECKPOINT_SOURCE = "source_restart"
+RESUME_CHECKPOINT_SANDBOX = "sandbox_analysis"
+RESUME_CHECKPOINT_INSPECTION = "sandbox_inspection"
+RESUME_CHECKPOINT_APPROVAL = "approval"
+RESUME_CHECKPOINT_REPAIR = "repair_approval"
+RESUME_CHECKPOINT_BLOCKED = "blocked"
+
 
 class TaskRunError(RuntimeError):
     """Raised when a task-run operation is invalid or unsafe."""
@@ -66,6 +73,25 @@ class TaskRunEvent:
     status: str
     detail: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class TaskRunResumePlan:
+    checkpoint: str
+    target_status: str
+    reuse_sandbox: bool
+    requires_sandbox: bool
+    requires_clean_sandbox: bool
+    blocked_reason: str = ""
+
+    @property
+    def allowed(self) -> bool:
+        return not self.blocked_reason and self.checkpoint != RESUME_CHECKPOINT_BLOCKED
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["allowed"] = self.allowed
+        return data
 
 
 @dataclass
@@ -100,17 +126,23 @@ class TaskRun:
     interrupted_from: str | None = None
     interrupted_at: str | None = None
     interruption_reason: str | None = None
+    resume_checkpoint: str | None = None
+    last_resume_checkpoint: str | None = None
+    resume_blocked_reason: str | None = None
+    resume_count: int = 0
+    last_resumed_at: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
 
     def to_public_dict(self) -> dict[str, Any]:
         data = self.to_record()
+        resume_plan = build_task_run_resume_plan(self)
         data["can_pause"] = self.status in ACTIVE_TASK_RUN_STATUSES and self.status not in {
             "pausing",
             "cancelling",
         }
-        data["can_resume"] = self.status in RESUMABLE_TASK_RUN_STATUSES
+        data["can_resume"] = self.status in RESUMABLE_TASK_RUN_STATUSES and resume_plan.allowed
         data["can_cancel"] = self.status not in {"cancelled", "completed"}
         data["can_approve"] = self.status == "awaiting_approval" and bool(self.proposal_id)
         data["can_repair"] = self.status == "repair_pending"
@@ -121,6 +153,13 @@ class TaskRun:
             self.completion_evidence.to_dict() if self.completion_evidence else None
         )
         data["repair_history"] = [item.to_dict() for item in self.repair_history]
+        if self.status in RESUMABLE_TASK_RUN_STATUSES:
+            data["resume_checkpoint"] = resume_plan.checkpoint or self.resume_checkpoint
+            data["resume_blocked_reason"] = resume_plan.blocked_reason or self.resume_blocked_reason
+        else:
+            data["resume_checkpoint"] = self.resume_checkpoint
+            data["resume_blocked_reason"] = self.resume_blocked_reason
+        data["resume_plan"] = resume_plan.to_dict()
         return data
 
 
@@ -202,6 +241,11 @@ def task_run_from_record(record: dict[str, Any], mark_interrupted: bool = False)
         interrupted_from=_optional_string(record.get("interrupted_from")),
         interrupted_at=_optional_string(record.get("interrupted_at")),
         interruption_reason=_optional_string(record.get("interruption_reason")),
+        resume_checkpoint=_optional_string(record.get("resume_checkpoint")),
+        last_resume_checkpoint=_optional_string(record.get("last_resume_checkpoint")),
+        resume_blocked_reason=_optional_string(record.get("resume_blocked_reason")),
+        resume_count=_nonnegative_int(record.get("resume_count")),
+        last_resumed_at=_optional_string(record.get("last_resumed_at")),
     )
     if mark_interrupted and task_run.status in ACTIVE_TASK_RUN_STATUSES:
         mark_task_run_interrupted(task_run)
@@ -218,6 +262,14 @@ def mark_task_run_interrupted(
     detected_at = _now()
     if not task_run.resume_status:
         task_run.resume_status = previous_status
+    if previous_status == "cancelling":
+        checkpoint, blocked_reason = _resume_checkpoint_for_state(task_run, previous_status)
+    elif task_run.resume_checkpoint:
+        checkpoint = task_run.resume_checkpoint
+        blocked_reason = task_run.resume_blocked_reason or ""
+    else:
+        state = task_run.resume_status if previous_status == "pausing" else previous_status
+        checkpoint, blocked_reason = _resume_checkpoint_for_state(task_run, state or previous_status)
     return update_task_run(
         task_run,
         "interrupted",
@@ -226,6 +278,8 @@ def mark_task_run_interrupted(
         interrupted_from=previous_status,
         interrupted_at=detected_at,
         interruption_reason=reason,
+        resume_checkpoint=checkpoint,
+        resume_blocked_reason=blocked_reason or None,
     )
 
 
@@ -257,11 +311,18 @@ def request_task_run_pause(task_run: TaskRun) -> TaskRun:
     if task_run.status in {"awaiting_approval", "repair_pending"}:
         task_run.resume_status = task_run.status
         task_run.pause_requested = False
+        task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(
+            task_run,
+            task_run.status,
+        )
+        task_run.resume_blocked_reason = blocked or None
         return update_task_run(task_run, "paused", "Task run paused at the approval checkpoint.")
     if task_run.status not in ACTIVE_TASK_RUN_STATUSES or task_run.status in {"pausing", "cancelling"}:
         raise TaskRunError(f"Task run cannot be paused while it is {task_run.status}.")
     task_run.pause_requested = True
     task_run.resume_status = task_run.status
+    task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, task_run.status)
+    task_run.resume_blocked_reason = blocked or None
     return update_task_run(
         task_run,
         "pausing",
@@ -273,6 +334,11 @@ def request_task_run_cancel(task_run: TaskRun) -> TaskRun:
     if task_run.status in {"cancelled", "completed"}:
         raise TaskRunError(f"Task run cannot be cancelled while it is {task_run.status}.")
     task_run.cancel_requested = True
+    if not task_run.resume_status:
+        task_run.resume_status = task_run.status
+    if not task_run.resume_checkpoint:
+        task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, task_run.status)
+        task_run.resume_blocked_reason = blocked or None
     if task_run.status in {"awaiting_approval", "repair_pending", "paused", "failed", "interrupted"}:
         return update_task_run(
             task_run,
@@ -298,22 +364,130 @@ def checkpoint_task_run(task_run: TaskRun, resume_status: str) -> bool:
     if task_run.pause_requested:
         task_run.pause_requested = False
         task_run.resume_status = resume_status
+        task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, resume_status)
+        task_run.resume_blocked_reason = blocked or None
         update_task_run(task_run, "paused", "Task run paused at a safe checkpoint.")
         return True
     return False
 
 
-def prepare_task_run_resume(task_run: TaskRun) -> TaskRun:
+def build_task_run_resume_plan(task_run: TaskRun) -> TaskRunResumePlan:
+    if task_run.status not in RESUMABLE_TASK_RUN_STATUSES:
+        return TaskRunResumePlan(
+            checkpoint="",
+            target_status=task_run.status,
+            reuse_sandbox=False,
+            requires_sandbox=False,
+            requires_clean_sandbox=False,
+            blocked_reason=f"Task run cannot be resumed while it is {task_run.status}.",
+        )
+    checkpoint = task_run.resume_checkpoint
+    blocked_reason = task_run.resume_blocked_reason or ""
+    if not checkpoint:
+        if task_run.status == "interrupted":
+            state = task_run.interrupted_from or task_run.resume_status or ""
+        elif task_run.status == "paused":
+            state = task_run.resume_status or ""
+        else:
+            state = task_run.status
+        checkpoint, derived_block = _resume_checkpoint_for_state(task_run, state)
+        blocked_reason = blocked_reason or derived_block
+    if checkpoint == RESUME_CHECKPOINT_APPROVAL:
+        if not task_run.proposal_id:
+            blocked_reason = blocked_reason or "The saved approval checkpoint has no proposal."
+        return TaskRunResumePlan(checkpoint, "awaiting_approval", False, False, False, blocked_reason)
+    if checkpoint == RESUME_CHECKPOINT_REPAIR:
+        if not task_run.proposal_id:
+            blocked_reason = blocked_reason or "The saved repair checkpoint has no proposal."
+        return TaskRunResumePlan(checkpoint, "repair_pending", False, False, False, blocked_reason)
+    if checkpoint == RESUME_CHECKPOINT_SOURCE:
+        return TaskRunResumePlan(checkpoint, "queued", False, False, False, blocked_reason)
+    if checkpoint == RESUME_CHECKPOINT_SANDBOX:
+        return TaskRunResumePlan(checkpoint, "queued", True, True, True, blocked_reason)
+    if checkpoint == RESUME_CHECKPOINT_INSPECTION:
+        return TaskRunResumePlan(checkpoint, "queued", True, True, True, blocked_reason)
+    return TaskRunResumePlan(
+        checkpoint=RESUME_CHECKPOINT_BLOCKED,
+        target_status=task_run.status,
+        reuse_sandbox=False,
+        requires_sandbox=False,
+        requires_clean_sandbox=False,
+        blocked_reason=blocked_reason or "No safe manual resume checkpoint is available.",
+    )
+
+
+def validate_task_run_resume_request(
+    task_run: TaskRun,
+    checkpoint: str,
+    confirmed: bool,
+) -> TaskRunResumePlan:
     if task_run.status not in RESUMABLE_TASK_RUN_STATUSES:
         raise TaskRunError(f"Task run cannot be resumed while it is {task_run.status}.")
+    if not confirmed:
+        raise TaskRunError("Explicit manual resume confirmation is required.")
+    plan = build_task_run_resume_plan(task_run)
+    if not plan.allowed:
+        raise TaskRunError(plan.blocked_reason)
+    requested = checkpoint.strip()
+    if requested != plan.checkpoint:
+        raise TaskRunError(
+            f"Resume checkpoint changed from {requested or '(missing)'} to {plan.checkpoint}; review it again."
+        )
+    return plan
+
+
+def prepare_task_run_resume(
+    task_run: TaskRun,
+    checkpoint: str,
+    confirmed: bool,
+) -> TaskRun:
+    plan = validate_task_run_resume_request(task_run, checkpoint, confirmed)
     if task_run.cancel_requested:
         task_run.cancel_requested = False
     task_run.pause_requested = False
     task_run.error = None
-    status = task_run.resume_status or ("exploring" if task_run.sandbox_path else "queued")
-    if status in {"awaiting_approval", "repair_pending"} and task_run.proposal_id:
-        return update_task_run(task_run, status, "Task run resumed at the approval checkpoint.")
-    return update_task_run(task_run, "queued", "Task run queued to resume from its sandbox checkpoint.")
+    task_run.last_resume_checkpoint = plan.checkpoint
+    task_run.resume_checkpoint = None
+    task_run.resume_blocked_reason = None
+    task_run.resume_count += 1
+    task_run.last_resumed_at = _now()
+    if plan.checkpoint in {RESUME_CHECKPOINT_APPROVAL, RESUME_CHECKPOINT_REPAIR}:
+        return update_task_run(
+            task_run,
+            plan.target_status,
+            "Task run manually resumed at the saved approval checkpoint.",
+        )
+    if plan.checkpoint == RESUME_CHECKPOINT_SOURCE:
+        message = "Manual resume confirmed. Task run queued with a new sandbox."
+    elif plan.checkpoint == RESUME_CHECKPOINT_INSPECTION:
+        message = "Sandbox inspection confirmed. Task run queued to restart analysis safely."
+    else:
+        message = "Manual resume confirmed. Task run queued from the preserved sandbox checkpoint."
+    return update_task_run(task_run, "queued", message)
+
+
+def _resume_checkpoint_for_state(task_run: TaskRun, state: str) -> tuple[str, str]:
+    if state == "awaiting_approval" and task_run.proposal_id:
+        return RESUME_CHECKPOINT_APPROVAL, ""
+    if state == "repair_pending" and task_run.proposal_id:
+        return RESUME_CHECKPOINT_REPAIR, ""
+    if state == "cancelling":
+        return RESUME_CHECKPOINT_BLOCKED, "Cancellation was in progress when the server stopped."
+    if state in {"applying", "validating", "diagnosing", "replanning"}:
+        if task_run.sandbox_path:
+            return RESUME_CHECKPOINT_INSPECTION, ""
+        return RESUME_CHECKPOINT_BLOCKED, "The interrupted write phase has no sandbox to inspect."
+    if state in {"queued", "creating_sandbox"}:
+        if task_run.sandbox_path:
+            return RESUME_CHECKPOINT_SANDBOX, ""
+        return RESUME_CHECKPOINT_SOURCE, ""
+    if state in {"exploring", "pausing"}:
+        if task_run.sandbox_path:
+            return RESUME_CHECKPOINT_SANDBOX, ""
+        return RESUME_CHECKPOINT_BLOCKED, "The saved analysis checkpoint has no sandbox."
+    if task_run.sandbox_path:
+        return RESUME_CHECKPOINT_INSPECTION, ""
+    return RESUME_CHECKPOINT_SOURCE, ""
 
 
 def create_task_run_branch(task_run: TaskRun, branch_name: str, confirmed: bool) -> str:
@@ -391,6 +565,13 @@ def _optional_string(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _now() -> str:

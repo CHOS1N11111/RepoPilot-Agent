@@ -163,16 +163,31 @@ async function pauseTaskRun() {
 
 async function resumeTaskRun() {
   if (!state.taskRun) return;
+  const checkpoint = String(state.taskRun.resume_checkpoint || "").trim();
+  if (!checkpoint || !state.taskRun.can_resume) {
+    setStatus(state.taskRun.resume_blocked_reason || "No safe resume checkpoint is available.");
+    return;
+  }
+  const checkpointLabel = checkpoint.replaceAll("_", " ");
+  const confirmed = window.confirm(
+    `Resume this task from the ${checkpointLabel} checkpoint? RepoPilot will run the saved safety preflight first.`
+  );
+  if (!confirmed) return;
   setStatus("Resuming task run...");
   try {
     const data = await postJson("/api/task-runs/resume", {
       ...buildWorkflowPayload(),
       ...taskRunControlPayload(),
+      resume_checkpoint: checkpoint,
+      confirm_resume: true,
     });
-    if (data.error) throw new Error(data.error);
+    if (data.error) {
+      if (data.task_run) updateTaskRun(data.task_run);
+      throw new Error(data.error);
+    }
     state.taskRunPayload = buildWorkflowPayload();
     updateTaskRun(data.task_run);
-    startTaskRunPolling();
+    if (data.task_run.can_pause) startTaskRunPolling();
     setStatus(data.task_run.message || "Task run resumed.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
@@ -344,6 +359,7 @@ function renderTaskRun(taskRun) {
   $("taskRunDelivery").textContent = taskRun.delivery_branch
     ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
     : "No delivery branch created.";
+  renderTaskRunResumePlan(taskRun);
   renderTaskRunPhases(taskRun);
   $("taskRunCriteria").innerHTML = renderAcceptanceCriteria(
     taskRun.acceptance_criteria || [],
@@ -376,12 +392,30 @@ function renderTaskRunInterruption(taskRun) {
   const previous = String(taskRun.interrupted_from || "unknown").replaceAll("_", " ");
   const reason = String(taskRun.interruption_reason || "server restart").replaceAll("_", " ");
   const detected = formatTime(taskRun.interrupted_at) || "unknown time";
+  const checkpoint = String(taskRun.resume_checkpoint || "blocked").replaceAll("_", " ");
   notice.innerHTML = `
     <strong>Execution interrupted</strong>
     <span>Previous state: ${escapeHtml(previous)} | Detected: ${escapeHtml(detected)} | Reason: ${escapeHtml(reason)}</span>
+    <span>Resume checkpoint: ${escapeHtml(checkpoint)}</span>
     <span>No work resumed automatically. Inspect the preserved sandbox before choosing Resume or Cancel.</span>
   `;
   notice.hidden = false;
+}
+
+function renderTaskRunResumePlan(taskRun) {
+  const line = $("taskRunResumeLine");
+  const plan = taskRun.resume_plan || {};
+  if (!taskRun.can_resume && !taskRun.resume_blocked_reason) {
+    line.textContent = "";
+    return;
+  }
+  if (taskRun.resume_blocked_reason) {
+    line.textContent = `Resume blocked: ${taskRun.resume_blocked_reason}`;
+    return;
+  }
+  const checkpoint = String(plan.checkpoint || taskRun.resume_checkpoint || "unknown").replaceAll("_", " ");
+  const requirement = plan.requires_clean_sandbox ? " Clean sandbox required." : "";
+  line.textContent = `Resume checkpoint: ${checkpoint}.${requirement}`;
 }
 
 function renderTaskRunPhases(taskRun) {

@@ -182,10 +182,15 @@ class WebApprovalUiContractTests(unittest.TestCase):
 
     def test_interrupted_task_state_has_a_dedicated_notice(self) -> None:
         self.assertIn('id="taskRunInterruption"', self.index_html)
+        self.assertIn('id="taskRunResumeLine"', self.index_html)
         self.assertIn("function renderTaskRunInterruption", self.app_js)
+        self.assertIn("function renderTaskRunResumePlan", self.app_js)
         self.assertIn("taskRun.interrupted_from", self.app_js)
         self.assertIn("taskRun.interrupted_at", self.app_js)
         self.assertIn("taskRun.interruption_reason", self.app_js)
+        self.assertIn("resume_checkpoint: checkpoint", self.app_js)
+        self.assertIn("confirm_resume: true", self.app_js)
+        self.assertIn("window.confirm", self.app_js)
         self.assertIn('"interrupted", "awaiting_approval"', self.app_js)
         self.assertIn(".interruption-notice", self.app_css)
 

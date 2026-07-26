@@ -42,7 +42,14 @@ from repopilot_agent.repair_loop import (
     record_repair_proposal,
     record_validation_outcome,
 )
-from repopilot_agent.task_runs import clear_task_runs, create_task_run, update_task_run
+from repopilot_agent.task_runs import (
+    RESUME_CHECKPOINT_SANDBOX,
+    clear_task_runs,
+    create_task_run,
+    mark_task_run_interrupted,
+    request_task_run_pause,
+    update_task_run,
+)
 from repopilot_agent.structured_patch import apply_structured_patch as apply_exact_patch
 from repopilot_agent.web_server import (
     RepoPilotRequestHandler,
@@ -312,6 +319,186 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(restored["status"], "interrupted")
                 self.assertEqual(restored["interrupted_from"], "diagnosing")
                 self.assertEqual(store.get_task_run(task_run.run_id)["status"], "interrupted")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_resume_api_requires_confirmation_without_changing_state(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+            task_run = create_task_run(root, "inspect auth", [])
+            update_task_run(task_run, "exploring", "Exploring.", sandbox_path=str(root))
+            mark_task_run_interrupted(task_run)
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": RESUME_CHECKPOINT_SANDBOX,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=5)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 409)
+                self.assertIn("confirmation", data["error"])
+                self.assertEqual(data["task_run"]["status"], "interrupted")
+                self.assertEqual(store.get_task_run(task_run.run_id)["status"], "interrupted")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_resume_api_rejects_dirty_sandbox_without_changing_state(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+            task_run = create_task_run(root, "inspect auth", [])
+            update_task_run(task_run, "exploring", "Exploring.", sandbox_path=str(root))
+            mark_task_run_interrupted(task_run)
+            (root / "README.md").write_text("# Dirty sandbox\n", encoding="utf-8")
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": RESUME_CHECKPOINT_SANDBOX,
+                            "confirm_resume": True,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch:
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(request, timeout=5)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 409)
+                self.assertIn("uncommitted changes", data["error"])
+                self.assertEqual(data["task_run"]["status"], "interrupted")
+                self.assertEqual(data["task_run"]["resume_count"], 0)
+                launch.assert_not_called()
+                self.assertEqual(store.get_task_run(task_run.run_id)["status"], "interrupted")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_resume_api_launches_from_confirmed_clean_checkpoint(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+            task_run = create_task_run(root, "inspect auth", [])
+            update_task_run(task_run, "exploring", "Exploring.", sandbox_path=str(root))
+            mark_task_run_interrupted(task_run)
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": RESUME_CHECKPOINT_SANDBOX,
+                            "confirm_resume": True,
+                            "use_llm": False,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch:
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                resumed = data["task_run"]
+                self.assertEqual(resumed["status"], "queued")
+                self.assertEqual(resumed["resume_count"], 1)
+                self.assertIsNotNone(resumed["last_resumed_at"])
+                launch.assert_called_once()
+                self.assertTrue(launch.call_args.kwargs["reuse_sandbox"])
+                self.assertEqual(store.get_task_run(task_run.run_id)["status"], "queued")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_resume_api_restores_approval_without_launching_worker(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_run = create_task_run(root, "review proposal", [])
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Proposal ready.",
+                proposal_id="proposal-approval",
+            )
+            request_task_run_pause(task_run)
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": "approval",
+                            "confirm_resume": True,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with (
+                    patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch,
+                    patch("repopilot_agent.web_server._payload_llm_client") as llm_factory,
+                ):
+                    with urlopen(request, timeout=5) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+
+                resumed = data["task_run"]
+                self.assertEqual(resumed["status"], "awaiting_approval")
+                self.assertEqual(resumed["proposal_id"], "proposal-approval")
+                self.assertEqual(resumed["last_resume_checkpoint"], "approval")
+                launch.assert_not_called()
+                llm_factory.assert_not_called()
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

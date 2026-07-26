@@ -539,6 +539,16 @@ The Repair Loop panels show each attempt's trigger failure fingerprint, proposal
 
 At Web server startup, RepoPilot scans the repository selected by `serve --repo` for task records left in an active state. Those records become `interrupted` with the previous state, UTC detection timestamp, and `server_restart` reason saved in SQLite. The Task Run tab shows these details in a dedicated notice. This detection step never resumes a worker, calls an LLM, runs validation, or changes sandbox files. Loading a different repository's Task Run history performs the same idempotent check. Inspect the preserved sandbox before using the existing `Resume` or `Cancel` action.
 
+Resume is always manual and checkpoint-aware. The Task Run tab shows one of these checkpoints before enabling the action:
+
+- `source_restart`: create a new sandbox from a clean source repository.
+- `sandbox_analysis`: restart analysis in an existing clean sandbox.
+- `sandbox_inspection`: require inspection and a clean sandbox after an interrupted write, validation, diagnosis, or re-planning phase.
+- `approval`: return to the saved proposal approval state without starting a worker.
+- `repair_approval`: return to the saved repair approval state without starting a worker.
+
+Clicking Resume opens a confirmation that names the checkpoint. The request includes that exact checkpoint and explicit confirmation, preventing a stale browser from approving a different recovery path. RepoPilot runs all repository, sandbox, Git cleanliness, and LLM configuration checks before changing the task state. If preflight fails, the task remains `interrupted`, `paused`, `failed`, or `cancelled` with the sandbox preserved. A successful resume records its UTC time, checkpoint, and cumulative resume count.
+
 Branch creation is intentionally separate from task execution. It is available only after successful completion, requires explicit confirmation, validates the branch name, and verifies that the destination is a registered RepoPilot worktree. RepoPilot leaves the diff uncommitted and unpushed for manual review.
 
 ## Recommended End-To-End Test
