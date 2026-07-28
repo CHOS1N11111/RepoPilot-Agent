@@ -293,6 +293,8 @@ Task-run state is saved in the source repository's local SQLite database. Start 
 
 Manual Resume uses a persisted, exact-match checkpoint: `source_restart`, `sandbox_analysis`, `sandbox_inspection`, `approval`, or `repair_approval`. The Web UI shows the selected checkpoint and asks for explicit confirmation. The server validates that the checkpoint has not changed, verifies required repositories and sandboxes, and requires a clean worktree before restarting analysis. Interrupted apply, validation, diagnosis, and re-planning states use `sandbox_inspection` because edits may already exist. A missing or dirty sandbox, stale checkpoint, missing confirmation, or invalid LLM configuration returns a conflict without changing the interrupted/paused task state. Successful resumes record the checkpoint, timestamp, and cumulative resume count; approval checkpoints return directly to human review without launching another worker.
 
+Execution checkpoints are a separate audit history, not Resume Plan decisions. RepoPilot records a snapshot after each stable task boundary, including its monotonic sequence, phase and status, detail, intended next action, UTC timestamp, sandbox and proposal references, execution-budget usage and remaining capacity, and current repair attempt. The Task Run tab shows the latest snapshot and the 20 most recent entries; persistence keeps the latest 100 per run. Recording a checkpoint never resumes a worker or replays an LLM call, tool, patch, or validation command.
+
 After a successful run, `Create Branch` can attach the sandbox to a validated local feature branch. This requires explicit confirmation and works only for a registered RepoPilot worktree. It does not stage, commit, push, or create a pull request.
 
 ## LLM Configuration

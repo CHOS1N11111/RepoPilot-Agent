@@ -62,6 +62,7 @@ RESUME_CHECKPOINT_INSPECTION = "sandbox_inspection"
 RESUME_CHECKPOINT_APPROVAL = "approval"
 RESUME_CHECKPOINT_REPAIR = "repair_approval"
 RESUME_CHECKPOINT_BLOCKED = "blocked"
+MAX_TASK_RUN_CHECKPOINTS = 100
 
 
 class TaskRunError(RuntimeError):
@@ -73,6 +74,25 @@ class TaskRunEvent:
     status: str
     detail: str
     created_at: str
+
+
+@dataclass(frozen=True)
+class TaskRunCheckpoint:
+    sequence: int
+    phase: str
+    status: str
+    detail: str
+    next_action: str
+    created_at: str
+    sandbox_path: str | None = None
+    sandbox_head: str | None = None
+    proposal_id: str | None = None
+    execution_usage: dict[str, int] = field(default_factory=dict)
+    execution_remaining: dict[str, int] = field(default_factory=dict)
+    repair_attempt: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -131,6 +151,7 @@ class TaskRun:
     resume_blocked_reason: str | None = None
     resume_count: int = 0
     last_resumed_at: str | None = None
+    checkpoints: list[TaskRunCheckpoint] = field(default_factory=list)
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -153,6 +174,10 @@ class TaskRun:
             self.completion_evidence.to_dict() if self.completion_evidence else None
         )
         data["repair_history"] = [item.to_dict() for item in self.repair_history]
+        data["checkpoints"] = [item.to_dict() for item in self.checkpoints]
+        data["latest_checkpoint"] = (
+            self.checkpoints[-1].to_dict() if self.checkpoints else None
+        )
         if self.status in RESUMABLE_TASK_RUN_STATUSES:
             data["resume_checkpoint"] = resume_plan.checkpoint or self.resume_checkpoint
             data["resume_blocked_reason"] = resume_plan.blocked_reason or self.resume_blocked_reason
@@ -186,7 +211,13 @@ def create_task_run(
         execution_budget=execution_budget or ExecutionBudget(),
         auto_repair_enabled=auto_repair_enabled,
     )
-    return cache_task_run(task_run)
+    record_task_run_checkpoint(
+        task_run,
+        "task_queued",
+        "Task run accepted and waiting for sandbox creation.",
+        "create_sandbox",
+    )
+    return task_run
 
 
 def get_task_run(run_id: str) -> TaskRun | None:
@@ -246,6 +277,7 @@ def task_run_from_record(record: dict[str, Any], mark_interrupted: bool = False)
         resume_blocked_reason=_optional_string(record.get("resume_blocked_reason")),
         resume_count=_nonnegative_int(record.get("resume_count")),
         last_resumed_at=_optional_string(record.get("last_resumed_at")),
+        checkpoints=_checkpoints_from_records(record.get("checkpoints")),
     )
     if mark_interrupted and task_run.status in ACTIVE_TASK_RUN_STATUSES:
         mark_task_run_interrupted(task_run)
@@ -270,7 +302,7 @@ def mark_task_run_interrupted(
     else:
         state = task_run.resume_status if previous_status == "pausing" else previous_status
         checkpoint, blocked_reason = _resume_checkpoint_for_state(task_run, state or previous_status)
-    return update_task_run(
+    update_task_run(
         task_run,
         "interrupted",
         "The server stopped while this task was active. No work was resumed automatically.",
@@ -281,6 +313,13 @@ def mark_task_run_interrupted(
         resume_checkpoint=checkpoint,
         resume_blocked_reason=blocked_reason or None,
     )
+    record_task_run_checkpoint(
+        task_run,
+        "interrupted",
+        "Server interruption recorded after the previous process stopped.",
+        "inspect_sandbox",
+    )
+    return task_run
 
 
 def update_task_run(
@@ -307,6 +346,40 @@ def update_task_run(
     return task_run
 
 
+def record_task_run_checkpoint(
+    task_run: TaskRun,
+    phase: str,
+    detail: str,
+    next_action: str,
+) -> TaskRunCheckpoint:
+    with _TASK_RUN_LOCK:
+        sequence = task_run.checkpoints[-1].sequence + 1 if task_run.checkpoints else 1
+        budget_state = execution_budget_state(task_run.execution_budget, task_run.execution_usage)
+        checkpoint = TaskRunCheckpoint(
+            sequence=sequence,
+            phase=phase.strip() or "unknown",
+            status=task_run.status,
+            detail=detail.strip(),
+            next_action=next_action.strip(),
+            created_at=_now(),
+            sandbox_path=task_run.sandbox_path,
+            sandbox_head=task_run.sandbox_head,
+            proposal_id=task_run.proposal_id,
+            execution_usage=_int_mapping(budget_state.get("usage")),
+            execution_remaining=_int_mapping(budget_state.get("remaining")),
+            repair_attempt=max(
+                (item.attempt for item in task_run.repair_history),
+                default=0,
+            ),
+        )
+        task_run.checkpoints.append(checkpoint)
+        if len(task_run.checkpoints) > MAX_TASK_RUN_CHECKPOINTS:
+            task_run.checkpoints = task_run.checkpoints[-MAX_TASK_RUN_CHECKPOINTS:]
+        task_run.updated_at = checkpoint.created_at
+        _TASK_RUNS[task_run.run_id] = task_run
+    return checkpoint
+
+
 def request_task_run_pause(task_run: TaskRun) -> TaskRun:
     if task_run.status in {"awaiting_approval", "repair_pending"}:
         task_run.resume_status = task_run.status
@@ -316,7 +389,14 @@ def request_task_run_pause(task_run: TaskRun) -> TaskRun:
             task_run.status,
         )
         task_run.resume_blocked_reason = blocked or None
-        return update_task_run(task_run, "paused", "Task run paused at the approval checkpoint.")
+        update_task_run(task_run, "paused", "Task run paused at the approval checkpoint.")
+        record_task_run_checkpoint(
+            task_run,
+            "paused",
+            "Task run paused after reaching an approval boundary.",
+            "manual_resume_or_cancel",
+        )
+        return task_run
     if task_run.status not in ACTIVE_TASK_RUN_STATUSES or task_run.status in {"pausing", "cancelling"}:
         raise TaskRunError(f"Task run cannot be paused while it is {task_run.status}.")
     task_run.pause_requested = True
@@ -340,11 +420,18 @@ def request_task_run_cancel(task_run: TaskRun) -> TaskRun:
         task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, task_run.status)
         task_run.resume_blocked_reason = blocked or None
     if task_run.status in {"awaiting_approval", "repair_pending", "paused", "failed", "interrupted"}:
-        return update_task_run(
+        update_task_run(
             task_run,
             "cancelled",
             "Task run cancelled. Its sandbox was preserved for inspection.",
         )
+        record_task_run_checkpoint(
+            task_run,
+            "cancelled",
+            "Cancellation completed without removing the task sandbox.",
+            "inspect_sandbox",
+        )
+        return task_run
     return update_task_run(
         task_run,
         "cancelling",
@@ -360,6 +447,12 @@ def checkpoint_task_run(task_run: TaskRun, resume_status: str) -> bool:
             "cancelled",
             "Task run cancelled at a safe checkpoint. Its sandbox was preserved for inspection.",
         )
+        record_task_run_checkpoint(
+            task_run,
+            "cancelled",
+            "Cancellation completed at a safe worker boundary.",
+            "inspect_sandbox",
+        )
         return True
     if task_run.pause_requested:
         task_run.pause_requested = False
@@ -367,6 +460,12 @@ def checkpoint_task_run(task_run: TaskRun, resume_status: str) -> bool:
         task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, resume_status)
         task_run.resume_blocked_reason = blocked or None
         update_task_run(task_run, "paused", "Task run paused at a safe checkpoint.")
+        record_task_run_checkpoint(
+            task_run,
+            "paused",
+            "Pause completed at a safe worker boundary.",
+            "manual_resume_or_cancel",
+        )
         return True
     return False
 
@@ -452,18 +551,34 @@ def prepare_task_run_resume(
     task_run.resume_count += 1
     task_run.last_resumed_at = _now()
     if plan.checkpoint in {RESUME_CHECKPOINT_APPROVAL, RESUME_CHECKPOINT_REPAIR}:
-        return update_task_run(
+        update_task_run(
             task_run,
             plan.target_status,
             "Task run manually resumed at the saved approval checkpoint.",
         )
+        record_task_run_checkpoint(
+            task_run,
+            "manual_resume",
+            "Manual resume restored the saved approval boundary.",
+            "review_repair_proposal"
+            if plan.checkpoint == RESUME_CHECKPOINT_REPAIR
+            else "review_proposal",
+        )
+        return task_run
     if plan.checkpoint == RESUME_CHECKPOINT_SOURCE:
         message = "Manual resume confirmed. Task run queued with a new sandbox."
     elif plan.checkpoint == RESUME_CHECKPOINT_INSPECTION:
         message = "Sandbox inspection confirmed. Task run queued to restart analysis safely."
     else:
         message = "Manual resume confirmed. Task run queued from the preserved sandbox checkpoint."
-    return update_task_run(task_run, "queued", message)
+    update_task_run(task_run, "queued", message)
+    record_task_run_checkpoint(
+        task_run,
+        "manual_resume",
+        "Manual resume preflight completed successfully.",
+        "explore_repository" if plan.reuse_sandbox else "create_sandbox",
+    )
+    return task_run
 
 
 def _resume_checkpoint_for_state(task_run: TaskRun, state: str) -> tuple[str, str]:
@@ -552,6 +667,42 @@ def _event_from_record(record: dict[str, Any]) -> TaskRunEvent:
         detail=str(record.get("detail") or ""),
         created_at=str(record.get("created_at") or _now()),
     )
+
+
+def _checkpoints_from_records(value: object) -> list[TaskRunCheckpoint]:
+    if not isinstance(value, list):
+        return []
+    checkpoints: list[TaskRunCheckpoint] = []
+    last_sequence = 0
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        requested_sequence = _nonnegative_int(item.get("sequence"))
+        sequence = requested_sequence if requested_sequence > last_sequence else last_sequence + 1
+        checkpoints.append(
+            TaskRunCheckpoint(
+                sequence=sequence,
+                phase=str(item.get("phase") or "unknown"),
+                status=str(item.get("status") or "unknown"),
+                detail=str(item.get("detail") or ""),
+                next_action=str(item.get("next_action") or ""),
+                created_at=str(item.get("created_at") or _now()),
+                sandbox_path=_optional_string(item.get("sandbox_path")),
+                sandbox_head=_optional_string(item.get("sandbox_head")),
+                proposal_id=_optional_string(item.get("proposal_id")),
+                execution_usage=_int_mapping(item.get("execution_usage")),
+                execution_remaining=_int_mapping(item.get("execution_remaining")),
+                repair_attempt=_nonnegative_int(item.get("repair_attempt")),
+            )
+        )
+        last_sequence = sequence
+    return checkpoints[-MAX_TASK_RUN_CHECKPOINTS:]
+
+
+def _int_mapping(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): _nonnegative_int(item) for key, item in value.items()}
 
 
 def _string_list(value: object) -> list[str]:

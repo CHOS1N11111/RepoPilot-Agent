@@ -31,13 +31,14 @@ from repopilot_agent.task_runs import (
     create_task_run_branch,
     mark_task_run_interrupted,
     prepare_task_run_resume,
+    record_task_run_checkpoint,
     request_task_run_cancel,
     request_task_run_pause,
     task_run_from_record,
     update_task_run,
 )
 from repopilot_agent.models import ValidationResult
-from repopilot_agent.repair_loop import record_validation_outcome
+from repopilot_agent.repair_loop import RepairAttemptRecord, record_validation_outcome
 from repopilot_agent.worktree_sandbox import create_worktree_sandbox, remove_worktree_sandbox
 
 
@@ -66,6 +67,8 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertTrue(queued["can_pause"])
             self.assertTrue(queued["can_cancel"])
             self.assertNotIn("api_key", queued)
+            self.assertEqual(queued["latest_checkpoint"]["phase"], "task_queued")
+            self.assertEqual(queued["latest_checkpoint"]["next_action"], "create_sandbox")
 
             update_task_run(task_run, "awaiting_approval", "Proposal ready.", proposal_id="proposal-1")
             waiting = task_run.to_public_dict()
@@ -74,6 +77,59 @@ class TaskRunStateTests(unittest.TestCase):
 
             update_task_run(task_run, "repair_pending", "Validation failed.")
             self.assertTrue(task_run.to_public_dict()["can_repair"])
+
+    def test_checkpoint_captures_runtime_state_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(
+                tmp,
+                "fix login",
+                [],
+                execution_budget=ExecutionBudget(max_agent_steps=5, max_tool_calls=8),
+            )
+            task_run.sandbox_path = str(Path(tmp) / "sandbox")
+            task_run.sandbox_head = "abc123"
+            task_run.proposal_id = "proposal-1"
+            task_run.execution_usage = ExecutionUsage(agent_steps=2, tool_calls=3)
+            task_run.repair_history = [RepairAttemptRecord(attempt=2, status="proposal_ready")]
+
+            checkpoint = record_task_run_checkpoint(
+                task_run,
+                "repair_ready",
+                "Repair proposal is ready.",
+                "review_repair_proposal",
+            )
+            restored = task_run_from_record(task_run.to_record())
+            public = restored.to_public_dict()
+
+            self.assertEqual(checkpoint.sequence, 2)
+            self.assertEqual(checkpoint.execution_usage["tool_calls"], 3)
+            self.assertEqual(checkpoint.execution_remaining["agent_steps"], 3)
+            self.assertEqual(checkpoint.repair_attempt, 2)
+            self.assertEqual(checkpoint.sandbox_head, "abc123")
+            self.assertEqual(public["latest_checkpoint"]["proposal_id"], "proposal-1")
+            self.assertEqual(len(public["checkpoints"]), 2)
+
+    def test_checkpoint_history_is_bounded_and_legacy_records_remain_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "fix login", [])
+            for index in range(104):
+                record_task_run_checkpoint(
+                    task_run,
+                    "exploration_step",
+                    f"Completed step {index + 1}.",
+                    "continue_exploration",
+                )
+
+            restored = task_run_from_record(task_run.to_record())
+            self.assertEqual(len(restored.checkpoints), 100)
+            self.assertEqual(restored.checkpoints[0].sequence, 6)
+            self.assertEqual(restored.checkpoints[-1].sequence, 105)
+
+            legacy_record = task_run.to_record()
+            legacy_record.pop("checkpoints")
+            legacy = task_run_from_record(legacy_record)
+            self.assertEqual(legacy.checkpoints, [])
+            self.assertIsNone(legacy.to_public_dict()["latest_checkpoint"])
 
     def test_pause_and_resume_at_approval_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +140,7 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(task_run.status, "paused")
             self.assertEqual(task_run.resume_status, "awaiting_approval")
             self.assertEqual(task_run.resume_checkpoint, RESUME_CHECKPOINT_APPROVAL)
+            self.assertEqual(task_run.checkpoints[-1].phase, "paused")
 
             with self.assertRaises(TaskRunError):
                 prepare_task_run_resume(task_run, RESUME_CHECKPOINT_APPROVAL, confirmed=False)
@@ -94,6 +151,7 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(task_run.last_resume_checkpoint, RESUME_CHECKPOINT_APPROVAL)
             self.assertEqual(task_run.resume_count, 1)
             self.assertIsNotNone(task_run.last_resumed_at)
+            self.assertEqual(task_run.checkpoints[-1].phase, "manual_resume")
 
             restored = task_run_from_record(task_run.to_record())
             self.assertEqual(restored.last_resume_checkpoint, RESUME_CHECKPOINT_APPROVAL)
@@ -109,6 +167,7 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertTrue(checkpoint_task_run(task_run, "exploring"))
             self.assertEqual(task_run.status, "cancelled")
             self.assertIn("preserved", task_run.message)
+            self.assertEqual(task_run.checkpoints[-1].phase, "cancelled")
 
     def test_memory_store_round_trip_and_interrupted_restore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +190,7 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(restored.resume_checkpoint, RESUME_CHECKPOINT_SANDBOX)
             self.assertIsNotNone(restored.interrupted_at)
             self.assertIn("No work was resumed automatically", restored.message)
+            self.assertEqual(restored.checkpoints[-1].phase, "interrupted")
             self.assertEqual(store.list_task_runs(limit=1)[0]["run_id"], task_run.run_id)
 
     def test_interrupt_marking_is_idempotent_for_non_active_state(self) -> None:

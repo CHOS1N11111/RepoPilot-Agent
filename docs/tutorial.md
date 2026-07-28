@@ -549,6 +549,8 @@ Resume is always manual and checkpoint-aware. The Task Run tab shows one of thes
 
 Clicking Resume opens a confirmation that names the checkpoint. The request includes that exact checkpoint and explicit confirmation, preventing a stale browser from approving a different recovery path. RepoPilot runs all repository, sandbox, Git cleanliness, and LLM configuration checks before changing the task state. If preflight fails, the task remains `interrupted`, `paused`, `failed`, or `cancelled` with the sandbox preserved. A successful resume records its UTC time, checkpoint, and cumulative resume count.
 
+The Task Run tab also contains `Latest Checkpoint` and `Checkpoint History`. These are execution snapshots rather than Resume Plan choices. Each snapshot shows the completed phase, resulting status, intended next action, timestamp, sandbox or proposal reference, execution-budget usage and remaining capacity, and repair attempt. RepoPilot writes them only after a stable boundary such as queueing, sandbox creation, analysis completion, proposal readiness, validation completion, repair readiness, pause, cancellation, interruption, or failure. The UI shows the newest 20 entries in reverse chronological order, while SQLite retains the latest 100. These records are diagnostic only: they do not trigger automatic resume or replay.
+
 Branch creation is intentionally separate from task execution. It is available only after successful completion, requires explicit confirmation, validates the branch name, and verifies that the destination is a registered RepoPilot worktree. RepoPilot leaves the diff uncommitted and unpushed for manual review.
 
 ## Recommended End-To-End Test

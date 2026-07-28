@@ -537,7 +537,9 @@ class WebServerTests(unittest.TestCase):
                 task_run = data["task_run"]
                 record = MemoryStore(default_memory_path(root)).get_task_run(task_run["run_id"])
                 self.assertEqual(task_run["status"], "queued")
+                self.assertEqual(task_run["latest_checkpoint"]["phase"], "task_queued")
                 self.assertEqual(record["task"], "inspect login behavior")
+                self.assertEqual(record["checkpoints"][0]["next_action"], "create_sandbox")
                 self.assertNotIn("must-not-be-saved", json.dumps(record))
                 self.assertEqual(
                     subprocess.run(
@@ -606,6 +608,10 @@ class WebServerTests(unittest.TestCase):
                     self.assertTrue(current["sandbox_path"])
                     self.assertEqual(current["result"]["task_run_id"], started["run_id"])
                     self.assertEqual(current["result"]["repository_source"]["local_path"], current["sandbox_path"])
+                    checkpoint_phases = [item["phase"] for item in current["checkpoints"]]
+                    self.assertIn("task_queued", checkpoint_phases)
+                    self.assertIn("sandbox_ready", checkpoint_phases)
+                    self.assertEqual(current["latest_checkpoint"]["phase"], "analysis_complete")
                     self.assertTrue(Path(current["sandbox_path"]).is_dir())
                     sandbox_path = current["sandbox_path"]
                     remove_worktree_sandbox(source, sandbox_path, force=True)
@@ -1348,6 +1354,7 @@ class WebServerTests(unittest.TestCase):
                 self.assertTrue(data["applied"])
                 self.assertEqual(data["task_run"]["status"], "repair_pending")
                 self.assertTrue(data["task_run"]["can_repair"])
+                self.assertEqual(data["task_run"]["latest_checkpoint"]["phase"], "validation_complete")
                 self.assertIsNotNone(data["validation_feedback"])
                 stored = MemoryStore(default_memory_path(root)).get_task_run(task_run.run_id)
                 self.assertEqual(stored["status"], "repair_pending")
@@ -1444,8 +1451,10 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(data["task_run"]["status"], "awaiting_approval")
                 self.assertEqual(data["task_run"]["proposal_id"], data["proposal_id"])
                 self.assertEqual(data["repair_attempt"], 1)
+                self.assertEqual(data["task_run"]["latest_checkpoint"]["phase"], "repair_ready")
                 stored = MemoryStore(default_memory_path(root)).get_task_run(task_run.run_id)
                 self.assertEqual(stored["proposal_id"], data["proposal_id"])
+                self.assertEqual(stored["checkpoints"][-1]["next_action"], "review_repair_proposal")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

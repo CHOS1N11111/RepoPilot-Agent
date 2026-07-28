@@ -360,6 +360,7 @@ function renderTaskRun(taskRun) {
     ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
     : "No delivery branch created.";
   renderTaskRunResumePlan(taskRun);
+  renderTaskRunCheckpoints(taskRun);
   renderTaskRunPhases(taskRun);
   $("taskRunCriteria").innerHTML = renderAcceptanceCriteria(
     taskRun.acceptance_criteria || [],
@@ -380,6 +381,46 @@ function renderTaskRun(taskRun) {
         )
         .join("")
     : item("No task-run events yet.");
+}
+
+function renderTaskRunCheckpoints(taskRun) {
+  const checkpoints = Array.isArray(taskRun.checkpoints) ? taskRun.checkpoints : [];
+  const latest = taskRun.latest_checkpoint || checkpoints[checkpoints.length - 1];
+  $("taskRunLatestCheckpoint").innerHTML = latest
+    ? renderTaskRunCheckpoint(latest, true)
+    : item("No execution checkpoint has been recorded.");
+  $("taskRunCheckpoints").innerHTML = checkpoints.length
+    ? checkpoints
+        .slice(-20)
+        .reverse()
+        .map((checkpoint) => renderTaskRunCheckpoint(checkpoint, false))
+        .join("")
+    : item("No checkpoint history yet.");
+}
+
+function renderTaskRunCheckpoint(checkpoint, compact) {
+  const sequence = Number(checkpoint.sequence || 0);
+  const phase = String(checkpoint.phase || "unknown").replaceAll("_", " ");
+  const status = String(checkpoint.status || "unknown").replaceAll("_", " ");
+  const nextAction = String(checkpoint.next_action || "none").replaceAll("_", " ");
+  const usage = checkpoint.execution_usage || {};
+  const remaining = checkpoint.execution_remaining || {};
+  const budget = `Steps ${usage.agent_steps || 0} used / ${remaining.agent_steps ?? "n/a"} left | `
+    + `tools ${usage.tool_calls || 0} used / ${remaining.tool_calls ?? "n/a"} left | `
+    + `validation ${usage.validation_commands || 0} used / ${remaining.validation_commands ?? "n/a"} left`;
+  const references = [
+    checkpoint.proposal_id ? `Proposal ${checkpoint.proposal_id}` : "",
+    checkpoint.sandbox_path ? `Sandbox ${checkpoint.sandbox_path}` : "",
+    Number(checkpoint.repair_attempt || 0) > 0 ? `Repair attempt ${checkpoint.repair_attempt}` : "",
+  ].filter(Boolean);
+  return `<div class="${compact ? "item" : "timeline-event"}">
+    <div class="timeline-step">#${escapeHtml(sequence)} ${escapeHtml(phase)}</div>
+    <div class="timeline-status">${escapeHtml(status)} | ${escapeHtml(formatTime(checkpoint.created_at))}</div>
+    <div>${escapeHtml(checkpoint.detail || "No detail recorded.")}</div>
+    <small>Next: ${escapeHtml(nextAction)}</small>
+    <small>${escapeHtml(budget)}</small>
+    ${references.length ? `<small>${escapeHtml(references.join(" | "))}</small>` : ""}
+  </div>`;
 }
 
 function renderTaskRunInterruption(taskRun) {

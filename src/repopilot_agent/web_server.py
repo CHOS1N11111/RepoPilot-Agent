@@ -58,6 +58,7 @@ from .task_runs import (
     get_task_run,
     mark_task_run_interrupted,
     prepare_task_run_resume,
+    record_task_run_checkpoint,
     request_task_run_cancel,
     request_task_run_pause,
     task_run_from_record,
@@ -589,6 +590,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     "Safety checks blocked apply. Review the proposal before trying again.",
                     error=str(exc),
                 )
+                record_task_run_checkpoint(
+                    task_run,
+                    "apply_blocked",
+                    "Pre-apply safety checks blocked the proposal without applying it.",
+                    "review_proposal",
+                )
                 self._persist_task_run(task_run)
             self._send_json(
                 {
@@ -602,12 +609,24 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         except (FileNotFoundError, ValueError) as exc:
             if task_run:
                 update_task_run(task_run, "failed", "Proposal application failed.", error=str(exc))
+                record_task_run_checkpoint(
+                    task_run,
+                    "application_failed",
+                    "Proposal application failed before completion.",
+                    "inspect_failure",
+                )
                 self._persist_task_run(task_run)
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
         except Exception as exc:
             if task_run:
                 update_task_run(task_run, "failed", "Proposal application failed.", error=str(exc))
+                record_task_run_checkpoint(
+                    task_run,
+                    "application_failed",
+                    "Proposal application failed before completion.",
+                    "inspect_failure",
+                )
                 self._persist_task_run(task_run)
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -678,6 +697,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             else:
                 task_run.pause_requested = False
                 update_task_run(task_run, next_status, message)
+                next_action = {
+                    "completed": "review_diff",
+                    "repair_pending": "generate_repair",
+                    "diagnosing": "wait_for_repair",
+                    "failed": "inspect_failure",
+                }.get(next_status, "review_task")
+                record_task_run_checkpoint(
+                    task_run,
+                    "validation_complete" if session.validation else "application_complete",
+                    message,
+                    next_action,
+                )
             self._persist_task_run(task_run)
             data["task_run"] = task_run.to_public_dict()
         try:
@@ -831,6 +862,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             if task_run and task_run.status not in {"cancelled", "paused", "failed"}:
                 update_task_run(task_run, "repair_pending", "Repair proposal generation failed.", error=str(exc))
+                record_task_run_checkpoint(
+                    task_run,
+                    "repair_generation_failed",
+                    "Repair proposal generation failed before a new proposal was available.",
+                    "retry_repair",
+                )
                 self._persist_task_run(task_run)
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -1072,6 +1109,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     "awaiting_approval",
                     f"Repair proposal {next_repair_attempt}/{session.max_repair_attempts} is ready for approval.",
                 )
+                record_task_run_checkpoint(
+                    task_run,
+                    "repair_ready",
+                    f"Repair proposal {next_repair_attempt} is ready for human review.",
+                    "review_repair_proposal",
+                )
             self._persist_task_run(task_run)
             data["task_run"] = task_run.to_public_dict()
         return data
@@ -1099,6 +1142,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 message,
                 result=task_result,
                 error=f"Repair loop stopped: {reason}",
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "repair_stopped",
+                message,
+                "inspect_failure",
             )
             self._persist_task_run(task_run)
 
@@ -1177,6 +1226,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     "repair_pending",
                     "Automatic repair generation failed; manual retry remains available.",
                     error=str(exc),
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "repair_generation_failed",
+                    "Automatic repair generation failed before a new proposal was available.",
+                    "retry_repair",
                 )
                 self._persist_task_run(task_run)
 
@@ -1438,6 +1493,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._launch_task_run_worker(task_run, payload, llm_client, reuse_sandbox=False)
         except Exception as exc:
             update_task_run(task_run, "failed", "Task run could not be started.", error=str(exc))
+            record_task_run_checkpoint(
+                task_run,
+                "task_failed",
+                "Task worker could not be started after the run was accepted.",
+                "inspect_failure",
+            )
             self._persist_task_run(task_run)
             self._send_json({"error": str(exc), "task_run": task_run.to_public_dict()}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -1615,6 +1676,15 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     sandbox_head=sandbox.head,
                 )
                 self._persist_task_run(task_run)
+            record_task_run_checkpoint(
+                task_run,
+                "sandbox_ready",
+                "Existing task sandbox passed resume preflight."
+                if reuse_sandbox
+                else "Managed Git worktree sandbox created successfully.",
+                "explore_repository",
+            )
+            self._persist_task_run(task_run)
             if checkpoint_task_run(task_run, "exploring"):
                 self._persist_task_run(task_run)
                 return
@@ -1740,14 +1810,38 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     "Execution budget was exhausted before the approval checkpoint.",
                     error="; ".join(report.execution_budget.get("exhausted_reasons", [])),
                 )
+                record_task_run_checkpoint(
+                    task_run,
+                    "analysis_failed",
+                    "Analysis stopped after exhausting the execution budget.",
+                    "inspect_failure",
+                )
             elif proposal_id:
                 update_task_run(task_run, "awaiting_approval", "Proposal ready. Waiting for human approval.")
+                record_task_run_checkpoint(
+                    task_run,
+                    "approval_ready",
+                    "An apply-ready proposal is waiting for human approval.",
+                    "review_proposal",
+                )
             else:
                 task_run.pause_requested = False
                 update_task_run(task_run, "completed", "Task analysis completed without apply-ready file edits.")
+                record_task_run_checkpoint(
+                    task_run,
+                    "analysis_complete",
+                    "Repository analysis completed without apply-ready file edits.",
+                    "review_report",
+                )
             self._persist_task_run(task_run)
         except Exception as exc:
             update_task_run(task_run, "failed", "Task run failed. Its sandbox was preserved.", error=str(exc))
+            record_task_run_checkpoint(
+                task_run,
+                "task_failed",
+                "Task execution failed after preserving the current sandbox state.",
+                "inspect_failure",
+            )
             self._persist_task_run(task_run)
 
     def _task_run_source_from_query(self, params: dict[str, list[str]]) -> str:

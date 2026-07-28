@@ -113,6 +113,8 @@ class WebApprovalUiContractTests(unittest.TestCase):
             "pauseTaskRun",
             "resumeTaskRun",
             "cancelTaskRun",
+            "taskRunLatestCheckpoint",
+            "taskRunCheckpoints",
             "taskRunEvents",
             "taskRunBranch",
             "createTaskBranch",
@@ -128,6 +130,9 @@ class WebApprovalUiContractTests(unittest.TestCase):
         ]:
             self.assertIn(endpoint, self.app_js)
         self.assertIn("startTaskRunPolling", self.app_js)
+        self.assertIn("function renderTaskRunCheckpoints", self.app_js)
+        self.assertIn("taskRun.latest_checkpoint", self.app_js)
+        self.assertIn("taskRun.checkpoints", self.app_js)
         self.assertIn("task_run_id: state.taskRun.run_id", self.app_js)
         self.assertIn("RepoPilot will not commit or push", self.app_js)
         self.assertIn(".task-run-phases", self.app_css)
