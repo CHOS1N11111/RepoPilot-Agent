@@ -14,6 +14,8 @@ const state = {
   taskRunPoll: null,
   taskRunSandboxPath: null,
   taskRunRenderedProposalId: null,
+  taskRunRecoveryKey: null,
+  taskRunRecoveryReadiness: null,
 };
 
 const TASK_RUN_PHASES = ["Sandbox", "Explore", "Approval", "Apply", "Validate", "Complete"];
@@ -60,6 +62,7 @@ $("runWorkflow").addEventListener("click", runWorkflow);
 $("generateProposal").addEventListener("click", generateProposal);
 $("startTaskRun").addEventListener("click", startTaskRun);
 $("pauseTaskRun").addEventListener("click", pauseTaskRun);
+$("checkTaskRunReadiness").addEventListener("click", checkTaskRunRecoveryReadiness);
 $("resumeTaskRun").addEventListener("click", resumeTaskRun);
 $("cancelTaskRun").addEventListener("click", cancelTaskRun);
 $("createTaskBranch").addEventListener("click", createTaskBranch);
@@ -168,6 +171,15 @@ async function resumeTaskRun() {
     setStatus(state.taskRun.resume_blocked_reason || "No safe resume checkpoint is available.");
     return;
   }
+  const readiness = await checkTaskRunRecoveryReadiness();
+  if (!readiness?.ready) {
+    setStatus(readiness?.summary || "Recovery readiness could not be verified.");
+    return;
+  }
+  if (readiness.checkpoint !== checkpoint || state.taskRun.resume_checkpoint !== checkpoint) {
+    setStatus("The recovery checkpoint changed during preflight. Review the updated task state.");
+    return;
+  }
   const checkpointLabel = checkpoint.replaceAll("_", " ");
   const confirmed = window.confirm(
     `Resume this task from the ${checkpointLabel} checkpoint? RepoPilot will run the saved safety preflight first.`
@@ -181,8 +193,12 @@ async function resumeTaskRun() {
       resume_checkpoint: checkpoint,
       confirm_resume: true,
     });
+    if (data.recovery_readiness) {
+      state.taskRunRecoveryReadiness = data.recovery_readiness;
+    }
     if (data.error) {
       if (data.task_run) updateTaskRun(data.task_run);
+      renderTaskRunRecoveryReadiness(state.taskRunRecoveryReadiness);
       throw new Error(data.error);
     }
     state.taskRunPayload = buildWorkflowPayload();
@@ -191,6 +207,28 @@ async function resumeTaskRun() {
     setStatus(data.task_run.message || "Task run resumed.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function checkTaskRunRecoveryReadiness() {
+  if (!state.taskRun) return null;
+  setStatus("Checking recovery readiness...");
+  try {
+    const data = await postJson(
+      "/api/task-runs/recovery/readiness",
+      taskRunControlPayload()
+    );
+    if (data.error) throw new Error(data.error);
+    if (data.task_run) updateTaskRun(data.task_run);
+    state.taskRunRecoveryReadiness = data.recovery_readiness || null;
+    renderTaskRunRecoveryReadiness(state.taskRunRecoveryReadiness);
+    setStatus(data.recovery_readiness?.summary || "Recovery readiness checked.");
+    return state.taskRunRecoveryReadiness;
+  } catch (error) {
+    state.taskRunRecoveryReadiness = null;
+    renderTaskRunRecoveryReadiness(null);
+    setStatus(`Error: ${error.message}`);
+    return null;
   }
 }
 
@@ -282,6 +320,16 @@ async function loadLatestTaskRun() {
 
 function updateTaskRun(taskRun) {
   if (!taskRun) return;
+  const recoveryKey = [
+    taskRun.run_id,
+    taskRun.status,
+    taskRun.resume_checkpoint,
+    taskRun.latest_checkpoint?.sequence,
+  ].join(":");
+  if (recoveryKey !== state.taskRunRecoveryKey) {
+    state.taskRunRecoveryKey = recoveryKey;
+    state.taskRunRecoveryReadiness = null;
+  }
   state.taskRun = taskRun;
   renderTaskRun(taskRun);
   adoptTaskRunSandbox(taskRun);
@@ -353,6 +401,7 @@ function renderTaskRun(taskRun) {
     ? `${taskRun.sandbox_path}\nHEAD ${taskRun.sandbox_head || "unknown"}`
     : "Not created";
   $("pauseTaskRun").disabled = !taskRun.can_pause;
+  $("checkTaskRunReadiness").disabled = !["paused", "cancelled", "failed", "interrupted"].includes(status);
   $("resumeTaskRun").disabled = !taskRun.can_resume;
   $("cancelTaskRun").disabled = !taskRun.can_cancel;
   $("createTaskBranch").disabled = !taskRun.can_create_branch;
@@ -360,6 +409,7 @@ function renderTaskRun(taskRun) {
     ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
     : "No delivery branch created.";
   renderTaskRunResumePlan(taskRun);
+  renderTaskRunRecoveryReadiness(state.taskRunRecoveryReadiness);
   renderTaskRunCheckpoints(taskRun);
   renderTaskRunPhases(taskRun);
   $("taskRunCriteria").innerHTML = renderAcceptanceCriteria(
@@ -381,6 +431,36 @@ function renderTaskRun(taskRun) {
         )
         .join("")
     : item("No task-run events yet.");
+}
+
+function renderTaskRunRecoveryReadiness(readiness) {
+  if (!readiness) {
+    $("taskRunRecoveryReadiness").innerHTML = item("Readiness has not been checked for this task state.");
+    return;
+  }
+  const resultTag = readiness.ready
+    ? '<span class="tag ok">ready</span>'
+    : '<span class="tag danger">blocked</span>';
+  const checks = (readiness.checks || []).map((check) => {
+    const tagClass = check.status === "passed"
+      ? "ok"
+      : check.status === "failed"
+        ? "danger"
+        : "warn";
+    const name = String(check.name || "check").replaceAll("_", " ");
+    return `<div class="timeline-event">
+      <div class="timeline-step">${escapeHtml(name)} <span class="tag ${tagClass}">${escapeHtml(check.status)}</span></div>
+      <div>${escapeHtml(check.detail || "")}</div>
+    </div>`;
+  }).join("");
+  $("taskRunRecoveryReadiness").innerHTML = `
+    <div class="timeline-event">
+      <div class="timeline-step">Recovery ${resultTag}</div>
+      <div class="timeline-status">${escapeHtml(formatTime(readiness.checked_at))}</div>
+      <div>${escapeHtml(readiness.summary || "")}</div>
+    </div>
+    ${checks}
+  `;
 }
 
 function renderTaskRunCheckpoints(taskRun) {

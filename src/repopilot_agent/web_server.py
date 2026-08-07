@@ -45,11 +45,11 @@ from .repair_loop import (
     record_validation_outcome,
     validation_feedback_fingerprint,
 )
+from .recovery import TaskRunRecoveryReadiness, inspect_task_run_recovery
 from .runtime import SQLiteRuntimeStore
 from .safety import SafetyCheckError
 from .task_runs import (
     ACTIVE_TASK_RUN_STATUSES,
-    RESUME_CHECKPOINT_SOURCE,
     TaskRun,
     TaskRunError,
     checkpoint_task_run,
@@ -220,6 +220,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/task-runs/pause":
             self._handle_task_run_pause()
+            return
+        if parsed.path == "/api/task-runs/recovery/readiness":
+            self._handle_task_run_recovery_readiness()
             return
         if parsed.path == "/api/task-runs/resume":
             self._handle_task_run_resume()
@@ -1562,11 +1565,29 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"task_run": task_run.to_public_dict()})
 
+    def _handle_task_run_recovery_readiness(self) -> None:
+        payload = self._read_json()
+        task_run = self._task_run_from_payload_or_error(payload)
+        if task_run is None:
+            return
+        try:
+            readiness = self._inspect_task_run_recovery(task_run)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        self._send_json(
+            {
+                "task_run": task_run.to_public_dict(),
+                "recovery_readiness": readiness.to_dict(),
+            }
+        )
+
     def _handle_task_run_resume(self) -> None:
         payload = self._read_json()
         task_run = self._task_run_from_payload_or_error(payload)
         if task_run is None:
             return
+        readiness: TaskRunRecoveryReadiness | None = None
         try:
             requested_checkpoint = str(payload.get("resume_checkpoint") or "").strip()
             plan = validate_task_run_resume_request(
@@ -1574,20 +1595,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 requested_checkpoint,
                 _payload_bool(payload.get("confirm_resume"), default=False),
             )
-            if plan.requires_sandbox:
-                if not task_run.sandbox_path or not Path(task_run.sandbox_path).is_dir():
-                    raise TaskRunError("The saved task sandbox no longer exists.")
-                if plan.requires_clean_sandbox and not inspect_repository(task_run.sandbox_path).clean:
-                    raise TaskRunError(
-                        "The task sandbox has uncommitted changes. Inspect or revert them before resuming."
-                    )
-            elif plan.checkpoint == RESUME_CHECKPOINT_SOURCE:
-                if not Path(task_run.source_repo).is_dir():
-                    raise TaskRunError("The source repository no longer exists.")
-                if not inspect_repository(task_run.source_repo).clean:
-                    raise TaskRunError(
-                        "The source repository has uncommitted changes. Commit or revert them before resuming."
-                    )
+            readiness = self._inspect_task_run_recovery(task_run)
+            if not readiness.ready:
+                raise TaskRunError(readiness.summary)
             llm_client = _payload_llm_client(payload) if plan.target_status == "queued" else None
             prepare_task_run_resume(task_run, requested_checkpoint, confirmed=True)
             self._persist_task_run(task_run)
@@ -1600,9 +1610,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 )
         except (TaskRunError, LLMError, ValueError, FileNotFoundError, RuntimeError) as exc:
             self._persist_task_run(task_run)
-            self._send_json({"error": str(exc), "task_run": task_run.to_public_dict()}, status=HTTPStatus.CONFLICT)
+            data = {"error": str(exc), "task_run": task_run.to_public_dict()}
+            if readiness is not None:
+                data["recovery_readiness"] = readiness.to_dict()
+            self._send_json(data, status=HTTPStatus.CONFLICT)
             return
-        self._send_json({"task_run": task_run.to_public_dict()}, status=HTTPStatus.ACCEPTED)
+        self._send_json(
+            {
+                "task_run": task_run.to_public_dict(),
+                "recovery_readiness": readiness.to_dict() if readiness else None,
+            },
+            status=HTTPStatus.ACCEPTED,
+        )
 
     def _handle_task_run_cancel(self) -> None:
         payload = self._read_json()
@@ -1893,6 +1912,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
 
     def _persist_task_run(self, task_run: TaskRun) -> None:
         self._memory(task_run.source_repo).save_task_run(task_run.to_record())
+
+    def _inspect_task_run_recovery(self, task_run: TaskRun) -> TaskRunRecoveryReadiness:
+        proposal_record = None
+        if task_run.proposal_id:
+            session = get_proposal_session(task_run.proposal_id)
+            if session is not None:
+                proposal_record = proposal_session_to_record(session)
+            else:
+                proposal_record = self._memory(task_run.source_repo).get_proposal_session(
+                    task_run.proposal_id
+                )
+        return inspect_task_run_recovery(task_run, proposal_record)
 
     def _handle_propose(self) -> None:
         payload = self._read_json()

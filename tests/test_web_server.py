@@ -365,6 +365,47 @@ class WebServerTests(unittest.TestCase):
                 server.server_close()
                 clear_task_runs()
 
+    def test_task_run_recovery_readiness_api_is_read_only(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+            task_run = create_task_run(root, "inspect auth", [])
+            update_task_run(task_run, "exploring", "Exploring.", sandbox_path=str(root))
+            mark_task_run_interrupted(task_run)
+            checkpoint_count = len(task_run.checkpoints)
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/recovery/readiness",
+                    data=json.dumps(
+                        {"run_id": task_run.run_id, "source_repo": str(root)}
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=5) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+
+                readiness = data["recovery_readiness"]
+                self.assertTrue(readiness["ready"])
+                self.assertEqual(readiness["checkpoint"], RESUME_CHECKPOINT_SANDBOX)
+                self.assertEqual(readiness["blockers"], [])
+                self.assertEqual(data["task_run"]["status"], "interrupted")
+                self.assertEqual(len(data["task_run"]["checkpoints"]), checkpoint_count)
+                stored = store.get_task_run(task_run.run_id)
+                self.assertEqual(stored["status"], "interrupted")
+                self.assertEqual(len(stored["checkpoints"]), checkpoint_count)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
     def test_task_run_resume_api_rejects_dirty_sandbox_without_changing_state(self) -> None:
         clear_task_runs()
         with tempfile.TemporaryDirectory() as tmp:
@@ -400,6 +441,8 @@ class WebServerTests(unittest.TestCase):
 
                 self.assertEqual(raised.exception.code, 409)
                 self.assertIn("uncommitted changes", data["error"])
+                self.assertFalse(data["recovery_readiness"]["ready"])
+                self.assertTrue(data["recovery_readiness"]["blockers"])
                 self.assertEqual(data["task_run"]["status"], "interrupted")
                 self.assertEqual(data["task_run"]["resume_count"], 0)
                 launch.assert_not_called()
@@ -446,6 +489,7 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(resumed["status"], "queued")
                 self.assertEqual(resumed["resume_count"], 1)
                 self.assertIsNotNone(resumed["last_resumed_at"])
+                self.assertTrue(data["recovery_readiness"]["ready"])
                 launch.assert_called_once()
                 self.assertTrue(launch.call_args.kwargs["reuse_sandbox"])
                 self.assertEqual(store.get_task_run(task_run.run_id)["status"], "queued")
@@ -468,6 +512,12 @@ class WebServerTests(unittest.TestCase):
             )
             request_task_run_pause(task_run)
             store = MemoryStore(default_memory_path(root))
+            store.save_proposal_session(
+                {
+                    "proposal_id": "proposal-approval",
+                    "repo_path": str(root),
+                }
+            )
             store.save_task_run(task_run.to_record())
             server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -497,8 +547,58 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(resumed["status"], "awaiting_approval")
                 self.assertEqual(resumed["proposal_id"], "proposal-approval")
                 self.assertEqual(resumed["last_resume_checkpoint"], "approval")
+                self.assertTrue(data["recovery_readiness"]["ready"])
                 launch.assert_not_called()
                 llm_factory.assert_not_called()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_resume_api_blocks_missing_proposal_session(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_run = create_task_run(root, "review proposal", [])
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Proposal ready.",
+                proposal_id="missing-proposal",
+            )
+            request_task_run_pause(task_run)
+            store = MemoryStore(default_memory_path(root))
+            store.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": "approval",
+                            "confirm_resume": True,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch:
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(request, timeout=5)
+                data = json.loads(raised.exception.read().decode("utf-8"))
+
+                self.assertEqual(raised.exception.code, 409)
+                self.assertIn("was not found", data["error"])
+                self.assertFalse(data["recovery_readiness"]["ready"])
+                self.assertEqual(data["task_run"]["status"], "paused")
+                self.assertEqual(data["task_run"]["resume_count"], 0)
+                launch.assert_not_called()
+                self.assertEqual(store.get_task_run(task_run.run_id)["status"], "paused")
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
