@@ -410,6 +410,7 @@ function renderTaskRun(taskRun) {
     : "No delivery branch created.";
   renderTaskRunResumePlan(taskRun);
   renderTaskRunRecoveryReadiness(state.taskRunRecoveryReadiness);
+  renderTaskRunExecutionProfile(taskRun.execution_profile);
   renderTaskRunCheckpoints(taskRun);
   renderTaskRunPhases(taskRun);
   $("taskRunCriteria").innerHTML = renderAcceptanceCriteria(
@@ -431,6 +432,44 @@ function renderTaskRun(taskRun) {
         )
         .join("")
     : item("No task-run events yet.");
+}
+
+function renderTaskRunExecutionProfile(profile) {
+  if (!profile) {
+    $("taskRunExecutionProfile").innerHTML = item("No saved execution profile for this legacy task.");
+    return;
+  }
+  const budget = profile.execution_budget || {};
+  const jsonMode = profile.json_mode === null || profile.json_mode === undefined
+    ? "automatic"
+    : profile.json_mode
+      ? "enabled"
+      : "disabled";
+  const endpoint = profile.endpoint_configured
+    ? profile.endpoint_fingerprint
+      ? `${String(profile.endpoint_fingerprint).slice(0, 12)}...`
+      : "configured"
+    : "not configured";
+  const modeTag = profile.use_llm
+    ? '<span class="tag ok">LLM enabled</span>'
+    : '<span class="tag">rules only</span>';
+  $("taskRunExecutionProfile").innerHTML = `
+    <div class="timeline-event">
+      <div class="timeline-step">Profile v${escapeHtml(profile.version || 1)} ${modeTag}</div>
+      <div class="timeline-status">${escapeHtml(formatTime(profile.captured_at))}</div>
+      <div>Model: ${escapeHtml(profile.model || "default")} | Endpoint: ${escapeHtml(endpoint)} | LLM timeout: ${escapeHtml(profile.llm_timeout_seconds || "default")}s</div>
+    </div>
+    <div class="timeline-event">
+      <div class="timeline-step">Agent behavior</div>
+      <div class="timeline-status">saved</div>
+      <div>JSON mode: ${escapeHtml(jsonMode)} | Fallback: ${profile.allow_llm_fallback ? "enabled" : "disabled"} | Memory: ${profile.use_memory ? "enabled" : "disabled"} | Iterative: ${profile.iterative_agent ? "enabled" : "disabled"} | Auto repair: ${profile.auto_repair_enabled ? "enabled" : "disabled"} | Repair attempts: ${escapeHtml(profile.max_repair_attempts ?? 0)}</div>
+    </div>
+    <div class="timeline-event">
+      <div class="timeline-step">Execution limits</div>
+      <div class="timeline-status">maximum</div>
+      <div>Steps: ${escapeHtml(budget.max_agent_steps ?? "n/a")} | Tools: ${escapeHtml(budget.max_tool_calls ?? "n/a")} | Validation: ${escapeHtml(budget.max_validation_commands ?? "n/a")} | Elapsed: ${escapeHtml(budget.max_elapsed_seconds ?? "n/a")}s</div>
+    </div>
+  `;
 }
 
 function renderTaskRunRecoveryReadiness(readiness) {

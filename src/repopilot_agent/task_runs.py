@@ -19,6 +19,7 @@ from .execution import (
     criteria_from_records,
     execution_budget_state,
 )
+from .execution_profile import TaskRunExecutionProfile, execution_profile_from_record
 from .repair_loop import RepairAttemptRecord, repair_attempts_from_records
 from .worktree_sandbox import WorktreeSandboxError, list_worktree_sandboxes
 
@@ -137,6 +138,7 @@ class TaskRun:
     events: list[TaskRunEvent] = field(default_factory=list)
     acceptance_criteria: list[AcceptanceCriterion] = field(default_factory=list)
     execution_budget: ExecutionBudget = field(default_factory=ExecutionBudget)
+    execution_profile: TaskRunExecutionProfile | None = None
     execution_usage: ExecutionUsage = field(default_factory=ExecutionUsage)
     completion_evidence: CompletionEvidence | None = None
     repair_history: list[RepairAttemptRecord] = field(default_factory=list)
@@ -169,6 +171,9 @@ class TaskRun:
         data["can_repair"] = self.status == "repair_pending"
         data["can_create_branch"] = self.status == "completed" and not self.delivery_branch
         data["execution_budget"] = execution_budget_state(self.execution_budget, self.execution_usage)
+        data["execution_profile"] = (
+            self.execution_profile.to_dict() if self.execution_profile else None
+        )
         data["acceptance_criteria"] = [item.to_dict() for item in self.acceptance_criteria]
         data["completion_evidence"] = (
             self.completion_evidence.to_dict() if self.completion_evidence else None
@@ -197,6 +202,7 @@ def create_task_run(
     task: str,
     validation_commands: list[str],
     execution_budget: ExecutionBudget | None = None,
+    execution_profile: TaskRunExecutionProfile | None = None,
     auto_repair_enabled: bool = False,
 ) -> TaskRun:
     now = _now()
@@ -209,6 +215,7 @@ def create_task_run(
         updated_at=now,
         events=[TaskRunEvent("queued", "Task run queued.", now)],
         execution_budget=execution_budget or ExecutionBudget(),
+        execution_profile=execution_profile,
         auto_repair_enabled=auto_repair_enabled,
     )
     record_task_run_checkpoint(
@@ -263,6 +270,7 @@ def task_run_from_record(record: dict[str, Any], mark_interrupted: bool = False)
         events=events,
         acceptance_criteria=criteria_from_records(record.get("acceptance_criteria")),
         execution_budget=ExecutionBudget.from_dict(record.get("execution_budget")),
+        execution_profile=execution_profile_from_record(record.get("execution_profile")),
         execution_usage=ExecutionUsage.from_dict(record.get("execution_usage")),
         completion_evidence=completion_from_record(record.get("completion_evidence")),
         repair_history=repair_attempts_from_records(record.get("repair_history")),

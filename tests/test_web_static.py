@@ -115,6 +115,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
             "resumeTaskRun",
             "cancelTaskRun",
             "taskRunRecoveryReadiness",
+            "taskRunExecutionProfile",
             "taskRunLatestCheckpoint",
             "taskRunCheckpoints",
             "taskRunEvents",
@@ -136,6 +137,9 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("function renderTaskRunCheckpoints", self.app_js)
         self.assertIn("async function checkTaskRunRecoveryReadiness", self.app_js)
         self.assertIn("function renderTaskRunRecoveryReadiness", self.app_js)
+        self.assertIn("function renderTaskRunExecutionProfile", self.app_js)
+        self.assertIn("taskRun.execution_profile", self.app_js)
+        self.assertIn("profile.endpoint_fingerprint", self.app_js)
         self.assertIn("state.taskRunRecoveryReadiness", self.app_js)
         self.assertIn("readiness?.ready", self.app_js)
         self.assertIn("taskRun.latest_checkpoint", self.app_js)

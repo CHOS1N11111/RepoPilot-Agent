@@ -146,6 +146,7 @@ src/repopilot_agent/
   worktree_sandbox.py   managed detached Git worktree lifecycle and safety rules
   task_runs.py          persistent task-run state, checkpoints, and local branch delivery
   recovery.py           read-only recovery readiness and checkpoint integrity checks
+  execution_profile.py  credential-free saved Agent configuration snapshots
   memory.py             SQLite history and related-run retrieval
   git_tools.py          local Git inspection
   git_summary.py        commit message and PR draft generation
@@ -297,6 +298,8 @@ Manual Resume uses a persisted, exact-match checkpoint: `source_restart`, `sandb
 Execution checkpoints are a separate audit history, not Resume Plan decisions. RepoPilot records a snapshot after each stable task boundary, including its monotonic sequence, phase and status, detail, intended next action, UTC timestamp, sandbox and proposal references, execution-budget usage and remaining capacity, and current repair attempt. The Task Run tab shows the latest snapshot and the 20 most recent entries; persistence keeps the latest 100 per run. Recording a checkpoint never resumes a worker or replays an LLM call, tool, patch, or validation command.
 
 Before Resume, `Check Readiness` produces a read-only report for the current persisted state. It verifies the Resume Plan, latest execution-checkpoint references, required source or sandbox path, Git worktree readability and cleanliness, saved sandbox HEAD, and persisted proposal session for approval recovery. Missing execution history on a legacy task is a warning; mismatched references, changed HEAD, dirty worktrees, missing paths, and missing proposal sessions are blockers. Resume reruns the same checks server-side before changing status, so an older browser result cannot authorize recovery. Request-scoped LLM configuration is validated afterward and API keys are never included in the report.
+
+Each new task also stores a versioned Saved Execution Profile containing its resolved LLM mode, model, JSON mode, fallback policy, memory and iterative settings, LLM timeout, automatic repair setting, retry limit, and execution budget. The complete provider endpoint is discarded after an SHA-256 fingerprint is computed, and API keys are never added to the profile. Older task records expose `execution_profile: null`. This version displays the saved profile for audit only; profile mismatch enforcement is intentionally deferred to a separate milestone.
 
 After a successful run, `Create Branch` can attach the sandbox to a validated local feature branch. This requires explicit confirmation and works only for a registered RepoPilot worktree. It does not stage, commit, push, or create a pull request.
 

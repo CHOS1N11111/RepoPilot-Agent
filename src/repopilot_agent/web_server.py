@@ -22,6 +22,7 @@ from .execution import (
     evaluate_completion,
     execution_budget_state,
 )
+from .execution_profile import TaskRunExecutionProfile, create_execution_profile
 from .git_tools import get_git_diff, inspect_repository
 from .git_summary import build_git_workflow_summary, build_pull_request_readiness
 from .github_tools import create_github_pull_request, inspect_github_repository
@@ -1474,10 +1475,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "validation must be a list of strings."}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
-            _payload_max_repair_attempts(payload)
+            max_repair_attempts = _payload_max_repair_attempts(payload)
             execution_budget = _payload_execution_budget(payload)
             _validate_validation_budget(validation, execution_budget)
             llm_client = _payload_llm_client(payload)
+            auto_repair_enabled = _payload_auto_repair(payload)
+            execution_profile = _payload_execution_profile(
+                payload,
+                execution_budget,
+                llm_client,
+                max_repair_attempts,
+                auto_repair_enabled,
+            )
         except (ValueError, LLMError) as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -1489,7 +1498,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task,
             validation,
             execution_budget=execution_budget,
-            auto_repair_enabled=_payload_auto_repair(payload),
+            execution_profile=execution_profile,
+            auto_repair_enabled=auto_repair_enabled,
         )
         try:
             self._persist_task_run(task_run)
@@ -2238,6 +2248,37 @@ def _payload_use_memory(payload: dict[str, Any]) -> bool:
 
 def _payload_auto_repair(payload: dict[str, Any]) -> bool:
     return _payload_bool(payload.get("auto_repair"), default=True)
+
+
+def _payload_execution_profile(
+    payload: dict[str, Any],
+    execution_budget: ExecutionBudget,
+    llm_client: OpenAICompatibleClient | None,
+    max_repair_attempts: int,
+    auto_repair_enabled: bool,
+) -> TaskRunExecutionProfile:
+    raw_timeout = payload.get("timeout_seconds")
+    try:
+        requested_timeout = int(raw_timeout) if raw_timeout is not None and raw_timeout != "" else None
+    except (TypeError, ValueError):
+        requested_timeout = None
+    return create_execution_profile(
+        use_llm=bool(payload.get("use_llm")),
+        model=llm_client.model if llm_client else str(payload.get("model") or ""),
+        endpoint_url=(
+            llm_client.base_url if llm_client else str(payload.get("base_url") or "")
+        ),
+        json_mode=llm_client.json_mode if llm_client else _payload_json_mode(payload),
+        allow_llm_fallback=not _payload_bool(payload.get("no_llm_fallback"), default=False),
+        use_memory=_payload_use_memory(payload),
+        iterative_agent=_payload_iterative_agent(payload),
+        llm_timeout_seconds=(
+            llm_client.timeout_seconds if llm_client else requested_timeout
+        ),
+        max_repair_attempts=max_repair_attempts,
+        auto_repair_enabled=auto_repair_enabled,
+        execution_budget=execution_budget,
+    )
 
 
 def _payload_llm_client(payload: dict[str, Any]) -> OpenAICompatibleClient | None:

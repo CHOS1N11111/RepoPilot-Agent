@@ -620,7 +620,19 @@ class WebServerTests(unittest.TestCase):
                         "repo_source": "local",
                         "task": "inspect login behavior",
                         "validation": [],
-                        "use_llm": False,
+                        "use_llm": True,
+                        "model": "gpt-5.5",
+                        "base_url": "https://gateway.example/v1/chat/completions",
+                        "timeout_seconds": "75",
+                        "no_llm_fallback": True,
+                        "use_memory": False,
+                        "iterative_agent": True,
+                        "agent_max_steps": "4",
+                        "agent_max_tool_calls": "7",
+                        "max_validation_commands": "2",
+                        "execution_timeout_seconds": "90",
+                        "max_repair_attempts": "1",
+                        "auto_repair": False,
                         "api_key": "must-not-be-saved",
                     }
                 ).encode("utf-8")
@@ -638,9 +650,22 @@ class WebServerTests(unittest.TestCase):
                 record = MemoryStore(default_memory_path(root)).get_task_run(task_run["run_id"])
                 self.assertEqual(task_run["status"], "queued")
                 self.assertEqual(task_run["latest_checkpoint"]["phase"], "task_queued")
+                profile = task_run["execution_profile"]
+                self.assertTrue(profile["use_llm"])
+                self.assertEqual(profile["model"], "gpt-5.5")
+                self.assertEqual(profile["llm_timeout_seconds"], 75)
+                self.assertFalse(profile["allow_llm_fallback"])
+                self.assertFalse(profile["use_memory"])
+                self.assertTrue(profile["iterative_agent"])
+                self.assertEqual(profile["max_repair_attempts"], 1)
+                self.assertEqual(profile["execution_budget"]["max_tool_calls"], 7)
+                self.assertEqual(len(profile["endpoint_fingerprint"]), 64)
                 self.assertEqual(record["task"], "inspect login behavior")
                 self.assertEqual(record["checkpoints"][0]["next_action"], "create_sandbox")
+                self.assertEqual(record["execution_profile"], profile)
                 self.assertNotIn("must-not-be-saved", json.dumps(record))
+                self.assertNotIn("gateway.example", json.dumps(record))
+                self.assertNotIn("gateway.example", json.dumps(task_run))
                 self.assertEqual(
                     subprocess.run(
                         ["git", "status", "--porcelain"],
