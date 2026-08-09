@@ -13,6 +13,20 @@ from .execution import ExecutionBudget
 
 EXECUTION_PROFILE_VERSION = 1
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PROFILE_COMPARISON_FIELDS = (
+    "use_llm",
+    "model",
+    "endpoint_configured",
+    "endpoint_fingerprint",
+    "json_mode",
+    "allow_llm_fallback",
+    "use_memory",
+    "iterative_agent",
+    "llm_timeout_seconds",
+    "max_repair_attempts",
+    "auto_repair_enabled",
+    "execution_budget",
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +48,38 @@ class TaskRunExecutionProfile:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ExecutionProfileDifference:
+    field: str
+    saved: Any
+    current: Any
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ExecutionProfileComparison:
+    status: str
+    matched: bool | None
+    compared_at: str
+    summary: str
+    differences: list[ExecutionProfileDifference]
+    current_profile: TaskRunExecutionProfile
+    saved_profile_version: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "matched": self.matched,
+            "compared_at": self.compared_at,
+            "summary": self.summary,
+            "differences": [item.to_dict() for item in self.differences],
+            "current_profile": self.current_profile.to_dict(),
+            "saved_profile_version": self.saved_profile_version,
+        }
 
 
 def create_execution_profile(
@@ -65,6 +111,54 @@ def create_execution_profile(
         max_repair_attempts=max(_nonnegative_int(max_repair_attempts), 0),
         auto_repair_enabled=bool(auto_repair_enabled),
         execution_budget=execution_budget.to_dict(),
+    )
+
+
+def compare_execution_profiles(
+    saved: TaskRunExecutionProfile | None,
+    current: TaskRunExecutionProfile,
+) -> ExecutionProfileComparison:
+    """Compare non-sensitive execution settings while ignoring snapshot metadata."""
+
+    if saved is None:
+        return ExecutionProfileComparison(
+            status="legacy",
+            matched=None,
+            compared_at=_now(),
+            summary="This legacy task has no saved execution profile to compare.",
+            differences=[],
+            current_profile=current,
+            saved_profile_version=None,
+        )
+
+    differences = [
+        ExecutionProfileDifference(
+            field=field,
+            saved=getattr(saved, field),
+            current=getattr(current, field),
+        )
+        for field in PROFILE_COMPARISON_FIELDS
+        if getattr(saved, field) != getattr(current, field)
+    ]
+    if differences:
+        summary = (
+            f"Current settings differ from the saved execution profile in "
+            f"{len(differences)} field(s)."
+        )
+        status = "changed"
+        matched = False
+    else:
+        summary = "Current settings match the saved execution profile."
+        status = "matched"
+        matched = True
+    return ExecutionProfileComparison(
+        status=status,
+        matched=matched,
+        compared_at=_now(),
+        summary=summary,
+        differences=differences,
+        current_profile=current,
+        saved_profile_version=saved.version,
     )
 
 

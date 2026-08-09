@@ -9,6 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from repopilot_agent.execution import ExecutionBudget
+from repopilot_agent.execution_profile import create_execution_profile
 from repopilot_agent.recovery import inspect_task_run_recovery
 from repopilot_agent.task_runs import (
     clear_task_runs,
@@ -171,6 +173,63 @@ class RecoveryReadinessTests(unittest.TestCase):
             self.assertTrue(data["ready"])
             self.assertEqual(_check(data, "execution_checkpoint")["status"], "warning")
             self.assertEqual(len(data["warnings"]), 1)
+
+    def test_changed_execution_profile_warns_without_blocking_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            head = initialize_repository(root)
+            saved_profile = create_execution_profile(
+                use_llm=True,
+                model="gpt-5.4",
+                endpoint_url="https://saved.example/v1",
+                json_mode=True,
+                allow_llm_fallback=False,
+                use_memory=True,
+                iterative_agent=True,
+                llm_timeout_seconds=60,
+                max_repair_attempts=2,
+                auto_repair_enabled=True,
+                execution_budget=ExecutionBudget(),
+            )
+            current_profile = create_execution_profile(
+                use_llm=True,
+                model="gpt-5.5",
+                endpoint_url="https://current.example/v1",
+                json_mode=True,
+                allow_llm_fallback=False,
+                use_memory=True,
+                iterative_agent=True,
+                llm_timeout_seconds=60,
+                max_repair_attempts=2,
+                auto_repair_enabled=True,
+                execution_budget=ExecutionBudget(),
+            )
+            task_run = create_task_run(
+                root,
+                "inspect auth",
+                [],
+                execution_profile=saved_profile,
+            )
+            update_task_run(
+                task_run,
+                "exploring",
+                "Exploring.",
+                sandbox_path=str(root),
+                sandbox_head=head,
+            )
+            mark_task_run_interrupted(task_run)
+
+            data = inspect_task_run_recovery(
+                task_run,
+                current_execution_profile=current_profile,
+            ).to_dict()
+
+            self.assertTrue(data["ready"])
+            self.assertEqual(data["execution_profile_comparison"]["status"], "changed")
+            profile_check = _check(data, "execution_profile")
+            self.assertEqual(profile_check["status"], "warning")
+            self.assertFalse(profile_check["required"])
+            self.assertEqual(data["blockers"], [])
 
 
 def _check(readiness: dict[str, object], name: str) -> dict[str, object]:

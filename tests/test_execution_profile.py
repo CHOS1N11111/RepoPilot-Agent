@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.execution import ExecutionBudget
 from repopilot_agent.execution_profile import (
+    compare_execution_profiles,
     create_execution_profile,
     execution_profile_from_record,
     fingerprint_endpoint,
@@ -127,6 +128,73 @@ class ExecutionProfileTests(unittest.TestCase):
         self.assertEqual(restored.max_repair_attempts, 0)
         self.assertNotIn("api_key", restored.to_dict())
         self.assertNotIn("base_url", restored.to_dict())
+
+    def test_matching_profiles_ignore_snapshot_metadata(self) -> None:
+        saved = _profile(model="gpt-5.5")
+        current = _profile(model="gpt-5.5")
+
+        comparison = compare_execution_profiles(saved, current)
+
+        self.assertEqual(comparison.status, "matched")
+        self.assertTrue(comparison.matched)
+        self.assertEqual(comparison.differences, [])
+
+    def test_changed_profile_reports_only_sanitized_execution_fields(self) -> None:
+        saved = _profile(model="gpt-5.4", endpoint="https://saved.example/v1")
+        current = create_execution_profile(
+            use_llm=True,
+            model="gpt-5.5",
+            endpoint_url="https://current.example/v1",
+            json_mode=True,
+            allow_llm_fallback=False,
+            use_memory=True,
+            iterative_agent=True,
+            llm_timeout_seconds=60,
+            max_repair_attempts=2,
+            auto_repair_enabled=True,
+            execution_budget=ExecutionBudget(max_tool_calls=13),
+        )
+
+        comparison = compare_execution_profiles(saved, current)
+        serialized = json.dumps(comparison.to_dict())
+        fields = {item.field for item in comparison.differences}
+
+        self.assertEqual(comparison.status, "changed")
+        self.assertFalse(comparison.matched)
+        self.assertIn("model", fields)
+        self.assertIn("endpoint_fingerprint", fields)
+        self.assertIn("execution_budget", fields)
+        self.assertNotIn("https://", serialized)
+        self.assertNotIn("api_key", serialized)
+        self.assertNotIn("base_url", serialized)
+
+    def test_legacy_profile_comparison_is_explicit(self) -> None:
+        comparison = compare_execution_profiles(None, _profile())
+
+        self.assertEqual(comparison.status, "legacy")
+        self.assertIsNone(comparison.matched)
+        self.assertEqual(comparison.differences, [])
+        self.assertIsNone(comparison.saved_profile_version)
+
+
+def _profile(
+    *,
+    model: str = "gpt-5.5",
+    endpoint: str = "https://gateway.example/v1",
+):
+    return create_execution_profile(
+        use_llm=True,
+        model=model,
+        endpoint_url=endpoint,
+        json_mode=True,
+        allow_llm_fallback=False,
+        use_memory=True,
+        iterative_agent=True,
+        llm_timeout_seconds=60,
+        max_repair_attempts=2,
+        auto_repair_enabled=True,
+        execution_budget=ExecutionBudget(),
+    )
 
 
 if __name__ == "__main__":

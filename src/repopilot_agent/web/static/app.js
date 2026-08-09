@@ -216,7 +216,10 @@ async function checkTaskRunRecoveryReadiness() {
   try {
     const data = await postJson(
       "/api/task-runs/recovery/readiness",
-      taskRunControlPayload()
+      {
+        ...buildWorkflowPayload(),
+        ...taskRunControlPayload(),
+      }
     );
     if (data.error) throw new Error(data.error);
     if (data.task_run) updateTaskRun(data.task_run);
@@ -492,6 +495,9 @@ function renderTaskRunRecoveryReadiness(readiness) {
       <div>${escapeHtml(check.detail || "")}</div>
     </div>`;
   }).join("");
+  const profileComparison = renderExecutionProfileComparison(
+    readiness.execution_profile_comparison
+  );
   $("taskRunRecoveryReadiness").innerHTML = `
     <div class="timeline-event">
       <div class="timeline-step">Recovery ${resultTag}</div>
@@ -499,7 +505,42 @@ function renderTaskRunRecoveryReadiness(readiness) {
       <div>${escapeHtml(readiness.summary || "")}</div>
     </div>
     ${checks}
+    ${profileComparison}
   `;
+}
+
+function renderExecutionProfileComparison(comparison) {
+  if (!comparison) return "";
+  const status = String(comparison.status || "legacy");
+  const tagClass = status === "matched" ? "ok" : "warn";
+  const differences = Array.isArray(comparison.differences)
+    ? comparison.differences
+    : [];
+  const rows = differences.map((difference) => {
+    const field = String(difference.field || "setting").replaceAll("_", " ");
+    return `<div class="timeline-event">
+      <div class="timeline-step">${escapeHtml(field)}</div>
+      <div><small>Saved</small> ${escapeHtml(formatExecutionProfileValue(difference.field, difference.saved))}</div>
+      <div><small>Current</small> ${escapeHtml(formatExecutionProfileValue(difference.field, difference.current))}</div>
+    </div>`;
+  }).join("");
+  return `
+    <div class="timeline-event">
+      <div class="timeline-step">Execution profile <span class="tag ${tagClass}">${escapeHtml(status)}</span></div>
+      <div class="timeline-status">${escapeHtml(formatTime(comparison.compared_at))}</div>
+      <div>${escapeHtml(comparison.summary || "")}</div>
+    </div>
+    ${rows}
+  `;
+}
+
+function formatExecutionProfileValue(field, value) {
+  if (field === "endpoint_fingerprint" && value) {
+    return `${String(value).slice(0, 12)}...`;
+  }
+  if (value === null || value === undefined || value === "") return "not set";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function renderTaskRunCheckpoints(taskRun) {

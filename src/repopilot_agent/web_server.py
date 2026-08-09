@@ -1581,7 +1581,11 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if task_run is None:
             return
         try:
-            readiness = self._inspect_task_run_recovery(task_run)
+            current_profile = _current_execution_profile_from_payload(payload)
+            readiness = self._inspect_task_run_recovery(task_run, current_profile)
+        except (ValueError, LLMError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -1605,10 +1609,17 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 requested_checkpoint,
                 _payload_bool(payload.get("confirm_resume"), default=False),
             )
-            readiness = self._inspect_task_run_recovery(task_run)
+            llm_client = (
+                _payload_llm_client(payload) if plan.target_status == "queued" else None
+            )
+            current_profile = _current_execution_profile_from_payload(
+                payload,
+                llm_client,
+                resolve_llm_client=False,
+            )
+            readiness = self._inspect_task_run_recovery(task_run, current_profile)
             if not readiness.ready:
                 raise TaskRunError(readiness.summary)
-            llm_client = _payload_llm_client(payload) if plan.target_status == "queued" else None
             prepare_task_run_resume(task_run, requested_checkpoint, confirmed=True)
             self._persist_task_run(task_run)
             if task_run.status not in {"awaiting_approval", "repair_pending"}:
@@ -1923,7 +1934,11 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
     def _persist_task_run(self, task_run: TaskRun) -> None:
         self._memory(task_run.source_repo).save_task_run(task_run.to_record())
 
-    def _inspect_task_run_recovery(self, task_run: TaskRun) -> TaskRunRecoveryReadiness:
+    def _inspect_task_run_recovery(
+        self,
+        task_run: TaskRun,
+        current_execution_profile: TaskRunExecutionProfile | None = None,
+    ) -> TaskRunRecoveryReadiness:
         proposal_record = None
         if task_run.proposal_id:
             session = get_proposal_session(task_run.proposal_id)
@@ -1933,7 +1948,11 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 proposal_record = self._memory(task_run.source_repo).get_proposal_session(
                     task_run.proposal_id
                 )
-        return inspect_task_run_recovery(task_run, proposal_record)
+        return inspect_task_run_recovery(
+            task_run,
+            proposal_record,
+            current_execution_profile,
+        )
 
     def _handle_propose(self) -> None:
         payload = self._read_json()
@@ -2278,6 +2297,24 @@ def _payload_execution_profile(
         max_repair_attempts=max_repair_attempts,
         auto_repair_enabled=auto_repair_enabled,
         execution_budget=execution_budget,
+    )
+
+
+def _current_execution_profile_from_payload(
+    payload: dict[str, Any],
+    llm_client: OpenAICompatibleClient | None = None,
+    *,
+    resolve_llm_client: bool = True,
+) -> TaskRunExecutionProfile:
+    client = llm_client
+    if client is None and resolve_llm_client:
+        client = _payload_llm_client(payload)
+    return _payload_execution_profile(
+        payload,
+        _payload_execution_budget(payload),
+        client,
+        _payload_max_repair_attempts(payload),
+        _payload_auto_repair(payload),
     )
 
 

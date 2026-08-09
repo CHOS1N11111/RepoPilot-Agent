@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.cli import main as cli_main
 from repopilot_agent.execution import ExecutionBudget
+from repopilot_agent.execution_profile import create_execution_profile
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
@@ -370,7 +371,25 @@ class WebServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prepare_ready_pr_repository(root)
-            task_run = create_task_run(root, "inspect auth", [])
+            saved_profile = create_execution_profile(
+                use_llm=True,
+                model="gpt-5.4",
+                endpoint_url="https://saved.example/v1",
+                json_mode=True,
+                allow_llm_fallback=False,
+                use_memory=True,
+                iterative_agent=True,
+                llm_timeout_seconds=60,
+                max_repair_attempts=2,
+                auto_repair_enabled=True,
+                execution_budget=ExecutionBudget(),
+            )
+            task_run = create_task_run(
+                root,
+                "inspect auth",
+                [],
+                execution_profile=saved_profile,
+            )
             update_task_run(task_run, "exploring", "Exploring.", sandbox_path=str(root))
             mark_task_run_interrupted(task_run)
             checkpoint_count = len(task_run.checkpoints)
@@ -383,7 +402,21 @@ class WebServerTests(unittest.TestCase):
                 request = Request(
                     f"http://127.0.0.1:{server.server_port}/api/task-runs/recovery/readiness",
                     data=json.dumps(
-                        {"run_id": task_run.run_id, "source_repo": str(root)}
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "use_llm": True,
+                            "model": "gpt-5.5",
+                            "base_url": "https://current-secret-endpoint.example/v1",
+                            "api_key": "readiness-secret-key",
+                            "json_mode": True,
+                            "no_llm_fallback": True,
+                            "use_memory": True,
+                            "iterative_agent": True,
+                            "timeout_seconds": 60,
+                            "max_repair_attempts": 2,
+                            "auto_repair": True,
+                        }
                     ).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",
@@ -395,11 +428,23 @@ class WebServerTests(unittest.TestCase):
                 self.assertTrue(readiness["ready"])
                 self.assertEqual(readiness["checkpoint"], RESUME_CHECKPOINT_SANDBOX)
                 self.assertEqual(readiness["blockers"], [])
+                comparison = readiness["execution_profile_comparison"]
+                self.assertEqual(comparison["status"], "changed")
+                self.assertIn(
+                    "model",
+                    {item["field"] for item in comparison["differences"]},
+                )
+                response_text = json.dumps(data)
+                self.assertNotIn("readiness-secret-key", response_text)
+                self.assertNotIn("current-secret-endpoint.example", response_text)
                 self.assertEqual(data["task_run"]["status"], "interrupted")
                 self.assertEqual(len(data["task_run"]["checkpoints"]), checkpoint_count)
                 stored = store.get_task_run(task_run.run_id)
                 self.assertEqual(stored["status"], "interrupted")
                 self.assertEqual(len(stored["checkpoints"]), checkpoint_count)
+                stored_text = json.dumps(stored)
+                self.assertNotIn("readiness-secret-key", stored_text)
+                self.assertNotIn("current-secret-endpoint.example", stored_text)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)
@@ -458,7 +503,25 @@ class WebServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prepare_ready_pr_repository(root)
-            task_run = create_task_run(root, "inspect auth", [])
+            saved_profile = create_execution_profile(
+                use_llm=True,
+                model="gpt-5.5",
+                endpoint_url="https://saved.example/v1",
+                json_mode=True,
+                allow_llm_fallback=False,
+                use_memory=True,
+                iterative_agent=True,
+                llm_timeout_seconds=60,
+                max_repair_attempts=2,
+                auto_repair_enabled=True,
+                execution_budget=ExecutionBudget(),
+            )
+            task_run = create_task_run(
+                root,
+                "inspect auth",
+                [],
+                execution_profile=saved_profile,
+            )
             update_task_run(task_run, "exploring", "Exploring.", sandbox_path=str(root))
             mark_task_run_interrupted(task_run)
             store = MemoryStore(default_memory_path(root))
@@ -490,6 +553,10 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(resumed["resume_count"], 1)
                 self.assertIsNotNone(resumed["last_resumed_at"])
                 self.assertTrue(data["recovery_readiness"]["ready"])
+                self.assertEqual(
+                    data["recovery_readiness"]["execution_profile_comparison"]["status"],
+                    "changed",
+                )
                 launch.assert_called_once()
                 self.assertTrue(launch.call_args.kwargs["reuse_sandbox"])
                 self.assertEqual(store.get_task_run(task_run.run_id)["status"], "queued")

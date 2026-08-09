@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .execution_profile import (
+    ExecutionProfileComparison,
+    TaskRunExecutionProfile,
+    compare_execution_profiles,
+)
 from .git_tools import inspect_repository
 from .task_runs import (
     RESUME_CHECKPOINT_APPROVAL,
@@ -37,10 +42,16 @@ class TaskRunRecoveryReadiness:
     checked_at: str
     summary: str
     checks: list[RecoveryReadinessCheck]
+    execution_profile_comparison: ExecutionProfileComparison | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["checks"] = [item.to_dict() for item in self.checks]
+        data["execution_profile_comparison"] = (
+            self.execution_profile_comparison.to_dict()
+            if self.execution_profile_comparison
+            else None
+        )
         data["blockers"] = [
             item.detail
             for item in self.checks
@@ -55,6 +66,7 @@ class TaskRunRecoveryReadiness:
 def inspect_task_run_recovery(
     task_run: TaskRun,
     proposal_record: object = None,
+    current_execution_profile: TaskRunExecutionProfile | None = None,
 ) -> TaskRunRecoveryReadiness:
     """Inspect recovery prerequisites without changing task or repository state."""
 
@@ -94,6 +106,21 @@ def inspect_task_run_recovery(
             )
         )
 
+    profile_comparison = None
+    if current_execution_profile is not None:
+        profile_comparison = compare_execution_profiles(
+            task_run.execution_profile,
+            current_execution_profile,
+        )
+        checks.append(
+            RecoveryReadinessCheck(
+                name="execution_profile",
+                status="passed" if profile_comparison.status == "matched" else "warning",
+                detail=profile_comparison.summary,
+                required=False,
+            )
+        )
+
     if plan.checkpoint in {RESUME_CHECKPOINT_APPROVAL, RESUME_CHECKPOINT_REPAIR}:
         checks.append(_proposal_check(task_run, proposal_record))
     else:
@@ -123,6 +150,7 @@ def inspect_task_run_recovery(
         checked_at=_now(),
         summary=summary,
         checks=checks,
+        execution_profile_comparison=profile_comparison,
     )
 
 
