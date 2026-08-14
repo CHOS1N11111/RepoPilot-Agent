@@ -14,6 +14,36 @@ from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.models import RepoFile, SearchHit
 
 
+def decision(
+    kind: str,
+    arguments: dict,
+    rationale: str,
+    expected_evidence: str,
+    *,
+    focus: str = "",
+    findings: list[str] | None = None,
+    open_questions: list[str] | None = None,
+    resolved_questions: list[str] | None = None,
+    finish_reason: str = "",
+) -> str:
+    return json.dumps(
+        {
+            "version": 2,
+            "rationale": rationale,
+            "action": {"kind": kind, "arguments": arguments},
+            "expected_evidence": expected_evidence,
+            "state_update": {
+                "focus": focus,
+                "add_findings": findings or [],
+                "add_open_questions": open_questions or [],
+                "resolve_open_questions": resolved_questions or [],
+            },
+            "finish_reason": finish_reason,
+            "user_question": "",
+        }
+    )
+
+
 class FakeLLMClient:
     def __init__(self, responses: list[str]) -> None:
         self.responses = responses
@@ -48,12 +78,34 @@ class AgentLoopTests(unittest.TestCase):
         ]
         client = FakeLLMClient(
             [
-                '{"thought":"Find parser code.","action":"search_files","query":"parse","path":"",'
-                '"selected_paths":[],"summary":""}',
-                '{"thought":"Read the parser implementation.","action":"read_file","query":"","path":"main.py",'
-                '"selected_paths":[],"summary":""}',
-                '{"thought":"Enough context is available.","action":"finish","query":"","path":"",'
-                '"selected_paths":["main.py"],"summary":"main.py contains the parser behavior."}',
+                decision(
+                    "search_files",
+                    {"query": "parse"},
+                    "Find parser code.",
+                    "Paths and previews that mention parse.",
+                    focus="Locate the parser implementation.",
+                    open_questions=["Which file implements parse?"],
+                ),
+                decision(
+                    "read_file",
+                    {"path": "main.py"},
+                    "Read the parser implementation.",
+                    "The implementation and surrounding behavior in main.py.",
+                    focus="Understand parser behavior.",
+                    findings=["main.py matched the parse search."],
+                    resolved_questions=["Which file implements parse?"],
+                    open_questions=["How does parse handle values?"],
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["main.py"]},
+                    "Enough context is available.",
+                    "A completed finish observation with main.py selected.",
+                    focus="Summarize the parser target.",
+                    findings=["main.py defines parse and returns the provided value."],
+                    resolved_questions=["How does parse handle values?"],
+                    finish_reason="main.py contains the parser behavior.",
+                ),
             ]
         )
 
@@ -80,6 +132,22 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.working_state.status, "completed")
         self.assertEqual(result.working_state.iteration, 3)
         self.assertEqual(result.working_state.selected_paths, ["main.py"])
+        self.assertEqual(result.working_state.focus, "Summarize the parser target.")
+        self.assertEqual(
+            result.working_state.findings,
+            [
+                "main.py matched the parse search.",
+                "main.py defines parse and returns the provided value.",
+            ],
+        )
+        self.assertEqual(result.working_state.open_questions, [])
+        self.assertIn("finish observation", result.working_state.expected_evidence)
+        self.assertIn("Paths and previews", result.steps[0].expected_evidence)
+        self.assertEqual(
+            result.steps[1].state_update["add_findings"],
+            ["main.py matched the parse search."],
+        )
+        self.assertEqual(result.steps[2].finish_reason, result.summary)
         state_events = [
             event for event in result.events if event.event_type == "working_state_updated"
         ]
@@ -88,6 +156,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Agent working state:", client.calls[0][1].content)
         self.assertIn("Iteration: 0", client.calls[0][1].content)
         self.assertIn("Iteration: 1", client.calls[1][1].content)
+        self.assertIn('"version":2', client.calls[0][0].content)
+        self.assertIn("Expected evidence:", client.calls[1][1].content)
 
     def test_select_agent_hits_prioritizes_selected_paths(self) -> None:
         files = [
@@ -116,8 +186,13 @@ class AgentLoopTests(unittest.TestCase):
         ]
         client = FakeLLMClient(
             [
-                '{"thought":"Search once.","action":"search_files","query":"missing",'
-                '"path":"","selected_paths":[],"summary":""}',
+                decision(
+                    "search_files",
+                    {"query": "missing"},
+                    "Search once.",
+                    "Any repository file matching missing.",
+                    focus="Search documentation.",
+                ),
             ]
         )
 

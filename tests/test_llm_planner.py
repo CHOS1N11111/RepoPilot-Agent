@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +16,36 @@ from repopilot_agent.models import MemoryContextItem, SearchHit
 from repopilot_agent.patch_proposer import propose_patch_with_optional_llm
 from repopilot_agent.planner import create_plan_with_optional_llm
 from repopilot_agent.workflow import run_workflow
+
+
+def iterative_decision(
+    kind: str,
+    arguments: dict,
+    rationale: str,
+    expected_evidence: str,
+    *,
+    focus: str,
+    findings: list[str] | None = None,
+    open_questions: list[str] | None = None,
+    resolved_questions: list[str] | None = None,
+    finish_reason: str = "",
+) -> str:
+    return json.dumps(
+        {
+            "version": 2,
+            "rationale": rationale,
+            "action": {"kind": kind, "arguments": arguments},
+            "expected_evidence": expected_evidence,
+            "state_update": {
+                "focus": focus,
+                "add_findings": findings or [],
+                "add_open_questions": open_questions or [],
+                "resolve_open_questions": resolved_questions or [],
+            },
+            "finish_reason": finish_reason,
+            "user_question": "",
+        }
+    )
 
 
 class FakeLLMClient:
@@ -330,12 +361,32 @@ class LLMPlannerTests(unittest.TestCase):
     def test_workflow_iterative_agent_runs_before_plan_and_proposal(self) -> None:
         client = FakeLLMClient(
             [
-                '{"thought":"Find parser files.","action":"search_files","query":"parse","path":"",'
-                '"selected_paths":[],"summary":""}',
-                '{"thought":"Read the implementation.","action":"read_file","query":"","path":"main.py",'
-                '"selected_paths":[],"summary":""}',
-                '{"thought":"Enough context is available.","action":"finish","query":"","path":"",'
-                '"selected_paths":["main.py"],"summary":"main.py is the implementation target."}',
+                iterative_decision(
+                    "search_files",
+                    {"query": "parse"},
+                    "Find parser files.",
+                    "Paths and previews matching parse.",
+                    focus="Locate parser files.",
+                    open_questions=["Which file contains parse?"],
+                ),
+                iterative_decision(
+                    "read_file",
+                    {"path": "main.py"},
+                    "Read the implementation.",
+                    "Parser source and surrounding behavior.",
+                    focus="Understand parser behavior.",
+                    findings=["main.py matched the parser search."],
+                    resolved_questions=["Which file contains parse?"],
+                ),
+                iterative_decision(
+                    "finish",
+                    {"selected_paths": ["main.py"]},
+                    "Enough context is available.",
+                    "A completed finish observation.",
+                    focus="Prepare the implementation plan.",
+                    findings=["main.py contains the parser implementation."],
+                    finish_reason="main.py is the implementation target.",
+                ),
                 '{"steps":[{"title":"Inspect parser","detail":"Review main.py parser behavior."}]}',
                 '{"objective":"Fix parser failure safely","files":[{"path":"main.py","change_type":"bugfix",'
                 '"rationale":"main.py contains the selected parser behavior.","suggested_actions":["Guard invalid input"],'
@@ -364,6 +415,15 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.agent_state["status"], "completed")
         self.assertEqual(report.agent_state["iteration"], 3)
         self.assertEqual(report.agent_state["selected_paths"], ["main.py"])
+        self.assertEqual(report.agent_state["focus"], "Prepare the implementation plan.")
+        self.assertEqual(
+            report.agent_state["findings"],
+            [
+                "main.py matched the parser search.",
+                "main.py contains the parser implementation.",
+            ],
+        )
+        self.assertEqual(report.agent_steps[0].expected_evidence, "Paths and previews matching parse.")
         self.assertEqual(report.relevant_files[0].path, "main.py")
         self.assertEqual(report.plan_metadata.source, "llm")
         self.assertEqual(report.patch_proposal_metadata.source, "llm")

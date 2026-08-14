@@ -9,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.memory import MemoryStore
+from repopilot_agent.models import AgentStateUpdate
 from repopilot_agent.runtime import (
+    AGENT_WORKING_STATE_VERSION,
     MAX_RECENT_OBSERVATIONS,
     AgentRuntime,
     RuntimeAction,
@@ -40,7 +42,12 @@ class AgentWorkingStateTests(unittest.TestCase):
                     status="completed",
                     summary="s" * 700,
                 ),
-                selected_paths=["src\\main.py", "../secret.txt", "src/main.py"],
+                selected_paths=[
+                    "src\\main.py",
+                    "../secret.txt",
+                    "C:\\Users\\secret.txt",
+                    "src/main.py",
+                ],
             )
 
         self.assertEqual(len(state.objective), 2_000)
@@ -67,12 +74,75 @@ class AgentWorkingStateTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(restored)
-        self.assertEqual(restored.version, 1)
+        self.assertEqual(restored.version, AGENT_WORKING_STATE_VERSION)
         self.assertEqual(restored.iteration, 0)
         self.assertEqual(restored.selected_paths, ["src/main.py"])
         self.assertEqual(restored.status, "completed")
         self.assertNotIn("api_key", restored.to_dict())
         self.assertNotIn("base_url", restored.to_dict())
+
+    def test_structured_updates_are_deterministic_bounded_and_resolve_questions(self) -> None:
+        state = create_agent_working_state("inspect repository")
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(kind="search_files", action_id="search-1"),
+            RuntimeObservation(
+                action_id="search-1",
+                action_kind="search_files",
+                status="completed",
+                summary="Found candidate files.",
+            ),
+            selected_paths=[],
+            state_update=AgentStateUpdate(
+                focus="  Locate   the parser ",
+                add_findings=["README mentions parser", "readme mentions parser"],
+                add_open_questions=["Where is parse implemented?"],
+            ),
+            expected_evidence="Paths containing parser symbols.",
+        )
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(kind="read_file", action_id="read-1"),
+            RuntimeObservation(
+                action_id="read-1",
+                action_kind="read_file",
+                status="completed",
+                summary="Read main.py.",
+            ),
+            selected_paths=["main.py"],
+            state_update=AgentStateUpdate(
+                add_findings=[
+                    "README mentions parser",
+                    *[f"Finding {index}" for index in range(25)],
+                ],
+                resolve_open_questions=[" where IS parse implemented? "],
+            ),
+            expected_evidence="Parser implementation details.",
+        )
+
+        self.assertEqual(state.version, AGENT_WORKING_STATE_VERSION)
+        self.assertEqual(state.focus, "Locate   the parser")
+        self.assertEqual(len(state.findings), 20)
+        self.assertEqual(state.findings[-1], "Finding 24")
+        self.assertEqual(state.open_questions, [])
+        self.assertEqual(state.expected_evidence, "Parser implementation details.")
+
+    def test_version_one_record_defaults_new_fields_without_losing_compatibility(self) -> None:
+        restored = agent_working_state_from_record(
+            {
+                "version": 1,
+                "objective": "inspect repository",
+                "phase": "exploration",
+                "status": "running",
+                "iteration": 1,
+            }
+        )
+
+        self.assertEqual(restored.version, 1)
+        self.assertEqual(restored.focus, "")
+        self.assertEqual(restored.findings, [])
+        self.assertEqual(restored.open_questions, [])
+        self.assertEqual(restored.expected_evidence, "")
 
     def test_invalid_latest_snapshot_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

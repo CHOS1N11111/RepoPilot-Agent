@@ -1382,13 +1382,26 @@ function renderAgentSteps(steps) {
     return item("Iterative agent was not run for this workflow.");
   }
   return steps
-    .map((step) => `<div class="item">
+    .map((step) => {
+      const update = step.state_update || {};
+      const stateChanges = [
+        update.focus ? `focus: ${update.focus}` : "",
+        ...(update.add_findings || []).map((value) => `finding +: ${value}`),
+        ...(update.add_open_questions || []).map((value) => `question +: ${value}`),
+        ...(update.resolve_open_questions || []).map((value) => `question resolved: ${value}`),
+      ].filter(Boolean);
+      return `<div class="item">
       <div class="item-title">Step ${escapeHtml(step.order)}: ${escapeHtml(step.action)}</div>
       <p>${escapeHtml(step.thought || "")}</p>
       <p><small>Input: ${escapeHtml(step.tool_input || "(none)")}</small></p>
+      <p><small>Expected evidence: ${escapeHtml(step.expected_evidence || "(none)")}</small></p>
+      ${stateChanges.length ? `<p><small>State update: ${escapeHtml(stateChanges.join(" | "))}</small></p>` : ""}
       <pre>${escapeHtml(step.observation || "")}</pre>
       ${(step.selected_paths || []).length ? `<p><small>Selected: ${escapeHtml(step.selected_paths.join(", "))}</small></p>` : ""}
-    </div>`)
+      ${step.finish_reason ? `<p><small>Finish reason: ${escapeHtml(step.finish_reason)}</small></p>` : ""}
+      ${step.user_question ? `<p><small>User question: ${escapeHtml(step.user_question)}</small></p>` : ""}
+    </div>`;
+    })
     .join("");
 }
 
@@ -1401,6 +1414,10 @@ function renderAgentWorkingState(agentState) {
     : [];
   const observations = Array.isArray(agentState.recent_observations)
     ? agentState.recent_observations
+    : [];
+  const findings = Array.isArray(agentState.findings) ? agentState.findings : [];
+  const openQuestions = Array.isArray(agentState.open_questions)
+    ? agentState.open_questions
     : [];
   const observationRows = observations.map((observation) => `
     <div class="timeline-event">
@@ -1420,8 +1437,24 @@ function renderAgentWorkingState(agentState) {
       <span>${escapeHtml(agentState.objective)}</span>
     </div>
     <div class="timeline-event">
+      <span class="timeline-step">Focus</span>
+      <span>${escapeHtml(agentState.focus || "none")}</span>
+    </div>
+    <div class="timeline-event">
       <span class="timeline-step">Selected paths</span>
       <span>${escapeHtml(selectedPaths.join(", ") || "none")}</span>
+    </div>
+    <div class="timeline-event">
+      <span class="timeline-step">Findings</span>
+      <span>${escapeHtml(findings.join(" | ") || "none")}</span>
+    </div>
+    <div class="timeline-event">
+      <span class="timeline-step">Open questions</span>
+      <span>${escapeHtml(openQuestions.join(" | ") || "none")}</span>
+    </div>
+    <div class="timeline-event">
+      <span class="timeline-step">Expected evidence</span>
+      <span>${escapeHtml(agentState.expected_evidence || "none")}</span>
     </div>
     ${observationRows}
   `;

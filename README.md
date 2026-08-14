@@ -97,7 +97,8 @@ flowchart LR
 | 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths.           |
 | 🔎 Retrieval           | Scores files with task terms, path intent, symbols, multi-snippets, and source/test pairing.          |
 | Agent runtime          | Executes typed tools, records action/observation events, and blocks unsafe automatic replay.          |
-| Agent working state    | Persists bounded objective, phase, iteration, selected-path, observation, and stop-reason snapshots.   |
+| Agent decision         | Validates a versioned decision envelope with one typed action, expected evidence, and state updates.   |
+| Agent working state    | Persists bounded focus, findings, questions, selected paths, observations, and lifecycle snapshots.    |
 | Iterative agent        | Uses the runtime under a read-only policy for bounded exploration before planning.                    |
 | Repository map        | Indexes symbols, signatures, imports, dependencies, and source/test relations for task context.       |
 | Structured patch      | Applies approved exact-text hunks with SHA-256 preconditions, conflict reports, and syntax checks.    |
@@ -345,15 +346,17 @@ Enable read-only iterative agent mode when you want Codex-like multi-step explor
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, `inspect_repository_map`, and `inspect_git_status`. These actions run through the same typed runtime used for guarded `inspect_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish` tools. The current exploration policy enables only the read-only subset; approved edits continue to flow through patch proposals and human review.
+In this mode, the LLM can choose bounded read-only actions such as `search_files`, `read_file`, `inspect_repository_map`, and `inspect_git_status`. Every call must return the strict `AgentDecision` v2 envelope: a rationale, exactly one action with action-specific arguments, expected evidence, a bounded state update, a finish reason, and a reserved user-question field. Unknown fields, unknown arguments, unsafe paths, invalid types, missing evidence, and invalid finish semantics are rejected before a tool runs.
+
+These actions run through the same typed runtime used for guarded `inspect_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish` tools. The current exploration policy enables only the read-only subset; approved edits continue to flow through patch proposals and human review. State updates are controller notes, not automatically accepted validation evidence.
 
 `read_file` observations include a SHA-256 digest of the complete file even when the displayed content is truncated. The runtime's preferred write tool, `apply_patch`, accepts exact old/new text hunks plus that digest. It refuses stale files, missing or ambiguous hunk matches, and invalid Python or JSON output. Successful writes are read back and hashed again. Conflict observations are structured so a later agent step can re-read the file and prepare a new approved action instead of overwriting external changes.
 
 Each runtime action has an action id and idempotency key. RepoPilot persists ordered `run_started`, `action_started`, `action_completed`, approval, recovery, replay, and `run_stopped` events. A completed action is not executed again when retried with the same payload. If RepoPilot finds an unfinished reservation after a restart, it reports `recovery_required` instead of blindly repeating a possible file write or command.
 
-Workflow JSON includes `agent_run_id`, `agent_events`, and the latest `agent_state`. The versioned working state records the objective, phase, status, iteration, selected paths, eight most recent bounded observation summaries, stop reason, and update time. Initial, per-step, and terminal snapshots are stored as `working_state_updated` runtime events, so reopening the SQLite event stream can recover the latest valid snapshot. Complete file bodies, complete command output, API keys, and provider endpoints are not copied into these snapshots.
+Workflow JSON includes `agent_run_id`, `agent_events`, and the latest `agent_state`. Working State v2 records the objective, current focus, bounded findings, bounded open questions, expected evidence, phase, status, iteration, selected paths, eight most recent bounded observation summaries, stop reason, and update time. Initial, per-step, and terminal snapshots are stored as `working_state_updated` runtime events, so reopening the SQLite event stream can recover the latest valid snapshot. Version 1 snapshots remain readable with empty defaults for the new fields. Complete file bodies, complete command output, API keys, and provider endpoints are not copied into these snapshots.
 
-The Web Summary and saved History views show both the latest Agent Working State and the ordered runtime timeline. Each iterative prompt receives the compact state alongside recent observations. This is the first foundation for a unified decide, act, observe, and verify loop; the current LLM controller remains read-only and all file changes still require proposal review and human approval.
+The CLI, Web Summary, and saved History views show the latest Agent Working State and ordered runtime timeline. Agent Steps also expose the rationale, action input, expected evidence, structured state update, observation, selected paths, and finish reason. Each iterative prompt receives the compact state alongside recent observations. The current LLM controller remains read-only and all file changes still require proposal review and human approval.
 
 Disable related memory lookup for a clean-context run:
 

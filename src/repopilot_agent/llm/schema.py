@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 
 from .base import LLMError
 from .json_utils import parse_json_object
 from ..models import (
-    AgentAction,
+    AGENT_DECISION_VERSION,
+    AgentDecision,
+    AgentStateUpdate,
     FileChangeProposal,
     FileEditProposal,
     PatchReview,
@@ -18,13 +20,32 @@ from ..models import (
 ALLOWED_CHANGE_TYPES = {"bugfix", "feature", "test", "documentation", "refinement"}
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_RISK_LEVELS = {"high", "medium", "low"}
-ALLOWED_AGENT_ACTIONS = {
+ALLOWED_AGENT_DECISION_ACTIONS = {
     "search_files",
     "read_file",
     "inspect_repository_map",
     "inspect_git_status",
     "finish",
 }
+AGENT_DECISION_KEYS = {
+    "version",
+    "rationale",
+    "action",
+    "expected_evidence",
+    "state_update",
+    "finish_reason",
+    "user_question",
+}
+AGENT_STATE_UPDATE_KEYS = {
+    "focus",
+    "add_findings",
+    "add_open_questions",
+    "resolve_open_questions",
+}
+MAX_DECISION_TEXT_CHARS = 2_000
+MAX_STATE_ITEM_CHARS = 500
+MAX_STATE_UPDATE_ITEMS = 12
+MAX_DECISION_PATHS = 50
 
 
 def parse_plan_steps_json(response: str) -> list[PlanStep]:
@@ -47,40 +68,258 @@ def parse_plan_steps_json(response: str) -> list[PlanStep]:
     return steps
 
 
-def parse_agent_action_json(response: str) -> AgentAction:
+def parse_agent_decision_json(response: str) -> AgentDecision:
     data = parse_json_object(response)
-    thought = data.get("thought")
-    action = data.get("action")
-    if not isinstance(thought, str) or not thought.strip():
-        raise LLMError("Agent action JSON must include a non-empty thought.")
-    if action not in ALLOWED_AGENT_ACTIONS:
-        raise LLMError(f"Invalid agent action: {action}")
-
-    query = data.get("query", "")
-    path = data.get("path", "")
-    summary = data.get("summary", "")
-    selected_paths = data.get("selected_paths", [])
-    if not isinstance(query, str):
-        raise LLMError("Agent action query must be a string when provided.")
-    if not isinstance(path, str):
-        raise LLMError("Agent action path must be a string when provided.")
-    if not isinstance(summary, str):
-        raise LLMError("Agent action summary must be a string when provided.")
-    if not isinstance(selected_paths, list) or not all(isinstance(item, str) for item in selected_paths):
-        raise LLMError("Agent action selected_paths must be a list of strings.")
-    if action == "search_files" and not query.strip():
-        raise LLMError("search_files action requires a non-empty query.")
-    if action == "read_file" and not path.strip():
-        raise LLMError("read_file action requires a non-empty path.")
-
-    return AgentAction(
-        thought=thought.strip(),
-        action=action,
-        query=query.strip(),
-        path=path.strip(),
-        summary=summary.strip(),
-        selected_paths=[item.strip() for item in selected_paths if item.strip()],
+    _require_exact_keys(data, AGENT_DECISION_KEYS, "Agent decision")
+    version = data.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != AGENT_DECISION_VERSION:
+        raise LLMError(f"Agent decision version must be {AGENT_DECISION_VERSION}.")
+    rationale = _required_bounded_string(data, "rationale", MAX_DECISION_TEXT_CHARS, "Agent decision")
+    expected_evidence = _required_bounded_string(
+        data,
+        "expected_evidence",
+        MAX_DECISION_TEXT_CHARS,
+        "Agent decision",
     )
+    finish_reason = _optional_bounded_string(
+        data,
+        "finish_reason",
+        MAX_DECISION_TEXT_CHARS,
+        "Agent decision",
+    )
+    user_question = _optional_bounded_string(
+        data,
+        "user_question",
+        MAX_STATE_ITEM_CHARS,
+        "Agent decision",
+    )
+    action = data.get("action")
+    if not isinstance(action, dict):
+        raise LLMError("Agent decision action must be an object.")
+    _require_exact_keys(action, {"kind", "arguments"}, "Agent decision action")
+    action_kind = action.get("kind")
+    if action_kind not in ALLOWED_AGENT_DECISION_ACTIONS:
+        raise LLMError(f"Invalid Agent decision action: {action_kind}")
+    raw_arguments = action.get("arguments")
+    if not isinstance(raw_arguments, dict):
+        raise LLMError("Agent decision action arguments must be an object.")
+    action_arguments = _parse_agent_decision_arguments(action_kind, raw_arguments)
+    if action_kind == "finish" and not finish_reason:
+        raise LLMError("finish decisions require a non-empty finish_reason.")
+    if action_kind != "finish" and finish_reason:
+        raise LLMError("finish_reason must be empty unless the action is finish.")
+    raw_state_update = data.get("state_update")
+    if not isinstance(raw_state_update, dict):
+        raise LLMError("Agent decision state_update must be an object.")
+    _require_exact_keys(raw_state_update, AGENT_STATE_UPDATE_KEYS, "Agent decision state_update")
+    state_update = AgentStateUpdate(
+        focus=_optional_bounded_string(
+            raw_state_update,
+            "focus",
+            MAX_STATE_ITEM_CHARS,
+            "Agent decision state_update",
+        ),
+        add_findings=_bounded_string_list(raw_state_update, "add_findings"),
+        add_open_questions=_bounded_string_list(raw_state_update, "add_open_questions"),
+        resolve_open_questions=_bounded_string_list(
+            raw_state_update,
+            "resolve_open_questions",
+        ),
+    )
+    added_questions = {
+        _normalized_text(item) for item in state_update.add_open_questions
+    }
+    resolved_questions = {
+        _normalized_text(item) for item in state_update.resolve_open_questions
+    }
+    if added_questions & resolved_questions:
+        raise LLMError(
+            "Agent decision cannot add and resolve the same open question."
+        )
+    return AgentDecision(
+        version=version,
+        rationale=rationale,
+        action_kind=action_kind,
+        action_arguments=action_arguments,
+        expected_evidence=expected_evidence,
+        state_update=state_update,
+        finish_reason=finish_reason,
+        user_question=user_question,
+    )
+
+
+def parse_agent_action_json(response: str) -> AgentDecision:
+    """Compatibility entry point for callers using the previous parser name."""
+
+    return parse_agent_decision_json(response)
+
+
+def _parse_agent_decision_arguments(
+    action_kind: str,
+    arguments: dict,
+) -> dict:
+    if action_kind == "search_files":
+        _require_exact_keys(arguments, {"query"}, "search_files arguments")
+        return {
+            "query": _required_bounded_string(
+                arguments,
+                "query",
+                MAX_STATE_ITEM_CHARS,
+                "search_files arguments",
+            )
+        }
+    if action_kind == "read_file":
+        _require_exact_keys(arguments, {"path"}, "read_file arguments")
+        path = _required_bounded_string(
+            arguments,
+            "path",
+            MAX_STATE_ITEM_CHARS,
+            "read_file arguments",
+        )
+        return {"path": _normalize_agent_path(path)}
+    if action_kind == "inspect_repository_map":
+        _reject_unknown_keys(
+            arguments,
+            {"query", "limit"},
+            "inspect_repository_map arguments",
+        )
+        parsed: dict = {}
+        if "query" in arguments:
+            parsed["query"] = _optional_bounded_string(
+                arguments,
+                "query",
+                MAX_STATE_ITEM_CHARS,
+                "inspect_repository_map arguments",
+            )
+        if "limit" in arguments:
+            limit = arguments["limit"]
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+                raise LLMError("inspect_repository_map limit must be an integer from 1 to 20.")
+            parsed["limit"] = limit
+        return parsed
+    if action_kind == "inspect_git_status":
+        _require_exact_keys(arguments, set(), "inspect_git_status arguments")
+        return {}
+    if action_kind == "finish":
+        _require_exact_keys(arguments, {"selected_paths"}, "finish arguments")
+        return {
+            "selected_paths": _bounded_path_list(
+                arguments,
+                "selected_paths",
+            )
+        }
+    raise LLMError(f"Agent decision action is not implemented: {action_kind}")
+
+
+def _require_exact_keys(value: dict, expected: set[str], label: str) -> None:
+    actual = set(value)
+    missing = sorted(expected - actual)
+    unknown = sorted(actual - expected)
+    if missing:
+        raise LLMError(f"{label} is missing required field(s): {', '.join(missing)}.")
+    if unknown:
+        raise LLMError(f"{label} contains unknown field(s): {', '.join(unknown)}.")
+
+
+def _reject_unknown_keys(value: dict, allowed: set[str], label: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise LLMError(f"{label} contains unknown field(s): {', '.join(unknown)}.")
+
+
+def _required_bounded_string(
+    value: dict,
+    name: str,
+    limit: int,
+    label: str,
+) -> str:
+    parsed = _optional_bounded_string(value, name, limit, label)
+    if not parsed:
+        raise LLMError(f"{label} must include a non-empty {name}.")
+    return parsed
+
+
+def _optional_bounded_string(
+    value: dict,
+    name: str,
+    limit: int,
+    label: str,
+) -> str:
+    raw = value.get(name, "")
+    if not isinstance(raw, str):
+        raise LLMError(f"{label} {name} must be a string.")
+    parsed = raw.strip()
+    if len(parsed) > limit:
+        raise LLMError(f"{label} {name} exceeds the {limit}-character limit.")
+    return parsed
+
+
+def _bounded_string_list(value: dict, name: str) -> list[str]:
+    raw = value.get(name)
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise LLMError(f"Agent decision state_update {name} must be a list of strings.")
+    if len(raw) > MAX_STATE_UPDATE_ITEMS:
+        raise LLMError(
+            f"Agent decision state_update {name} exceeds the "
+            f"{MAX_STATE_UPDATE_ITEMS}-item limit."
+        )
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        normalized = " ".join(item.split())
+        if not normalized:
+            raise LLMError(f"Agent decision state_update {name} cannot contain empty items.")
+        if len(normalized) > MAX_STATE_ITEM_CHARS:
+            raise LLMError(
+                f"Agent decision state_update {name} contains an item over "
+                f"{MAX_STATE_ITEM_CHARS} characters."
+            )
+        key = normalized.casefold()
+        if key not in seen:
+            parsed.append(normalized)
+            seen.add(key)
+    return parsed
+
+
+def _bounded_path_list(value: dict, name: str) -> list[str]:
+    raw = value.get(name)
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise LLMError(f"Agent decision {name} must be a list of strings.")
+    if len(raw) > MAX_DECISION_PATHS:
+        raise LLMError(f"Agent decision {name} exceeds the {MAX_DECISION_PATHS}-path limit.")
+    paths: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        path = _normalize_agent_path(item)
+        if path not in seen:
+            paths.append(path)
+            seen.add(path)
+    return paths
+
+
+def _normalize_agent_path(value: str) -> str:
+    path = value.strip()
+    if not path:
+        raise LLMError("Agent decision paths must not be empty.")
+    if len(path) > MAX_STATE_ITEM_CHARS:
+        raise LLMError(
+            f"Agent decision path exceeds the {MAX_STATE_ITEM_CHARS}-character limit."
+        )
+    normalized = PurePosixPath(path.replace("\\", "/"))
+    windows_path = PureWindowsPath(path)
+    if (
+        normalized.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in normalized.parts
+        or any(part in {"", "."} for part in normalized.parts)
+    ):
+        raise LLMError(f"Unsafe Agent decision path: {value}")
+    return normalized.as_posix()
+
+
+def _normalized_text(value: str) -> str:
+    return " ".join(value.split()).casefold()
 
 
 def parse_patch_proposal_json(response: str) -> dict:

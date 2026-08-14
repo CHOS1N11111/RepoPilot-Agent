@@ -441,8 +441,24 @@ def _print_report(report) -> None:
             print(f"{step.order}. {step.action}: {step.thought}")
             if step.tool_input:
                 print(f"  Input: {step.tool_input}")
+            if step.expected_evidence:
+                print(f"  Expected evidence: {step.expected_evidence}")
+            if step.state_update:
+                focus = step.state_update.get("focus")
+                if focus:
+                    print(f"  Focus: {focus}")
+                for finding in step.state_update.get("add_findings") or []:
+                    print(f"  Finding +: {finding}")
+                for question in step.state_update.get("add_open_questions") or []:
+                    print(f"  Open question +: {question}")
+                for question in step.state_update.get("resolve_open_questions") or []:
+                    print(f"  Open question resolved: {question}")
             if step.selected_paths:
                 print(f"  Selected: {', '.join(step.selected_paths)}")
+            if step.finish_reason:
+                print(f"  Finish reason: {step.finish_reason}")
+            if step.user_question:
+                print(f"  User question: {step.user_question}")
     else:
         print("- Iterative agent was not run.")
     print()
@@ -457,6 +473,16 @@ def _print_report(report) -> None:
         selected_paths = report.agent_state.get("selected_paths") or []
         if selected_paths:
             print(f"  Selected: {', '.join(selected_paths)}")
+        if report.agent_state.get("focus"):
+            print(f"  Focus: {report.agent_state['focus']}")
+        findings = report.agent_state.get("findings") or []
+        if findings:
+            print(f"  Findings: {'; '.join(findings)}")
+        open_questions = report.agent_state.get("open_questions") or []
+        if open_questions:
+            print(f"  Open questions: {'; '.join(open_questions)}")
+        if report.agent_state.get("expected_evidence"):
+            print(f"  Expected evidence: {report.agent_state['expected_evidence']}")
         if report.agent_state.get("stop_reason"):
             print(f"  Stop reason: {report.agent_state['stop_reason']}")
     else:

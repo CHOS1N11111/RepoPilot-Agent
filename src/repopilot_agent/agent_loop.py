@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .llm.base import LLMClient, LLMError, LLMMessage
 from .llm.prompts import AGENT_SYSTEM_PROMPT, build_agent_prompt
-from .llm.schema import parse_agent_action_json
+from .llm.schema import parse_agent_decision_json
 from .llm.tracing import traced_llm_json_call
-from .models import AgentAction, AgentStep, LLMCallTrace, RepoFile, SearchHit
+from .models import AgentDecision, AgentStep, LLMCallTrace, RepoFile, SearchHit
 from .repository_map import RepositoryMap
 from .runtime import (
     AgentRuntime,
@@ -76,7 +76,7 @@ def run_agent_loop(
 
     try:
         for step_number in range(1, max_steps + 1):
-            action = _choose_next_action(
+            decision = _choose_next_decision(
                 task,
                 initial_hits,
                 steps,
@@ -86,7 +86,7 @@ def run_agent_loop(
                 llm_client,
                 traces,
             )
-            runtime_action = _to_runtime_action(action, step_number)
+            runtime_action = _to_runtime_action(decision, step_number)
             runtime_observation = runtime.execute(runtime_action)
             selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
             working_state = advance_agent_working_state(
@@ -94,6 +94,8 @@ def run_agent_loop(
                 runtime_action,
                 runtime_observation,
                 selected_paths=selected_paths,
+                state_update=decision.state_update,
+                expected_evidence=decision.expected_evidence,
             )
             runtime.record_working_state(working_state)
             if runtime_observation.status in {"approval_required", "policy_denied", "recovery_required"}:
@@ -102,15 +104,23 @@ def run_agent_loop(
             tool_input = _runtime_tool_input(runtime_action)
             agent_step = AgentStep(
                 order=step_number,
-                action=action.action,
-                thought=action.thought,
+                action=decision.action_kind,
+                thought=decision.rationale,
                 tool_input=tool_input,
                 observation=observation,
                 selected_paths=list(selected_paths),
+                expected_evidence=decision.expected_evidence,
+                state_update=asdict(decision.state_update),
+                finish_reason=decision.finish_reason,
+                user_question=decision.user_question,
             )
             steps.append(agent_step)
-            if action.action == "finish" and runtime_observation.status == "completed":
-                summary = str(runtime_observation.data.get("summary") or action.summary or observation)
+            if decision.action_kind == "finish" and runtime_observation.status == "completed":
+                summary = str(
+                    runtime_observation.data.get("summary")
+                    or decision.finish_reason
+                    or observation
+                )
                 finished = True
                 break
     except Exception as exc:
@@ -182,7 +192,7 @@ def select_agent_hits(
     return ordered[:limit]
 
 
-def _choose_next_action(
+def _choose_next_decision(
     task: str,
     initial_hits: list[SearchHit],
     steps: list[AgentStep],
@@ -191,7 +201,7 @@ def _choose_next_action(
     max_steps: int,
     llm_client: LLMClient,
     traces: list[LLMCallTrace] | None,
-) -> AgentAction:
+) -> AgentDecision:
     return traced_llm_json_call(
         f"agent_step_{step_number}",
         llm_client,
@@ -209,27 +219,20 @@ def _choose_next_action(
                 ),
             ),
         ],
-        parse_agent_action_json,
+        parse_agent_decision_json,
         traces,
         context_summary=f"Agent step {step_number}/{max_steps}; previous observations: {len(steps)}.",
     )
 
 
-def _to_runtime_action(action: AgentAction, step_number: int) -> RuntimeAction:
-    arguments: dict = {}
-    if action.action == "search_files":
-        arguments["query"] = action.query
-    elif action.action == "inspect_repository_map":
-        arguments["query"] = action.query
-    elif action.action == "read_file":
-        arguments["path"] = action.path
-    elif action.action == "finish":
-        arguments["summary"] = action.summary
-        arguments["selected_paths"] = action.selected_paths
+def _to_runtime_action(decision: AgentDecision, step_number: int) -> RuntimeAction:
+    arguments = dict(decision.action_arguments)
+    if decision.action_kind == "finish":
+        arguments["summary"] = decision.finish_reason
     return RuntimeAction(
-        kind=action.action,
+        kind=decision.action_kind,
         arguments=arguments,
-        rationale=action.thought,
+        rationale=decision.rationale,
         action_id=f"explore-{step_number}",
         idempotency_key=f"explore-step-{step_number}",
     )

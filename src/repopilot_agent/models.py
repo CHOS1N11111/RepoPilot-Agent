@@ -53,14 +53,52 @@ class LLMCallTrace:
     context_summary: str = ""
 
 
+AGENT_DECISION_VERSION = 2
+
+
 @dataclass(frozen=True)
-class AgentAction:
-    thought: str
-    action: str
-    query: str = ""
-    path: str = ""
-    selected_paths: list[str] = field(default_factory=list)
-    summary: str = ""
+class AgentStateUpdate:
+    focus: str = ""
+    add_findings: list[str] = field(default_factory=list)
+    add_open_questions: list[str] = field(default_factory=list)
+    resolve_open_questions: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentDecision:
+    version: int
+    rationale: str
+    action_kind: str
+    action_arguments: dict[str, Any]
+    expected_evidence: str
+    state_update: AgentStateUpdate
+    finish_reason: str = ""
+    user_question: str = ""
+
+    @property
+    def thought(self) -> str:
+        return self.rationale
+
+    @property
+    def action(self) -> str:
+        return self.action_kind
+
+    @property
+    def query(self) -> str:
+        return str(self.action_arguments.get("query") or "")
+
+    @property
+    def path(self) -> str:
+        return str(self.action_arguments.get("path") or "")
+
+    @property
+    def selected_paths(self) -> list[str]:
+        value = self.action_arguments.get("selected_paths")
+        return list(value) if isinstance(value, list) else []
+
+    @property
+    def summary(self) -> str:
+        return self.finish_reason
 
 
 @dataclass(frozen=True)
@@ -71,6 +109,10 @@ class AgentStep:
     tool_input: str
     observation: str
     selected_paths: list[str] = field(default_factory=list)
+    expected_evidence: str = ""
+    state_update: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str = ""
+    user_question: str = ""
 
 
 @dataclass(frozen=True)

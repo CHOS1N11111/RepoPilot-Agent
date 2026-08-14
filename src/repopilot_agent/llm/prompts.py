@@ -35,11 +35,21 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
 
 AGENT_SYSTEM_PROMPT = (
     "You are RepoPilot Agent's read-only repository exploration loop. "
-    "Choose exactly one next action and return only JSON with this shape: "
-    '{"thought":"why this action is useful","action":"search_files|read_file|inspect_repository_map|inspect_git_status|finish",'
-    '"query":"search query if action is search_files","path":"repo-relative path if action is read_file",'
-    '"selected_paths":["repo-relative paths useful for the final proposal"],"summary":"brief finish summary"}. '
+    "Choose exactly one next decision and return only JSON with this exact shape: "
+    '{"version":2,"rationale":"why this action is useful",'
+    '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|finish",'
+    '"arguments":{}},"expected_evidence":"what result would make this action useful",'
+    '"state_update":{"focus":"current investigation focus","add_findings":[],'
+    '"add_open_questions":[],"resolve_open_questions":[]},'
+    '"finish_reason":"","user_question":""}. '
+    "Action arguments must be exactly one of: search_files {query}; read_file {path}; "
+    "inspect_repository_map with optional {query, limit}; inspect_git_status {}; "
+    "finish {selected_paths}. "
     "Use only read-only actions. Do not propose file edits here. "
+    "Always provide non-empty rationale and expected_evidence. "
+    "Only add findings already supported by previous observations; expected future tool output is not a finding. "
+    "Use finish_reason only for finish, and set it to a non-empty completion summary. "
+    "Keep finish_reason empty for all other actions. user_question is reserved for a future interaction loop, so keep it empty. "
     "For normal code, documentation, or explanation tasks, start by searching or reading files. "
     "Use inspect_git_status only when the task is about Git state, diffs, branches, delivery, or local changes. "
     "Treat search results as candidates; read important files before selecting them. "
@@ -163,9 +173,10 @@ def build_agent_prompt(
             "Previous observations:",
             observations or "No previous observations.",
             "",
-            "Choose the single next action that will most improve repository understanding. "
+            "Choose the single next decision that will most improve repository understanding. "
             "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "
-            "Prefer finish if the useful files are already known.",
+            "Prefer finish if the useful files are already known. Update focus and open questions "
+            "conservatively, and only record findings supported by previous observations.",
         ]
     )
 

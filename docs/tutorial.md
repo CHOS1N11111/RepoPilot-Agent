@@ -163,7 +163,26 @@ To use Codex-like multi-step exploration before planning and proposal generation
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-This mode lets the LLM choose read-only actions such as `search_files`, `read_file`, `inspect_repository_map`, and `inspect_git_status` across several smaller calls. The actions run through RepoPilot's typed runtime and produce persistent action-observation events. It does not let the explorer write files directly; file changes still require a generated proposal and human approval.
+This mode lets the LLM choose read-only actions such as `search_files`, `read_file`, `inspect_repository_map`, and `inspect_git_status` across several smaller calls. Each call returns one `AgentDecision` v2 object and RepoPilot validates it before executing the action:
+
+```json
+{
+  "version": 2,
+  "rationale": "Read the parser implementation selected by search.",
+  "action": {"kind": "read_file", "arguments": {"path": "src/parser.py"}},
+  "expected_evidence": "The parser implementation and its edge-case behavior.",
+  "state_update": {
+    "focus": "Understand parser behavior.",
+    "add_findings": ["src/parser.py matched the previous search."],
+    "add_open_questions": ["How are empty values handled?"],
+    "resolve_open_questions": ["Which file implements parsing?"]
+  },
+  "finish_reason": "",
+  "user_question": ""
+}
+```
+
+The action schema is specific to its kind: search uses `query`, read uses `path`, repository-map inspection accepts optional `query` and `limit`, Git inspection accepts no arguments, and finish uses `selected_paths`. RepoPilot rejects extra fields, extra action arguments, unsafe paths, wrong types, empty expected evidence, and inconsistent finish fields. The actions run through RepoPilot's typed runtime and produce persistent action-observation events. It does not let the explorer write files directly; file changes still require a generated proposal and human approval.
 
 Use JSON output when you want to inspect structured fields:
 
@@ -176,10 +195,10 @@ Important LLM-related fields:
 - `plan_metadata`: whether planning came from rules or an LLM.
 - `patch_proposal_metadata`: whether proposal generation came from rules or an LLM.
 - `patch_review`: LLM review of the proposed diff when available.
-- `agent_steps`: read-only iterative agent actions when iterative mode is enabled.
+- `agent_steps`: read-only iterative decisions with rationale, expected evidence, state update, observation, selected paths, and finish reason.
 - `agent_run_id`: stable identifier for the typed runtime execution.
 - `agent_events`: ordered runtime lifecycle, action, observation, approval, replay, and recovery events.
-- `agent_state`: latest versioned working-state snapshot with objective, phase, status, iteration, selected paths, bounded recent observation summaries, and stop reason.
+- `agent_state`: latest versioned working-state snapshot with objective, focus, findings, open questions, expected evidence, lifecycle fields, selected paths, and bounded observations.
 - `llm_traces`: prompt previews, output previews, parse status, fallback state, and latency.
 - `context_summary`: which files were included, truncated, omitted, or eligible for direct edits.
 - `repository_map`: indexed file/symbol/relation counts and the task-ranked files, symbols, and dependencies.
@@ -216,9 +235,11 @@ The web UI is local. It gives you the full workflow in tabs:
 
 Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
-Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows `Agent Steps`, the latest `Agent Working State`, and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows each typed decision in `Agent Steps`, the latest `Agent Working State`, and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
 
-Agent Working State is a compact controller snapshot rather than a transcript. RepoPilot writes an initial snapshot, updates it after every action observation, and records a terminal snapshot for `finished`, `step_limit`, or `failed`. Only the eight newest bounded observation summaries are retained in each snapshot. Complete file contents, complete command output, API keys, and provider endpoints are excluded. Saved History derives the latest state from the persisted `working_state_updated` runtime events.
+Agent Working State is a compact controller snapshot rather than a transcript. Version 2 tracks current focus, bounded findings, bounded open questions, and expected evidence in addition to lifecycle and selected-path fields. RepoPilot writes an initial snapshot, applies structured updates deterministically after every action observation, and records a terminal snapshot for `finished`, `step_limit`, or `failed`. Questions are matched case-insensitively for resolution, duplicate findings/questions are suppressed, and only bounded values plus the eight newest observation summaries are retained. Version 1 snapshots remain readable. Complete file contents, complete command output, API keys, and provider endpoints are excluded. Saved History derives the latest state from the persisted `working_state_updated` runtime events.
+
+Findings in Working State are model-maintained investigation notes. They help the next decision stay focused, but RepoPilot does not treat them as passing tests, completion evidence, or permission to modify files. The `user_question` field is reserved for a later durable interaction loop and should currently be empty.
 
 Runtime events are ordered by sequence number. `action_started` and `action_completed` show normal tool execution. `approval_required` means a side-effect action cannot proceed without action-scoped approval. `action_replayed` means a completed idempotent result was reused without executing the tool again. `action_recovery_required` means RepoPilot found an interrupted reservation and stopped automatic replay so you can inspect the sandbox first.
 
