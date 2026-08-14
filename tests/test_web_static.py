@@ -154,7 +154,11 @@ class WebApprovalUiContractTests(unittest.TestCase):
 
     def test_summary_exposes_typed_runtime_events(self) -> None:
         self.assertIn('id="runtimeEventList"', self.index_html)
+        self.assertIn('id="agentWorkingState"', self.index_html)
         self.assertIn("function renderRuntimeEvents", self.app_js)
+        self.assertIn("function renderAgentWorkingState", self.app_js)
+        self.assertIn("renderAgentWorkingState(report.agent_state)", self.app_js)
+        self.assertIn('event.event_type === "working_state_updated"', self.app_js)
         self.assertIn("report.agent_events || []", self.app_js)
         self.assertIn("run.agent_events || []", self.app_js)
         self.assertIn(".runtime-event", self.app_css)

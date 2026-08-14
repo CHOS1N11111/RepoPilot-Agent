@@ -196,6 +196,11 @@ def run_workflow(
         agent_steps=agent_result.steps if agent_result else [],
         agent_run_id=agent_result.runtime_run_id if agent_result else None,
         agent_events=agent_result.events if agent_result else [],
+        agent_state=(
+            agent_result.working_state.to_dict()
+            if agent_result and agent_result.working_state
+            else {}
+        ),
         llm_traces=llm_traces,
         validation=validation,
         validation_feedback=validation_feedback,

@@ -97,6 +97,7 @@ flowchart LR
 | 📁 Repository scanning | Reads supported text files and ignores Git, dependency, build, cache, and local note paths.           |
 | 🔎 Retrieval           | Scores files with task terms, path intent, symbols, multi-snippets, and source/test pairing.          |
 | Agent runtime          | Executes typed tools, records action/observation events, and blocks unsafe automatic replay.          |
+| Agent working state    | Persists bounded objective, phase, iteration, selected-path, observation, and stop-reason snapshots.   |
 | Iterative agent        | Uses the runtime under a read-only policy for bounded exploration before planning.                    |
 | Repository map        | Indexes symbols, signatures, imports, dependencies, and source/test relations for task context.       |
 | Structured patch      | Applies approved exact-text hunks with SHA-256 preconditions, conflict reports, and syntax checks.    |
@@ -133,6 +134,7 @@ src/repopilot_agent/
     models.py           action, observation, event, policy, and run contracts
     tools.py            typed repository, Git, edit, and validation tools
     store.py            in-memory and SQLite action/event persistence
+    state.py            versioned compact Agent working state and deterministic transitions
     loop.py             reusable policy-gated action-observation loop
   planner.py            deterministic and LLM planning
   patch_proposer.py     patch proposal and LLM patch review
@@ -349,7 +351,9 @@ In this mode, the LLM can choose bounded read-only actions such as `search_files
 
 Each runtime action has an action id and idempotency key. RepoPilot persists ordered `run_started`, `action_started`, `action_completed`, approval, recovery, replay, and `run_stopped` events. A completed action is not executed again when retried with the same payload. If RepoPilot finds an unfinished reservation after a restart, it reports `recovery_required` instead of blindly repeating a possible file write or command.
 
-Workflow JSON includes `agent_run_id` and `agent_events`. The Web Summary and saved History views show a concise runtime event timeline without expanding complete file contents into the page.
+Workflow JSON includes `agent_run_id`, `agent_events`, and the latest `agent_state`. The versioned working state records the objective, phase, status, iteration, selected paths, eight most recent bounded observation summaries, stop reason, and update time. Initial, per-step, and terminal snapshots are stored as `working_state_updated` runtime events, so reopening the SQLite event stream can recover the latest valid snapshot. Complete file bodies, complete command output, API keys, and provider endpoints are not copied into these snapshots.
+
+The Web Summary and saved History views show both the latest Agent Working State and the ordered runtime timeline. Each iterative prompt receives the compact state alongside recent observations. This is the first foundation for a unified decide, act, observe, and verify loop; the current LLM controller remains read-only and all file changes still require proposal review and human approval.
 
 Disable related memory lookup for a clean-context run:
 

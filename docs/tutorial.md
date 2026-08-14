@@ -179,6 +179,7 @@ Important LLM-related fields:
 - `agent_steps`: read-only iterative agent actions when iterative mode is enabled.
 - `agent_run_id`: stable identifier for the typed runtime execution.
 - `agent_events`: ordered runtime lifecycle, action, observation, approval, replay, and recovery events.
+- `agent_state`: latest versioned working-state snapshot with objective, phase, status, iteration, selected paths, bounded recent observation summaries, and stop reason.
 - `llm_traces`: prompt previews, output previews, parse status, fallback state, and latency.
 - `context_summary`: which files were included, truncated, omitted, or eligible for direct edits.
 - `repository_map`: indexed file/symbol/relation counts and the task-ranked files, symbols, and dependencies.
@@ -215,7 +216,9 @@ The web UI is local. It gives you the full workflow in tabs:
 
 Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
-Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows both compatible `Agent Steps` and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows `Agent Steps`, the latest `Agent Working State`, and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+
+Agent Working State is a compact controller snapshot rather than a transcript. RepoPilot writes an initial snapshot, updates it after every action observation, and records a terminal snapshot for `finished`, `step_limit`, or `failed`. Only the eight newest bounded observation summaries are retained in each snapshot. Complete file contents, complete command output, API keys, and provider endpoints are excluded. Saved History derives the latest state from the persisted `working_state_updated` runtime events.
 
 Runtime events are ordered by sequence number. `action_started` and `action_completed` show normal tool execution. `approval_required` means a side-effect action cannot proceed without action-scoped approval. `action_replayed` means a completed idempotent result was reused without executing the tool again. `action_recovery_required` means RepoPilot found an interrupted reservation and stopped automatic replay so you can inspect the sandbox first.
 

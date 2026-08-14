@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -75,6 +76,18 @@ class AgentLoopTests(unittest.TestCase):
         self.assertTrue(result.runtime_run_id)
         self.assertEqual(result.events[0].event_type, "run_started")
         self.assertEqual(result.events[-1].event_type, "run_stopped")
+        self.assertIsNotNone(result.working_state)
+        self.assertEqual(result.working_state.status, "completed")
+        self.assertEqual(result.working_state.iteration, 3)
+        self.assertEqual(result.working_state.selected_paths, ["main.py"])
+        state_events = [
+            event for event in result.events if event.event_type == "working_state_updated"
+        ]
+        self.assertEqual(len(state_events), 4)
+        self.assertNotIn("def parse", json.dumps([event.payload for event in state_events]))
+        self.assertIn("Agent working state:", client.calls[0][1].content)
+        self.assertIn("Iteration: 0", client.calls[0][1].content)
+        self.assertIn("Iteration: 1", client.calls[1][1].content)
 
     def test_select_agent_hits_prioritizes_selected_paths(self) -> None:
         files = [
@@ -88,6 +101,40 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(selected[0].path, "main.py")
         self.assertEqual(selected[0].reasons, ["selected by iterative agent"])
         self.assertEqual(selected[1].path, "README.md")
+
+    def test_step_limit_state_keeps_fallback_selected_paths(self) -> None:
+        files = [
+            RepoFile(Path("README.md"), "README.md", 10, "markdown", "docs\n"),
+        ]
+        hits = [
+            SearchHit(
+                path="README.md",
+                score=10,
+                reasons=["important project file"],
+                preview="docs",
+            )
+        ]
+        client = FakeLLMClient(
+            [
+                '{"thought":"Search once.","action":"search_files","query":"missing",'
+                '"path":"","selected_paths":[],"summary":""}',
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_agent_loop(
+                "inspect docs",
+                tmp,
+                files,
+                hits,
+                client,
+                max_steps=1,
+            )
+
+        self.assertEqual(result.selected_paths, ["README.md"])
+        self.assertEqual(result.working_state.selected_paths, ["README.md"])
+        self.assertEqual(result.working_state.status, "stopped")
+        self.assertEqual(result.working_state.stop_reason, "step_limit")
 
 
 if __name__ == "__main__":

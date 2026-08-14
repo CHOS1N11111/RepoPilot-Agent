@@ -11,11 +11,13 @@ from ..repository_map import RepositoryMap
 from .models import (
     STOPPING_OBSERVATION_STATUSES,
     RuntimeAction,
+    RuntimeEvent,
     RuntimeObservation,
     RuntimePolicy,
     RuntimeRunResult,
 )
 from .store import InMemoryRuntimeStore, RuntimeEventStore
+from .state import AgentWorkingState, latest_agent_working_state
 from .tools import RuntimeToolContext, execute_runtime_tool
 
 
@@ -52,6 +54,18 @@ class AgentRuntime:
     @property
     def selected_paths(self) -> list[str]:
         return list(self.context.selected_paths)
+
+    @property
+    def working_state(self) -> AgentWorkingState | None:
+        return latest_agent_working_state(self.events, default_objective=self.task)
+
+    def record_working_state(self, state: AgentWorkingState) -> RuntimeEvent:
+        self.start()
+        return self.store.append_event(
+            self.run_id,
+            "working_state_updated",
+            payload={"working_state": state.to_dict()},
+        )
 
     def start(self) -> None:
         if self._started:

@@ -140,6 +140,7 @@ def build_agent_prompt(
     observations: str,
     step_number: int,
     max_steps: int,
+    working_state: str = "",
 ) -> str:
     return "\n".join(
         [
@@ -155,6 +156,9 @@ def build_agent_prompt(
             "",
             "Initial ranked context:",
             initial_context or "No initial context was selected.",
+            "",
+            "Agent working state:",
+            working_state or "No working state is available.",
             "",
             "Previous observations:",
             observations or "No previous observations.",

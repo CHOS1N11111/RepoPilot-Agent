@@ -11,7 +11,18 @@ from .llm.schema import parse_agent_action_json
 from .llm.tracing import traced_llm_json_call
 from .models import AgentAction, AgentStep, LLMCallTrace, RepoFile, SearchHit
 from .repository_map import RepositoryMap
-from .runtime import AgentRuntime, RuntimeAction, RuntimeEvent, RuntimeEventStore, RuntimePolicy
+from .runtime import (
+    AgentRuntime,
+    AgentWorkingState,
+    RuntimeAction,
+    RuntimeEvent,
+    RuntimeEventStore,
+    RuntimePolicy,
+    advance_agent_working_state,
+    create_agent_working_state,
+    render_agent_working_state,
+    stop_agent_working_state,
+)
 
 DEFAULT_AGENT_MAX_STEPS = 6
 MAX_INITIAL_CONTEXT_CHARS = 4_000
@@ -27,6 +38,7 @@ class AgentLoopResult:
     summary: str
     runtime_run_id: str = ""
     events: list[RuntimeEvent] = field(default_factory=list)
+    working_state: AgentWorkingState | None = None
 
 
 def run_agent_loop(
@@ -59,17 +71,35 @@ def run_agent_loop(
         files=files,
         repository_map=repository_map,
     )
+    working_state = create_agent_working_state(task)
+    runtime.record_working_state(working_state)
 
     try:
         for step_number in range(1, max_steps + 1):
-            action = _choose_next_action(task, initial_hits, steps, step_number, max_steps, llm_client, traces)
+            action = _choose_next_action(
+                task,
+                initial_hits,
+                steps,
+                working_state,
+                step_number,
+                max_steps,
+                llm_client,
+                traces,
+            )
             runtime_action = _to_runtime_action(action, step_number)
             runtime_observation = runtime.execute(runtime_action)
+            selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
+            working_state = advance_agent_working_state(
+                working_state,
+                runtime_action,
+                runtime_observation,
+                selected_paths=selected_paths,
+            )
+            runtime.record_working_state(working_state)
             if runtime_observation.status in {"approval_required", "policy_denied", "recovery_required"}:
                 raise LLMError(runtime_observation.error or runtime_observation.summary)
             observation = _format_runtime_observation(runtime_observation)
             tool_input = _runtime_tool_input(runtime_action)
-            selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
             agent_step = AgentStep(
                 order=step_number,
                 action=action.action,
@@ -84,6 +114,9 @@ def run_agent_loop(
                 finished = True
                 break
     except Exception as exc:
+        if working_state.stop_reason is None:
+            working_state = stop_agent_working_state(working_state, "failed")
+            runtime.record_working_state(working_state)
         runtime.stop("failed", str(exc))
         raise
 
@@ -93,13 +126,22 @@ def run_agent_loop(
         selected_paths = [hit.path for hit in initial_hits[:MAX_SEARCH_RESULTS] if hit.path in by_path]
     if not summary:
         summary = "Agent exploration reached the step limit; selected the best observed files."
-    runtime.stop("finished" if finished else "step_limit", summary)
+    stop_reason = "finished" if finished else "step_limit"
+    if working_state.stop_reason != stop_reason or working_state.selected_paths != selected_paths:
+        working_state = stop_agent_working_state(
+            working_state,
+            stop_reason,
+            selected_paths=selected_paths,
+        )
+        runtime.record_working_state(working_state)
+    runtime.stop(stop_reason, summary)
     return AgentLoopResult(
         steps=steps,
         selected_paths=selected_paths,
         summary=summary,
         runtime_run_id=runtime.run_id,
         events=runtime.events,
+        working_state=working_state,
     )
 
 
@@ -144,6 +186,7 @@ def _choose_next_action(
     task: str,
     initial_hits: list[SearchHit],
     steps: list[AgentStep],
+    working_state: AgentWorkingState,
     step_number: int,
     max_steps: int,
     llm_client: LLMClient,
@@ -162,6 +205,7 @@ def _choose_next_action(
                     _format_observations(steps),
                     step_number,
                     max_steps,
+                    working_state=render_agent_working_state(working_state),
                 ),
             ),
         ],

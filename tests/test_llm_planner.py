@@ -361,6 +361,9 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertTrue(report.agent_run_id)
         self.assertEqual(report.agent_events[0].event_type, "run_started")
         self.assertEqual(report.agent_events[-1].event_type, "run_stopped")
+        self.assertEqual(report.agent_state["status"], "completed")
+        self.assertEqual(report.agent_state["iteration"], 3)
+        self.assertEqual(report.agent_state["selected_paths"], ["main.py"])
         self.assertEqual(report.relevant_files[0].path, "main.py")
         self.assertEqual(report.plan_metadata.source, "llm")
         self.assertEqual(report.patch_proposal_metadata.source, "llm")
@@ -369,6 +372,7 @@ class LLMPlannerTests(unittest.TestCase):
             ["agent_step_1", "agent_step_2", "agent_step_3", "planner", "patch_proposal"],
         )
         self.assertEqual(len(client.calls), 5)
+        self.assertIn("Agent working state:", client.calls[0][1].content)
         self.assertEqual(report.execution_budget["limits"]["max_agent_steps"], 3)
         self.assertEqual(report.execution_budget["usage"]["agent_steps"], 3)
         self.assertFalse(report.execution_budget["exhausted"])

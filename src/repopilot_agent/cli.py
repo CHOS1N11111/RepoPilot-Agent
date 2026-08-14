@@ -447,6 +447,22 @@ def _print_report(report) -> None:
         print("- Iterative agent was not run.")
     print()
 
+    print("Agent working state")
+    if report.agent_state:
+        print(
+            f"- {report.agent_state.get('phase', 'unknown')} / "
+            f"{report.agent_state.get('status', 'unknown')} at iteration "
+            f"{report.agent_state.get('iteration', 0)}"
+        )
+        selected_paths = report.agent_state.get("selected_paths") or []
+        if selected_paths:
+            print(f"  Selected: {', '.join(selected_paths)}")
+        if report.agent_state.get("stop_reason"):
+            print(f"  Stop reason: {report.agent_state['stop_reason']}")
+    else:
+        print("- No Agent working state was recorded.")
+    print()
+
     print("Plan")
     for step in report.plan:
         print(f"{step.order}. {step.title}: {step.detail}")

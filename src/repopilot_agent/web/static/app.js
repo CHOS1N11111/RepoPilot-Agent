@@ -1230,6 +1230,7 @@ function renderReport(report, payload) {
   $("proposalSource").textContent = sourceLabel(report.patch_proposal_metadata);
   renderTimeline(report.timeline || []);
   $("agentStepList").innerHTML = renderAgentSteps(report.agent_steps || []);
+  $("agentWorkingState").innerHTML = renderAgentWorkingState(report.agent_state);
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
   $("acceptanceCriteriaList").innerHTML = renderAcceptanceCriteria(
@@ -1389,6 +1390,41 @@ function renderAgentSteps(steps) {
       ${(step.selected_paths || []).length ? `<p><small>Selected: ${escapeHtml(step.selected_paths.join(", "))}</small></p>` : ""}
     </div>`)
     .join("");
+}
+
+function renderAgentWorkingState(agentState) {
+  if (!agentState || !agentState.objective) {
+    return item("No Agent working state was recorded for this workflow.");
+  }
+  const selectedPaths = Array.isArray(agentState.selected_paths)
+    ? agentState.selected_paths
+    : [];
+  const observations = Array.isArray(agentState.recent_observations)
+    ? agentState.recent_observations
+    : [];
+  const observationRows = observations.map((observation) => `
+    <div class="timeline-event">
+      <span class="timeline-step">#${escapeHtml(observation.iteration ?? 0)} ${escapeHtml(observation.action_kind || "action")}</span>
+      <span class="timeline-status">${escapeHtml(observation.status || "unknown")}</span>
+      <span>${escapeHtml(observation.summary || "No summary recorded.")}</span>
+    </div>
+  `).join("");
+  return `
+    <div class="timeline-event">
+      <span class="timeline-step">${escapeHtml(agentState.phase || "unknown")}</span>
+      <span class="timeline-status">${escapeHtml(agentState.status || "unknown")}</span>
+      <span>Iteration ${escapeHtml(agentState.iteration ?? 0)}${agentState.stop_reason ? ` | ${escapeHtml(agentState.stop_reason)}` : ""}</span>
+    </div>
+    <div class="timeline-event">
+      <span class="timeline-step">Objective</span>
+      <span>${escapeHtml(agentState.objective)}</span>
+    </div>
+    <div class="timeline-event">
+      <span class="timeline-step">Selected paths</span>
+      <span>${escapeHtml(selectedPaths.join(", ") || "none")}</span>
+    </div>
+    ${observationRows}
+  `;
 }
 
 function renderRuntimeEvents(events, runId = "") {
@@ -1750,6 +1786,10 @@ function renderHistoryDetail(run) {
   const runtimeEvents = (run.agent_events || [])
     .map((event) => `<li>#${escapeHtml(event.sequence)} ${escapeHtml(event.event_type || "event")}${event.action_id ? ` - ${escapeHtml(event.action_id)}` : ""}</li>`)
     .join("");
+  const latestStateEvent = [...(run.agent_events || [])]
+    .reverse()
+    .find((event) => event.event_type === "working_state_updated");
+  const agentState = run.agent_state || latestStateEvent?.payload?.working_state;
   const pinnedTag = run.pinned ? ' <span class="tag ok">pinned</span>' : "";
   $("historyDetail").innerHTML = `
     <div class="item">
@@ -1768,6 +1808,10 @@ function renderHistoryDetail(run) {
     <div class="item">
       <div class="item-title">LLM Trace History</div>
       ${traces || "<p>No LLM traces saved.</p>"}
+    </div>
+    <div class="item">
+      <div class="item-title">Agent Working State</div>
+      ${renderAgentWorkingState(agentState)}
     </div>
     <div class="item">
       <div class="item-title">Runtime Events</div>
