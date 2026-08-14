@@ -184,6 +184,22 @@ This mode lets the LLM choose read-only actions such as `search_files`, `read_fi
 
 The action schema is specific to its kind: search uses `query`, read uses `path`, repository-map inspection accepts optional `query` and `limit`, Git inspection accepts no arguments, and finish uses `selected_paths`. RepoPilot rejects extra fields, extra action arguments, unsafe paths, wrong types, empty expected evidence, and inconsistent finish fields. The actions run through RepoPilot's typed runtime and produce persistent action-observation events. It does not let the explorer write files directly; file changes still require a generated proposal and human approval.
 
+Before each `agent_step_N` call, Context Manager v2 rebuilds the prompt context in this priority order:
+
+1. Agent Working State.
+2. Remaining Agent-step, tool-call, validation-command, and elapsed-time budget.
+3. Current acceptance criteria.
+4. Pinned memory.
+5. Task-relevant Repository Map.
+6. Current staged and unstaged Git diff.
+7. The three newest detailed observations.
+8. Deterministic summaries of older evidence.
+9. Initial ranked repository context.
+
+The complete packet is capped at 20,000 characters, and every section also has its own limit. High-priority sections are assembled first, so a large diff or repository map cannot displace Working State or remaining-budget information. The packet is rebuilt every round: after a tool observation, the next prompt sees updated state, one fewer available step/tool call, refreshed recent evidence, and older steps moved into the compact evidence section.
+
+Every section is passed through a defense-in-depth redaction filter before the LLM request. RepoPilot removes common credential assignments, Bearer tokens, OpenAI-style tokens, GitHub tokens, and complete private-key blocks. Do not rely on redaction as a reason to commit secrets; keep credentials in the process environment.
+
 Use JSON output when you want to inspect structured fields:
 
 ```bash
@@ -200,7 +216,7 @@ Important LLM-related fields:
 - `agent_events`: ordered runtime lifecycle, action, observation, approval, replay, and recovery events.
 - `agent_state`: latest versioned working-state snapshot with objective, focus, findings, open questions, expected evidence, lifecycle fields, selected paths, and bounded observations.
 - `llm_traces`: prompt previews, output previews, parse status, fallback state, and latency.
-- `context_summary`: which files were included, truncated, omitted, or eligible for direct edits.
+- `context_summary`: file inclusion/edit diagnostics for planner and proposal calls, or per-section usage plus full/truncated/omitted/redacted state for iterative Agent calls.
 - `repository_map`: indexed file/symbol/relation counts and the task-ranked files, symbols, and dependencies.
 
 ## Step 4: Start The Web UI
@@ -236,6 +252,8 @@ The web UI is local. It gives you the full workflow in tabs:
 Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
 Enable `Iterative agent` when you want RepoPilot to make several smaller read-only LLM calls before the main plan/proposal calls. The Summary tab shows each typed decision in `Agent Steps`, the latest `Agent Working State`, and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+
+Open an `agent_step_N` entry in LLM I/O and inspect `Context Budget`. A summary such as `repository_map 2500/2500 chars (truncated)` means that section reached its own limit; `omitted` means the total packet was already full when the lower-priority section was reached; `redacted` means at least one sensitive value was replaced before the request.
 
 Agent Working State is a compact controller snapshot rather than a transcript. Version 2 tracks current focus, bounded findings, bounded open questions, and expected evidence in addition to lifecycle and selected-path fields. RepoPilot writes an initial snapshot, applies structured updates deterministically after every action observation, and records a terminal snapshot for `finished`, `step_limit`, or `failed`. Questions are matched case-insensitively for resolution, duplicate findings/questions are suppressed, and only bounded values plus the eight newest observation summaries are retained. Version 1 snapshots remain readable. Complete file contents, complete command output, API keys, and provider endpoints are excluded. Saved History derives the latest state from the persisted `working_state_updated` runtime events.
 

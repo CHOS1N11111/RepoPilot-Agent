@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .agent_context import AgentContextPacket, build_agent_context_packet
+from .execution import (
+    AcceptanceCriterion,
+    ExecutionBudget,
+    ExecutionUsage,
+    execution_budget_state,
+)
 from .llm.base import LLMClient, LLMError, LLMMessage
 from .llm.prompts import AGENT_SYSTEM_PROMPT, build_agent_prompt
 from .llm.schema import parse_agent_decision_json
 from .llm.tracing import traced_llm_json_call
-from .models import AgentDecision, AgentStep, LLMCallTrace, RepoFile, SearchHit
-from .repository_map import RepositoryMap
+from .models import (
+    AgentDecision,
+    AgentStep,
+    LLMCallTrace,
+    MemoryContextItem,
+    RepoFile,
+    SearchHit,
+)
+from .repository_map import RepositoryMap, render_repository_map
 from .runtime import (
     AgentRuntime,
     AgentWorkingState,
@@ -20,13 +35,10 @@ from .runtime import (
     RuntimePolicy,
     advance_agent_working_state,
     create_agent_working_state,
-    render_agent_working_state,
     stop_agent_working_state,
 )
 
 DEFAULT_AGENT_MAX_STEPS = 6
-MAX_INITIAL_CONTEXT_CHARS = 4_000
-MAX_OBSERVATIONS_CHARS = 10_000
 MAX_FILE_OBSERVATION_CHARS = 6_000
 MAX_SEARCH_RESULTS = 5
 
@@ -52,6 +64,10 @@ def run_agent_loop(
     runtime_run_id: str | None = None,
     runtime_store: RuntimeEventStore | None = None,
     repository_map: RepositoryMap | None = None,
+    memory_context: list[MemoryContextItem] | None = None,
+    current_diff: str = "",
+    acceptance_criteria: list[AcceptanceCriterion] | None = None,
+    execution_budget: ExecutionBudget | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -62,6 +78,16 @@ def run_agent_loop(
     selected_paths: list[str] = []
     summary = ""
     finished = False
+    loop_started_at = time.monotonic()
+    loop_budget = execution_budget or ExecutionBudget(
+        max_agent_steps=max_steps,
+        max_tool_calls=max_steps,
+    )
+    max_steps = min(
+        max_steps,
+        loop_budget.max_agent_steps,
+        loop_budget.max_tool_calls,
+    )
     runtime = AgentRuntime(
         root,
         task,
@@ -76,11 +102,34 @@ def run_agent_loop(
 
     try:
         for step_number in range(1, max_steps + 1):
-            decision = _choose_next_decision(
-                task,
+            map_context = (
+                render_repository_map(
+                    repository_map,
+                    task,
+                    seed_paths=_merge_context_paths(selected_paths, initial_hits),
+                )
+                if repository_map is not None
+                else ""
+            )
+            context_packet = build_agent_context_packet(
+                working_state,
                 initial_hits,
                 steps,
-                working_state,
+                repository_map_context=map_context,
+                memory_context=memory_context,
+                current_diff=current_diff,
+                acceptance_criteria=acceptance_criteria,
+                remaining_budget=_remaining_execution_budget(
+                    loop_budget,
+                    step_number,
+                    max_steps,
+                    runtime.events,
+                    loop_started_at,
+                ),
+            )
+            decision = _choose_next_decision(
+                task,
+                context_packet,
                 step_number,
                 max_steps,
                 llm_client,
@@ -194,9 +243,7 @@ def select_agent_hits(
 
 def _choose_next_decision(
     task: str,
-    initial_hits: list[SearchHit],
-    steps: list[AgentStep],
-    working_state: AgentWorkingState,
+    context_packet: AgentContextPacket,
     step_number: int,
     max_steps: int,
     llm_client: LLMClient,
@@ -211,17 +258,15 @@ def _choose_next_decision(
                 role="user",
                 content=build_agent_prompt(
                     task,
-                    _format_initial_context(initial_hits),
-                    _format_observations(steps),
+                    context_packet.text,
                     step_number,
                     max_steps,
-                    working_state=render_agent_working_state(working_state),
                 ),
             ),
         ],
         parse_agent_decision_json,
         traces,
-        context_summary=f"Agent step {step_number}/{max_steps}; previous observations: {len(steps)}.",
+        context_summary=f"Step {step_number}/{max_steps}. {context_packet.summary}",
     )
 
 
@@ -298,28 +343,38 @@ def _runtime_tool_input(action: RuntimeAction) -> str:
     return action.kind
 
 
-def _format_initial_context(hits: list[SearchHit]) -> str:
-    lines = []
-    for hit in hits[:MAX_SEARCH_RESULTS]:
-        lines.append(
-            f"Path: {hit.path}\n"
-            f"Score: {hit.score}\n"
-            f"Reasons: {', '.join(hit.reasons) or 'none'}\n"
-            f"Preview:\n{_clip(hit.preview, 700)}"
-        )
-    return _clip("\n\n---\n\n".join(lines), MAX_INITIAL_CONTEXT_CHARS)
+def _remaining_execution_budget(
+    budget: ExecutionBudget,
+    step_number: int,
+    max_steps: int,
+    events: list[RuntimeEvent],
+    started_at: float,
+) -> dict[str, int]:
+    completed_steps = max(step_number - 1, 0)
+    tool_calls = sum(1 for event in events if event.event_type == "action_started")
+    usage = ExecutionUsage(
+        agent_steps=completed_steps,
+        tool_calls=tool_calls,
+        elapsed_ms=max(int((time.monotonic() - started_at) * 1_000), 0),
+    )
+    remaining = dict(execution_budget_state(budget, usage)["remaining"])
+    loop_steps_remaining = max(max_steps - completed_steps, 0)
+    remaining["agent_steps"] = min(remaining["agent_steps"], loop_steps_remaining)
+    remaining["tool_calls"] = min(remaining["tool_calls"], loop_steps_remaining)
+    return remaining
 
 
-def _format_observations(steps: list[AgentStep]) -> str:
-    blocks = []
-    for step in steps:
-        blocks.append(
-            f"Step {step.order}: {step.action}\n"
-            f"Thought: {step.thought}\n"
-            f"Input: {step.tool_input}\n"
-            f"Observation:\n{_clip(step.observation, 1_500)}"
-        )
-    return _clip("\n\n---\n\n".join(blocks), MAX_OBSERVATIONS_CHARS)
+def _merge_context_paths(
+    selected_paths: list[str],
+    initial_hits: list[SearchHit],
+) -> list[str]:
+    paths = list(selected_paths)
+    seen = set(paths)
+    for hit in initial_hits:
+        if hit.path not in seen:
+            paths.append(hit.path)
+            seen.add(hit.path)
+    return paths
 
 
 def _merge_paths(existing: list[str], paths: list[str], by_path: dict[str, RepoFile]) -> list[str]:

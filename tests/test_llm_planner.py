@@ -399,14 +399,32 @@ class LLMPlannerTests(unittest.TestCase):
             root = Path(tmp)
             (root / "main.py").write_text("def parse(value):\n    return value\n", encoding="utf-8")
             (root / "README.md").write_text("General project docs\n", encoding="utf-8")
-            report = run_workflow(
-                root,
-                "fix parse failure",
-                use_llm=True,
-                llm_client=client,
-                iterative_agent=True,
-                agent_max_steps=3,
-            )
+            memory = [
+                MemoryContextItem(
+                    run_id="pinned-agent-context",
+                    task="prior parser investigation",
+                    summary="Inspect parser callers before changing behavior.",
+                    mode="run",
+                    created_at="2026-01-01T00:00:00+00:00",
+                    applied=True,
+                    score=100,
+                    reasons=["pinned memory"],
+                    pinned=True,
+                )
+            ]
+            with patch(
+                "repopilot_agent.workflow.get_git_diff",
+                side_effect=["diff --git a/main.py b/main.py\n+parser change", ""],
+            ):
+                report = run_workflow(
+                    root,
+                    "fix parse failure",
+                    use_llm=True,
+                    llm_client=client,
+                    memory_context=memory,
+                    iterative_agent=True,
+                    agent_max_steps=3,
+                )
 
         self.assertEqual([step.action for step in report.agent_steps], ["search_files", "read_file", "finish"])
         self.assertTrue(report.agent_run_id)
@@ -432,7 +450,13 @@ class LLMPlannerTests(unittest.TestCase):
             ["agent_step_1", "agent_step_2", "agent_step_3", "planner", "patch_proposal"],
         )
         self.assertEqual(len(client.calls), 5)
-        self.assertIn("Agent working state:", client.calls[0][1].content)
+        self.assertIn("Managed context packet:", client.calls[0][1].content)
+        self.assertIn("prior parser investigation", client.calls[0][1].content)
+        self.assertIn("diff --git a/main.py b/main.py", client.calls[0][1].content)
+        self.assertIn("analysis_complete", client.calls[0][1].content)
+        self.assertIn("function parse", client.calls[0][1].content)
+        self.assertIn("Agent context:", report.llm_traces[0].context_summary)
+        self.assertIn("remaining_budget", report.llm_traces[0].context_summary)
         self.assertEqual(report.execution_budget["limits"]["max_agent_steps"], 3)
         self.assertEqual(report.execution_budget["usage"]["agent_steps"], 3)
         self.assertFalse(report.execution_budget["exhausted"])

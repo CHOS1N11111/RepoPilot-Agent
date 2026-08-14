@@ -146,11 +146,9 @@ def build_patch_review_prompt(task: str, proposed_diff: str, validation_suggesti
 
 def build_agent_prompt(
     task: str,
-    initial_context: str,
-    observations: str,
+    managed_context: str,
     step_number: int,
     max_steps: int,
-    working_state: str = "",
 ) -> str:
     return "\n".join(
         [
@@ -164,14 +162,8 @@ def build_agent_prompt(
             "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
             "- finish: stop exploration and select the files most useful for planning/proposal.",
             "",
-            "Initial ranked context:",
-            initial_context or "No initial context was selected.",
-            "",
-            "Agent working state:",
-            working_state or "No working state is available.",
-            "",
-            "Previous observations:",
-            observations or "No previous observations.",
+            "Managed context packet:",
+            managed_context or "No managed context is available.",
             "",
             "Choose the single next decision that will most improve repository understanding. "
             "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "

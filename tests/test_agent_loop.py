@@ -10,8 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.agent_loop import run_agent_loop, select_agent_hits
+from repopilot_agent.execution import AcceptanceCriterion, ExecutionBudget
 from repopilot_agent.llm.base import LLMMessage
-from repopilot_agent.models import RepoFile, SearchHit
+from repopilot_agent.models import MemoryContextItem, RepoFile, SearchHit
 
 
 def decision(
@@ -108,6 +109,20 @@ class AgentLoopTests(unittest.TestCase):
                 ),
             ]
         )
+        traces = []
+        memory = [
+            MemoryContextItem(
+                run_id="pinned",
+                task="prior parser task",
+                summary="Use a parser regression test.",
+                mode="run",
+                created_at="2026-01-01T00:00:00+00:00",
+                applied=True,
+                score=100,
+                reasons=["pinned memory"],
+                pinned=True,
+            )
+        ]
 
         with tempfile.TemporaryDirectory() as tmp:
             result = run_agent_loop(
@@ -116,7 +131,17 @@ class AgentLoopTests(unittest.TestCase):
                 files,
                 initial_hits,
                 client,
+                traces=traces,
                 max_steps=3,
+                memory_context=memory,
+                current_diff="+OPENAI_API_KEY=must-not-reach-the-model",
+                acceptance_criteria=[
+                    AcceptanceCriterion(
+                        "analysis_complete",
+                        "analysis",
+                        "Understand parser behavior.",
+                    )
+                ],
             )
 
         self.assertEqual([step.action for step in result.steps], ["search_files", "read_file", "finish"])
@@ -153,11 +178,22 @@ class AgentLoopTests(unittest.TestCase):
         ]
         self.assertEqual(len(state_events), 4)
         self.assertNotIn("def parse", json.dumps([event.payload for event in state_events]))
-        self.assertIn("Agent working state:", client.calls[0][1].content)
+        self.assertIn("Managed context packet:", client.calls[0][1].content)
+        self.assertIn("## Agent Working State", client.calls[0][1].content)
+        self.assertIn("## Pinned Memory", client.calls[0][1].content)
+        self.assertIn("prior parser task", client.calls[0][1].content)
+        self.assertIn("Understand parser behavior", client.calls[0][1].content)
+        self.assertIn("Agent steps: 3 remaining", client.calls[0][1].content)
+        self.assertIn("Agent steps: 2 remaining", client.calls[1][1].content)
+        self.assertIn("[REDACTED]", client.calls[0][1].content)
+        self.assertNotIn("must-not-reach-the-model", client.calls[0][1].content)
         self.assertIn("Iteration: 0", client.calls[0][1].content)
         self.assertIn("Iteration: 1", client.calls[1][1].content)
         self.assertIn('"version":2', client.calls[0][0].content)
         self.assertIn("Expected evidence:", client.calls[1][1].content)
+        self.assertEqual(len(traces), 3)
+        self.assertIn("Agent context:", traces[0].context_summary)
+        self.assertIn("working_state", traces[0].context_summary)
 
     def test_select_agent_hits_prioritizes_selected_paths(self) -> None:
         files = [
@@ -203,9 +239,14 @@ class AgentLoopTests(unittest.TestCase):
                 files,
                 hits,
                 client,
-                max_steps=1,
+                max_steps=3,
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=1,
+                    max_tool_calls=1,
+                ),
             )
 
+        self.assertEqual(len(client.calls), 1)
         self.assertEqual(result.selected_paths, ["README.md"])
         self.assertEqual(result.working_state.selected_paths, ["README.md"])
         self.assertEqual(result.working_state.status, "stopped")

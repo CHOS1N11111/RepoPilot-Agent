@@ -15,6 +15,7 @@ from .execution import (
     execution_budget_state,
     pending_completion_evidence,
 )
+from .git_tools import get_git_diff
 from .llm.base import LLMClient, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path
@@ -64,6 +65,10 @@ def run_workflow(
     )
     file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
     related_memory = _resolve_memory_context(root, task, use_memory, memory_context)
+    agent_acceptance_criteria = (
+        build_acceptance_criteria(task, [], []) if iterative_agent else []
+    )
+    current_diff = _load_current_diff(root) if use_llm and iterative_agent else ""
     llm_traces: list[LLMCallTrace] = []
     llm_creation_error: LLMError | None = None
     agent_result: AgentLoopResult | None = None
@@ -101,6 +106,10 @@ def run_workflow(
                         runtime_run_id=agent_run_id,
                         runtime_store=runtime_store,
                         repository_map=repository_map,
+                        memory_context=related_memory,
+                        current_diff=current_diff,
+                        acceptance_criteria=agent_acceptance_criteria,
+                        execution_budget=budget,
                     )
                     hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
                     repository_map_context = render_repository_map(
@@ -234,6 +243,20 @@ def _load_memory_context(repo_path: Path, task: str) -> list[MemoryContextItem]:
         return MemoryStore(default_memory_path(repo_path)).find_related_runs(task)
     except (OSError, sqlite3.Error):
         return []
+
+
+def _load_current_diff(repo_path: Path) -> str:
+    try:
+        unstaged = get_git_diff(repo_path)
+        staged = get_git_diff(repo_path, staged=True)
+    except (OSError, RuntimeError):
+        return ""
+    sections: list[str] = []
+    if unstaged.strip():
+        sections.append(f"Unstaged diff:\n{unstaged.strip()}")
+    if staged.strip():
+        sections.append(f"Staged diff:\n{staged.strip()}")
+    return "\n\n".join(sections)
 
 
 def _attach_safety_check(repo_path: Path, task: str, proposal):

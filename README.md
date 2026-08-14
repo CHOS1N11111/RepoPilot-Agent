@@ -99,6 +99,7 @@ flowchart LR
 | Agent runtime          | Executes typed tools, records action/observation events, and blocks unsafe automatic replay.          |
 | Agent decision         | Validates a versioned decision envelope with one typed action, expected evidence, and state updates.   |
 | Agent working state    | Persists bounded focus, findings, questions, selected paths, observations, and lifecycle snapshots.    |
+| Agent context manager  | Rebuilds prioritized, section-budgeted, redacted context before every iterative decision.             |
 | Iterative agent        | Uses the runtime under a read-only policy for bounded exploration before planning.                    |
 | Repository map        | Indexes symbols, signatures, imports, dependencies, and source/test relations for task context.       |
 | Structured patch      | Applies approved exact-text hunks with SHA-256 preconditions, conflict reports, and syntax checks.    |
@@ -131,6 +132,7 @@ src/repopilot_agent/
   execution.py          acceptance criteria, execution budgets, usage, and completion evidence
   repair_loop.py        repair fingerprints, attempt history, progress decisions, and stop reasons
   agent_loop.py         LLM exploration adapter for the typed runtime
+  agent_context.py      prioritized per-section context budgets, summaries, and secret redaction
   runtime/
     models.py           action, observation, event, policy, and run contracts
     tools.py            typed repository, Git, edit, and validation tools
@@ -358,6 +360,10 @@ Workflow JSON includes `agent_run_id`, `agent_events`, and the latest `agent_sta
 
 The CLI, Web Summary, and saved History views show the latest Agent Working State and ordered runtime timeline. Agent Steps also expose the rationale, action input, expected evidence, structured state update, observation, selected paths, and finish reason. Each iterative prompt receives the compact state alongside recent observations. The current LLM controller remains read-only and all file changes still require proposal review and human approval.
 
+Before every iterative decision, Context Manager v2 rebuilds one deterministic packet from nine prioritized sections: Working State, remaining execution budget, acceptance criteria, pinned memory, task-relevant Repository Map, current staged and unstaged Git diff, the three newest detailed observations, summarized older evidence, and initial ranked repository context. The packet has a 20,000-character total limit plus an explicit limit for every section. Higher-priority sections are assembled first; each trace reports section usage and whether content was full, truncated, omitted, or redacted.
+
+Context sections pass through credential redaction before they reach the LLM. Common API-key, token, authorization, password, client-secret, private-key, OpenAI token, and GitHub token forms are replaced. This is a defense-in-depth filter, not permission to store secrets in tracked files.
+
 Disable related memory lookup for a clean-context run:
 
 ```bash
@@ -383,8 +389,9 @@ RepoPilot builds explicit context packets before each LLM call. Planning receive
 
 - Context packets have per-call character and file-count budgets.
 - A bounded task-relevant repository map adds symbol signatures, imports, dependencies, and source/test relations without sending every file body.
-- Iterative agent mode can run several smaller read-only LLM calls through the typed runtime before patch proposal, then prioritize the files discovered during those steps.
-- LLM traces include a context budget summary showing included, truncated, omitted, and edit-eligible files.
+- Iterative agent mode rebuilds a section-budgeted packet before every decision, keeping the newest three observations detailed and reducing older evidence to bounded deterministic summaries.
+- Agent packets include Working State, remaining budget, acceptance criteria, pinned memory, Repository Map, current diff, observations, older evidence, and ranked repository context.
+- LLM traces include file-packet diagnostics for planner/proposal calls and per-section full, truncated, omitted, and redacted diagnostics for Agent calls.
 - Direct `file_edits` are accepted only for files whose full content fit into the patch context packet.
 - If a file is too large and only a snippet was provided, RepoPilot keeps the model's file-level recommendation but blocks apply-ready edits for that file.
 
