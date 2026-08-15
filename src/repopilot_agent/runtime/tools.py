@@ -16,6 +16,7 @@ from ..search import search_files
 from ..structured_patch import apply_structured_patch, parse_structured_patch
 from ..validator import run_validation
 from .models import RuntimeAction, RuntimePolicy
+from .virtual_patch import VirtualPatchOverlay
 
 
 MAX_FILE_CHARS = 12_000
@@ -51,6 +52,7 @@ class RuntimeToolContext:
         self.files = list(files) if files is not None else scan_repository(self.repo_path)
         self.repository_map = repository_map or build_repository_map(self.files)
         self.selected_paths: list[str] = []
+        self.virtual_patches = VirtualPatchOverlay(self.repo_path)
 
     def refresh_files(self) -> None:
         self.files = scan_repository(self.repo_path)
@@ -130,6 +132,38 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
         return RuntimeToolResult(
             summary=f"Inspected {'staged' if staged else 'working tree'} diff.",
             data={"diff": clipped, "staged": staged, "truncated": truncated},
+        )
+
+    if action.kind == "propose_patch":
+        arguments = dict(action.arguments)
+        arguments["rationale"] = action.rationale
+        patch = parse_structured_patch(arguments, action_name="propose_patch")
+        outcome = context.virtual_patches.propose(patch)
+        if outcome.status == "completed" and not outcome.data.get("removed"):
+            context.select_path(patch.path)
+        data = dict(outcome.data)
+        data["diff"], data["diff_truncated"] = _clip(
+            str(data.get("diff") or ""),
+            MAX_DIFF_CHARS,
+        )
+        data["selected_paths"] = list(context.selected_paths)
+        return RuntimeToolResult(
+            summary=outcome.message,
+            data=data,
+            status=outcome.status,
+        )
+
+    if action.kind == "inspect_proposed_diff":
+        outcome = context.virtual_patches.inspect()
+        data = dict(outcome.data)
+        data["diff"], data["diff_truncated"] = _clip(
+            str(data.get("diff") or ""),
+            MAX_DIFF_CHARS,
+        )
+        return RuntimeToolResult(
+            summary=outcome.message,
+            data=data,
+            status=outcome.status,
         )
 
     if action.kind == "edit_file":

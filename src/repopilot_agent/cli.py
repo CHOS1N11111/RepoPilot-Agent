@@ -512,6 +512,16 @@ def _print_report(report) -> None:
                     f"[{item.get('status', 'pending')}, {requirement}]: "
                     f"{item.get('description', '')}"
                 )
+        proposed_edits = report.agent_proposed_edits or report.agent_state.get("proposed_edits") or []
+        if proposed_edits:
+            print("  Virtual proposed edits:")
+            for item in proposed_edits:
+                review_state = "inspected" if item.get("inspected") else "inspection required"
+                print(
+                    f"    - {item.get('path', '')} "
+                    f"[revision {item.get('revision', 0)}, {item.get('status', 'proposed')}, "
+                    f"{review_state}]"
+                )
         print(
             f"  Completion ready: {'yes' if report.agent_completion_ready else 'no'}"
         )
@@ -524,6 +534,10 @@ def _print_report(report) -> None:
             print(f"  Pending question: {report.agent_pending_question}")
     else:
         print("- No Agent working state was recorded.")
+    print()
+
+    print("Agent virtual proposed diff")
+    print(report.agent_proposed_diff or "- No virtual proposed diff was produced.")
     print()
 
     print("Plan")

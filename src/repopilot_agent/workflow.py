@@ -234,6 +234,8 @@ def run_workflow(
             if agent_result and agent_result.working_state
             else []
         ),
+        agent_proposed_edits=(agent_result.proposed_edits if agent_result else []),
+        agent_proposed_diff=(agent_result.proposed_diff if agent_result else ""),
         llm_traces=llm_traces,
         validation=validation,
         validation_feedback=validation_feedback,

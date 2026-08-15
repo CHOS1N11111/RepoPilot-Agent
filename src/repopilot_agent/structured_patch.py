@@ -17,6 +17,9 @@ from .patch_apply import apply_file_edits
 
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_STRUCTURED_PATCH_HUNKS = 20
+MAX_STRUCTURED_PATCH_TEXT_CHARS = 12_000
+MAX_STRUCTURED_PATCH_TOTAL_CHARS = 24_000
 _PATCH_LOCK = threading.RLock()
 
 
@@ -132,23 +135,34 @@ def current_file_sha256(repo_path: str | Path, path: str) -> str:
     return file_sha256(_read_utf8(target, path))
 
 
-def parse_structured_patch(arguments: object) -> StructuredPatch:
+def parse_structured_patch(
+    arguments: object,
+    *,
+    action_name: str = "apply_patch",
+) -> StructuredPatch:
     if not isinstance(arguments, dict):
-        raise ValueError("apply_patch arguments must be an object.")
+        raise ValueError(f"{action_name} arguments must be an object.")
     path = arguments.get("path")
     expected_sha256 = arguments.get("expected_sha256")
     raw_hunks = arguments.get("hunks")
     rationale = arguments.get("rationale", "")
     if not isinstance(path, str) or not path.strip():
-        raise ValueError("apply_patch requires a non-empty path string.")
+        raise ValueError(f"{action_name} requires a non-empty path string.")
     if not isinstance(expected_sha256, str) or not SHA256_PATTERN.fullmatch(expected_sha256.lower()):
-        raise ValueError("apply_patch requires expected_sha256 as a 64-character SHA-256 hex digest.")
+        raise ValueError(
+            f"{action_name} requires expected_sha256 as a 64-character SHA-256 hex digest."
+        )
     if not isinstance(raw_hunks, list) or not raw_hunks:
-        raise ValueError("apply_patch requires at least one hunk.")
+        raise ValueError(f"{action_name} requires at least one hunk.")
+    if len(raw_hunks) > MAX_STRUCTURED_PATCH_HUNKS:
+        raise ValueError(
+            f"{action_name} cannot contain more than {MAX_STRUCTURED_PATCH_HUNKS} hunks."
+        )
     if not isinstance(rationale, str):
-        raise ValueError("apply_patch rationale must be a string.")
+        raise ValueError(f"{action_name} rationale must be a string.")
 
     hunks: list[PatchHunk] = []
+    total_chars = 0
     for index, raw_hunk in enumerate(raw_hunks, start=1):
         if not isinstance(raw_hunk, dict):
             raise ValueError(f"Patch hunk {index} must be an object.")
@@ -159,16 +173,136 @@ def parse_structured_patch(arguments: object) -> StructuredPatch:
             raise ValueError(f"Patch hunk {index} requires non-empty old_text.")
         if not isinstance(new_text, str):
             raise ValueError(f"Patch hunk {index} requires new_text as a string.")
+        if (
+            len(old_text) > MAX_STRUCTURED_PATCH_TEXT_CHARS
+            or len(new_text) > MAX_STRUCTURED_PATCH_TEXT_CHARS
+        ):
+            raise ValueError(
+                f"Patch hunk {index} text cannot exceed "
+                f"{MAX_STRUCTURED_PATCH_TEXT_CHARS} characters."
+            )
+        total_chars += len(old_text) + len(new_text)
         if not isinstance(expected_occurrences, int) or isinstance(expected_occurrences, bool):
             raise ValueError(f"Patch hunk {index} expected_occurrences must be an integer.")
-        if expected_occurrences <= 0:
-            raise ValueError(f"Patch hunk {index} expected_occurrences must be greater than zero.")
+        if not 1 <= expected_occurrences <= 100:
+            raise ValueError(
+                f"Patch hunk {index} expected_occurrences must be from 1 to 100."
+            )
         hunks.append(PatchHunk(old_text, new_text, expected_occurrences))
+    if total_chars > MAX_STRUCTURED_PATCH_TOTAL_CHARS:
+        raise ValueError(
+            f"{action_name} hunk text exceeds the "
+            f"{MAX_STRUCTURED_PATCH_TOTAL_CHARS}-character total limit."
+        )
     return StructuredPatch(
         path=_normalize_path(path),
         expected_sha256=expected_sha256.lower(),
         hunks=hunks,
         rationale=rationale.strip(),
+    )
+
+
+def preview_structured_patch(
+    patch: StructuredPatch,
+    current_content: str,
+) -> tuple[StructuredPatchResult, str | None]:
+    """Evaluate an exact-text patch without writing to the filesystem."""
+    current_hash = file_sha256(current_content)
+    if current_hash != patch.expected_sha256:
+        return (
+            _conflict_result(
+                patch,
+                current_hash,
+                "The file changed after it was read; re-read it before retrying.",
+                [
+                    {
+                        "kind": "stale_file",
+                        "expected": patch.expected_sha256,
+                        "actual": current_hash,
+                    }
+                ],
+            ),
+            None,
+        )
+
+    updated = current_content
+    for index, hunk in enumerate(patch.hunks, start=1):
+        occurrences = updated.count(hunk.old_text)
+        if occurrences != hunk.expected_occurrences:
+            return (
+                _conflict_result(
+                    patch,
+                    current_hash,
+                    f"Patch hunk {index} matched {occurrences} time(s), "
+                    f"expected {hunk.expected_occurrences}.",
+                    [
+                        {
+                            "kind": "hunk_match",
+                            "hunk": index,
+                            "expected_occurrences": hunk.expected_occurrences,
+                            "actual_occurrences": occurrences,
+                        }
+                    ],
+                ),
+                None,
+            )
+        updated = updated.replace(
+            hunk.old_text,
+            hunk.new_text,
+            hunk.expected_occurrences,
+        )
+
+    syntax_check = check_syntax(patch.path, updated)
+    if syntax_check.status == "failed":
+        return (
+            StructuredPatchResult(
+                status="rejected",
+                path=patch.path,
+                applied=False,
+                message=syntax_check.message,
+                expected_sha256=patch.expected_sha256,
+                current_sha256=current_hash,
+                resulting_sha256=None,
+                hunks_applied=0,
+                diff="",
+                syntax_check=syntax_check,
+                conflicts=[],
+            ),
+            None,
+        )
+    if updated == current_content:
+        return (
+            StructuredPatchResult(
+                status="no_change",
+                path=patch.path,
+                applied=False,
+                message="The patch produced no file-content change.",
+                expected_sha256=patch.expected_sha256,
+                current_sha256=current_hash,
+                resulting_sha256=current_hash,
+                hunks_applied=len(patch.hunks),
+                diff="",
+                syntax_check=syntax_check,
+                conflicts=[],
+            ),
+            current_content,
+        )
+    resulting_hash = file_sha256(updated)
+    return (
+        StructuredPatchResult(
+            status="ready",
+            path=patch.path,
+            applied=False,
+            message=f"Prepared {len(patch.hunks)} structured patch hunk(s) for {patch.path}.",
+            expected_sha256=patch.expected_sha256,
+            current_sha256=current_hash,
+            resulting_sha256=resulting_hash,
+            hunks_applied=len(patch.hunks),
+            diff=_build_diff(patch.path, current_content, updated),
+            syntax_check=syntax_check,
+            conflicts=[],
+        ),
+        updated,
     )
 
 
@@ -183,63 +317,10 @@ def apply_structured_patch(
     target = _safe_existing_target(root, patch.path)
     with _PATCH_LOCK:
         original = _read_utf8(target, patch.path)
-        original_hash = file_sha256(original)
-        if original_hash != patch.expected_sha256:
-            return _conflict_result(
-                patch,
-                original_hash,
-                "The file changed after it was read; re-read it before retrying.",
-                [{"kind": "stale_file", "expected": patch.expected_sha256, "actual": original_hash}],
-            )
-
-        updated = original
-        for index, hunk in enumerate(patch.hunks, start=1):
-            occurrences = updated.count(hunk.old_text)
-            if occurrences != hunk.expected_occurrences:
-                return _conflict_result(
-                    patch,
-                    original_hash,
-                    f"Patch hunk {index} matched {occurrences} time(s), expected {hunk.expected_occurrences}.",
-                    [
-                        {
-                            "kind": "hunk_match",
-                            "hunk": index,
-                            "expected_occurrences": hunk.expected_occurrences,
-                            "actual_occurrences": occurrences,
-                        }
-                    ],
-                )
-            updated = updated.replace(hunk.old_text, hunk.new_text, hunk.expected_occurrences)
-
-        syntax_check = check_syntax(patch.path, updated)
-        if syntax_check.status == "failed":
-            return StructuredPatchResult(
-                status="rejected",
-                path=patch.path,
-                applied=False,
-                message=syntax_check.message,
-                expected_sha256=patch.expected_sha256,
-                current_sha256=original_hash,
-                resulting_sha256=None,
-                hunks_applied=0,
-                diff="",
-                syntax_check=syntax_check,
-                conflicts=[],
-            )
-        if updated == original:
-            return StructuredPatchResult(
-                status="no_change",
-                path=patch.path,
-                applied=False,
-                message="The patch produced no file-content change.",
-                expected_sha256=patch.expected_sha256,
-                current_sha256=original_hash,
-                resulting_sha256=original_hash,
-                hunks_applied=len(patch.hunks),
-                diff="",
-                syntax_check=syntax_check,
-                conflicts=[],
-            )
+        preview, updated = preview_structured_patch(patch, original)
+        if preview.status != "ready" or updated is None:
+            return preview
+        original_hash = preview.current_sha256 or file_sha256(original)
 
         pre_write = _read_utf8(target, patch.path)
         pre_write_hash = file_sha256(pre_write)
@@ -251,7 +332,7 @@ def apply_structured_patch(
                 [{"kind": "concurrent_modification", "expected": patch.expected_sha256, "actual": pre_write_hash}],
             )
 
-        diff = _build_diff(patch.path, original, updated)
+        diff = preview.diff
         apply_file_edits(
             root,
             [FileEditProposal(path=patch.path, new_content=updated, rationale=patch.rationale or "Structured runtime patch.")],
@@ -272,7 +353,7 @@ def apply_structured_patch(
                 resulting_sha256=resulting_hash,
                 hunks_applied=len(patch.hunks),
                 diff=diff,
-                syntax_check=syntax_check,
+                syntax_check=preview.syntax_check,
                 conflicts=[{"kind": "readback_mismatch", "expected": expected_result_hash, "actual": resulting_hash}],
             )
         return StructuredPatchResult(
@@ -285,7 +366,7 @@ def apply_structured_patch(
             resulting_sha256=resulting_hash,
             hunks_applied=len(patch.hunks),
             diff=diff,
-            syntax_check=syntax_check,
+            syntax_check=preview.syntax_check,
             conflicts=[],
         )
 

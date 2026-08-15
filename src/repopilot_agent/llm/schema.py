@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePosixPath, PureWindowsPath
 
 from .base import LLMError
@@ -28,6 +29,8 @@ ALLOWED_AGENT_DECISION_ACTIONS = {
     "inspect_repository_map",
     "inspect_git_status",
     "inspect_diff",
+    "propose_patch",
+    "inspect_proposed_diff",
     "ask_user",
     "finish",
 }
@@ -57,6 +60,10 @@ MAX_STATE_ITEM_CHARS = 500
 MAX_STATE_UPDATE_ITEMS = 12
 MAX_DECISION_PATHS = 50
 MAX_STATE_IDENTIFIER_CHARS = 100
+MAX_PROPOSE_PATCH_HUNKS = 20
+MAX_PROPOSE_PATCH_TEXT_CHARS = 12_000
+MAX_PROPOSE_PATCH_TOTAL_CHARS = 24_000
+SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def parse_plan_steps_json(response: str) -> list[PlanStep]:
@@ -414,6 +421,90 @@ def _parse_agent_decision_arguments(
         if not isinstance(staged, bool):
             raise LLMError("inspect_diff staged must be a boolean.")
         return {"staged": staged}
+    if action_kind == "propose_patch":
+        _require_exact_keys(
+            arguments,
+            {"path", "expected_sha256", "hunks"},
+            "propose_patch arguments",
+        )
+        path = _required_bounded_string(
+            arguments,
+            "path",
+            MAX_STATE_ITEM_CHARS,
+            "propose_patch arguments",
+        )
+        expected_sha256 = arguments.get("expected_sha256")
+        if not isinstance(expected_sha256, str) or not SHA256_PATTERN.fullmatch(
+            expected_sha256
+        ):
+            raise LLMError(
+                "propose_patch expected_sha256 must be a 64-character SHA-256 hex digest."
+            )
+        raw_hunks = arguments.get("hunks")
+        if not isinstance(raw_hunks, list) or not raw_hunks:
+            raise LLMError("propose_patch hunks must be a non-empty list.")
+        if len(raw_hunks) > MAX_PROPOSE_PATCH_HUNKS:
+            raise LLMError(
+                f"propose_patch cannot contain more than {MAX_PROPOSE_PATCH_HUNKS} hunks."
+            )
+        hunks: list[dict] = []
+        total_chars = 0
+        for index, raw_hunk in enumerate(raw_hunks, start=1):
+            if not isinstance(raw_hunk, dict):
+                raise LLMError(f"propose_patch hunk {index} must be an object.")
+            _reject_unknown_keys(
+                raw_hunk,
+                {"old_text", "new_text", "expected_occurrences"},
+                f"propose_patch hunk {index}",
+            )
+            old_text = raw_hunk.get("old_text")
+            new_text = raw_hunk.get("new_text")
+            if not isinstance(old_text, str) or not old_text:
+                raise LLMError(
+                    f"propose_patch hunk {index} requires non-empty old_text."
+                )
+            if not isinstance(new_text, str):
+                raise LLMError(
+                    f"propose_patch hunk {index} requires new_text as a string."
+                )
+            if (
+                len(old_text) > MAX_PROPOSE_PATCH_TEXT_CHARS
+                or len(new_text) > MAX_PROPOSE_PATCH_TEXT_CHARS
+            ):
+                raise LLMError(
+                    f"propose_patch hunk text cannot exceed "
+                    f"{MAX_PROPOSE_PATCH_TEXT_CHARS} characters."
+                )
+            total_chars += len(old_text) + len(new_text)
+            expected_occurrences = raw_hunk.get("expected_occurrences", 1)
+            if (
+                not isinstance(expected_occurrences, int)
+                or isinstance(expected_occurrences, bool)
+                or not 1 <= expected_occurrences <= 100
+            ):
+                raise LLMError(
+                    "propose_patch expected_occurrences must be an integer from 1 to 100."
+                )
+            hunks.append(
+                {
+                    "old_text": old_text,
+                    "new_text": new_text,
+                    "expected_occurrences": expected_occurrences,
+                }
+            )
+        if total_chars > MAX_PROPOSE_PATCH_TOTAL_CHARS:
+            raise LLMError(
+                f"propose_patch hunk text exceeds the "
+                f"{MAX_PROPOSE_PATCH_TOTAL_CHARS}-character total limit."
+            )
+        return {
+            "path": _normalize_agent_path(path),
+            "expected_sha256": expected_sha256.lower(),
+            "hunks": hunks,
+        }
+    if action_kind == "inspect_proposed_diff":
+        _require_exact_keys(arguments, set(), "inspect_proposed_diff arguments")
+        return {}
     if action_kind == "ask_user":
         _require_exact_keys(arguments, set(), "ask_user arguments")
         return {}

@@ -96,6 +96,67 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             "Which behavior should remain compatible?",
         )
 
+    def test_virtual_patch_actions_are_strict_and_bounded(self) -> None:
+        proposed = parse_agent_decision_json(
+            json.dumps(
+                decision_payload(
+                    "propose_patch",
+                    {
+                        "path": "src\\main.py",
+                        "expected_sha256": "A" * 64,
+                        "hunks": [
+                            {
+                                "old_text": "return 1",
+                                "new_text": "return 2",
+                            }
+                        ],
+                    },
+                )
+            )
+        )
+        inspected = parse_agent_decision_json(
+            json.dumps(decision_payload("inspect_proposed_diff", {}))
+        )
+
+        self.assertEqual(proposed.action_arguments["path"], "src/main.py")
+        self.assertEqual(proposed.action_arguments["expected_sha256"], "a" * 64)
+        self.assertEqual(
+            proposed.action_arguments["hunks"][0]["expected_occurrences"],
+            1,
+        )
+        self.assertEqual(inspected.action_arguments, {})
+
+        invalid_payloads = [
+            decision_payload(
+                "propose_patch",
+                {
+                    "path": "../main.py",
+                    "expected_sha256": "a" * 64,
+                    "hunks": [{"old_text": "before", "new_text": "after"}],
+                },
+            ),
+            decision_payload(
+                "propose_patch",
+                {
+                    "path": "main.py",
+                    "expected_sha256": "bad",
+                    "hunks": [{"old_text": "before", "new_text": "after"}],
+                },
+            ),
+            decision_payload(
+                "propose_patch",
+                {
+                    "path": "main.py",
+                    "expected_sha256": "a" * 64,
+                    "hunks": [{"old_text": "x" * 12_001, "new_text": "after"}],
+                },
+            ),
+            decision_payload("inspect_proposed_diff", {"path": "main.py"}),
+        ]
+        for payload in invalid_payloads:
+            with self.subTest(kind=payload["action"]["kind"]), self.assertRaises(LLMError):
+                parse_agent_decision_json(json.dumps(payload))
+
     def test_plan_and_acceptance_state_updates_are_typed(self) -> None:
         payload = decision_payload()
         payload["state_update"]["plan_updates"] = [

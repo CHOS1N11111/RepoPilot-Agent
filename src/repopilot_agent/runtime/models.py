@@ -14,6 +14,8 @@ SUPPORTED_ACTIONS = frozenset(
         "inspect_repository_map",
         "inspect_git_status",
         "inspect_diff",
+        "propose_patch",
+        "inspect_proposed_diff",
         "edit_file",
         "apply_patch",
         "run_command",
@@ -29,6 +31,8 @@ READ_ONLY_ACTIONS = frozenset(
         "inspect_repository_map",
         "inspect_git_status",
         "inspect_diff",
+        "propose_patch",
+        "inspect_proposed_diff",
         "ask_user",
         "finish",
     }

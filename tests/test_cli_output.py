@@ -44,7 +44,17 @@ class CLIOutputTests(unittest.TestCase):
             agent_completion_blockers=[
                 "plan:investigate_repository",
                 "acceptance:analysis_complete",
+                "proposal:src/main.py:uninspected",
             ],
+            agent_proposed_edits=[
+                {
+                    "path": "src/main.py",
+                    "revision": 2,
+                    "status": "proposed",
+                    "inspected": False,
+                }
+            ],
+            agent_proposed_diff="--- a/src/main.py\n+++ b/src/main.py\n",
         )
 
         output = io.StringIO()
@@ -58,6 +68,10 @@ class CLIOutputTests(unittest.TestCase):
         self.assertIn("analysis_complete [pending, required]", rendered)
         self.assertIn("Completion ready: no", rendered)
         self.assertIn("acceptance:analysis_complete", rendered)
+        self.assertIn("Virtual proposed edits:", rendered)
+        self.assertIn("src/main.py [revision 2, proposed, inspection required]", rendered)
+        self.assertIn("Agent virtual proposed diff", rendered)
+        self.assertIn("+++ b/src/main.py", rendered)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,14 @@ class AgentRuntime:
     def working_state(self) -> AgentWorkingState | None:
         return latest_agent_working_state(self.events, default_objective=self.task)
 
+    @property
+    def proposed_edits(self) -> list[dict]:
+        return self.context.virtual_patches.metadata()
+
+    @property
+    def proposed_diff(self) -> str:
+        return self.context.virtual_patches.current_diff()
+
     def record_working_state(self, state: AgentWorkingState) -> RuntimeEvent:
         self.start()
         return self.store.append_event(
@@ -89,8 +97,13 @@ class AgentRuntime:
         if action.kind != "finish":
             raise ValueError("Only finish actions may use the completion gate.")
         normalized_blockers = [str(item) for item in blockers if str(item).strip()]
+        requirement = (
+            "plan, acceptance evidence, and proposed-edit review"
+            if any(item.startswith("proposal:") for item in normalized_blockers)
+            else "plan and acceptance evidence"
+        )
         summary = (
-            "Finish blocked until plan and acceptance evidence are complete: "
+            f"Finish blocked until {requirement} are complete: "
             f"{', '.join(normalized_blockers)}."
         )
         observation = RuntimeObservation(

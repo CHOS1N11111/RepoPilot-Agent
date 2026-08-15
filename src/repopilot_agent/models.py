@@ -447,6 +447,8 @@ class WorkflowReport:
     agent_pending_question: str = ""
     agent_completion_ready: bool = False
     agent_completion_blockers: list[str] = field(default_factory=list)
+    agent_proposed_edits: list[dict[str, Any]] = field(default_factory=list)
+    agent_proposed_diff: str = ""
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None

@@ -34,10 +34,10 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
 )
 
 AGENT_SYSTEM_PROMPT = (
-    "You are RepoPilot Agent's read-only repository exploration loop. "
+    "You are RepoPilot Agent's non-writing repository analysis and proposed-edit loop. "
     "Choose exactly one next decision and return only JSON with this exact shape: "
     '{"version":2,"rationale":"why this action is useful",'
-    '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|ask_user|finish",'
+    '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|ask_user|finish",'
     '"arguments":{}},"expected_evidence":"what result would make this action useful",'
     '"state_update":{"focus":"current investigation focus","add_findings":[],'
     '"add_open_questions":[],"resolve_open_questions":[],'
@@ -49,9 +49,15 @@ AGENT_SYSTEM_PROMPT = (
     '"finish_reason":"","user_question":""}. '
     "Action arguments must be exactly one of: search_files {query}; read_file {path}; "
     "inspect_repository_map with optional {query, limit}; inspect_git_status {}; "
-    "inspect_diff with optional {staged}; ask_user {}; "
+    "inspect_diff with optional {staged}; propose_patch {path, expected_sha256, hunks}; "
+    "inspect_proposed_diff {}; ask_user {}; "
     "finish {selected_paths}. "
-    "Use only read-only actions. Do not propose file edits here. "
+    "propose_patch hunks contain old_text, new_text, and optional expected_occurrences. "
+    "Use only non-writing actions. A proposed patch changes an in-memory overlay, never the repository. "
+    "Read a file before its first proposal and use the read_file SHA-256. For a later revision, use the "
+    "resulting virtual SHA-256 from the previous proposal. Inspect the cumulative proposed diff after the "
+    "latest revision. If the real baseline becomes stale, re-read the file before proposing again. "
+    "Only propose edits when the task asks for a repository change; explanation and inspection tasks do not need one. "
     "Always provide non-empty rationale and expected_evidence. "
     "Only add findings already supported by previous observations; expected future tool output is not a finding. "
     "Use plan_updates to add or revise implementation steps. A completed plan step must cite one or more "
@@ -176,6 +182,8 @@ def build_agent_prompt(
         "- inspect_repository_map: inspect task-relevant symbols, dependencies, and source/test relations.",
         "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
         "- inspect_diff: inspect the current working-tree or staged diff.",
+        "- propose_patch: apply exact hunks to a run-scoped in-memory overlay without writing the repository.",
+        "- inspect_proposed_diff: review the cumulative virtual diff and recheck real baseline hashes.",
     ]
     if allow_user_questions:
         actions.append(
@@ -187,7 +195,7 @@ def build_agent_prompt(
             f"Task: {task}",
             f"Step: {step_number} of {max_steps}",
             "",
-            "Available read-only actions:",
+            "Available non-writing actions:",
             *actions,
             "",
             "Managed context packet:",
@@ -197,6 +205,7 @@ def build_agent_prompt(
             "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "
             "Use inspect_diff when exact changed lines matter. Ask the user only when the answer is essential "
             "and cannot be obtained with the available repository tools. "
+            "For change tasks, read the target before propose_patch, then inspect_proposed_diff after the latest revision. "
             "Prefer finish if the useful files are already known. Update focus and open questions "
             "conservatively, revise the plan when evidence changes the approach, and only record findings "
             "or completion evidence supported by previous observations and their action ids.",

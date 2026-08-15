@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -507,6 +508,114 @@ class AgentLoopTests(unittest.TestCase):
         ]
         self.assertNotIn("explore-1", authorized_action_ids)
         self.assertEqual(authorized_action_ids, ["explore-2", "explore-3"])
+
+    def test_agent_proposes_inspects_and_finishes_without_writing_repository(self) -> None:
+        original = "def value():\n    return 1\n"
+        expected_sha256 = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        client = FakeLLMClient(
+            [
+                decision(
+                    "read_file",
+                    {"path": "main.py"},
+                    "Read the edit target and capture its baseline hash.",
+                    "Current source content and SHA-256.",
+                ),
+                decision(
+                    "propose_patch",
+                    {
+                        "path": "main.py",
+                        "expected_sha256": expected_sha256,
+                        "hunks": [
+                            {
+                                "old_text": "return 1",
+                                "new_text": "return 2",
+                            }
+                        ],
+                    },
+                    "Prepare the requested edit in the virtual overlay.",
+                    "A syntax-checked virtual revision and cumulative diff.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read the implementation target.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-1"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence supports the requested edit.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-1"],
+                            "evidence_summary": "main.py was read successfully.",
+                        }
+                    ],
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["main.py"]},
+                    "Attempt completion before reviewing the virtual diff.",
+                    "The proposal review gate should block completion.",
+                    finish_reason="The virtual edit is prepared.",
+                ),
+                decision(
+                    "inspect_proposed_diff",
+                    {},
+                    "Review the latest cumulative virtual diff.",
+                    "An inspected diff with a fresh real baseline.",
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["main.py"]},
+                    "Complete after evidence and proposal review are satisfied.",
+                    "A completed finish observation.",
+                    finish_reason="main.py has a reviewed virtual edit.",
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp, "main.py")
+            target.write_text(original, encoding="utf-8")
+            files = [
+                RepoFile(
+                    target,
+                    "main.py",
+                    len(original.encode("utf-8")),
+                    "python",
+                    original,
+                )
+            ]
+
+            result = run_agent_loop(
+                "change value to 2",
+                tmp,
+                files,
+                [],
+                client,
+                max_steps=5,
+            )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+
+        self.assertEqual(
+            [step.action for step in result.steps],
+            ["read_file", "propose_patch", "finish", "inspect_proposed_diff", "finish"],
+        )
+        self.assertIn("proposed-edit review", result.steps[2].observation)
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertTrue(result.working_state.proposed_edits[0].inspected)
+        self.assertEqual(result.proposed_edits[0]["status"], "inspected")
+        self.assertIn("+    return 2", result.proposed_diff)
+        self.assertIn(expected_sha256, client.calls[1][1].content)
+        self.assertIn("Virtual proposed edits:", client.calls[4][1].content)
+        self.assertEqual(
+            [event.event_type for event in result.events].count("finish_blocked"),
+            1,
+        )
 
     def test_agent_loop_stops_on_every_runtime_stopping_status(self) -> None:
         for status in sorted(STOPPING_OBSERVATION_STATUSES):

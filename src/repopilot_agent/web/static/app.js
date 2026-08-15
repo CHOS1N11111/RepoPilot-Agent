@@ -1235,7 +1235,9 @@ function renderReport(report, payload) {
     report.agent_stop_reason,
     report.agent_pending_question,
     report.agent_completion_ready,
-    report.agent_completion_blockers
+    report.agent_completion_blockers,
+    report.agent_proposed_edits,
+    report.agent_proposed_diff
   );
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
@@ -1420,7 +1422,9 @@ function renderAgentWorkingState(
   stopReason = "",
   pendingQuestion = "",
   completionReady = null,
-  completionBlockers = []
+  completionBlockers = [],
+  proposedEdits = [],
+  proposedDiff = ""
 ) {
   if (!agentState || !agentState.objective) {
     return item("No Agent working state was recorded for this workflow.");
@@ -1440,6 +1444,9 @@ function renderAgentWorkingState(
   const acceptance = Array.isArray(agentState.acceptance_criteria)
     ? agentState.acceptance_criteria
     : [];
+  const virtualEdits = Array.isArray(proposedEdits) && proposedEdits.length
+    ? proposedEdits
+    : Array.isArray(agentState.proposed_edits) ? agentState.proposed_edits : [];
   const inferredBlockers = [
     ...plan
       .filter((value) => value.status !== "completed")
@@ -1447,6 +1454,9 @@ function renderAgentWorkingState(
     ...acceptance
       .filter((value) => value.required !== false && value.status !== "passed")
       .map((value) => `acceptance:${value.criterion_id}`),
+    ...virtualEdits
+      .filter((value) => value.status === "conflict" || !value.inspected)
+      .map((value) => `proposal:${value.path}:${value.status === "conflict" ? "conflict" : "uninspected"}`),
   ];
   const resolvedBlockers = Array.isArray(completionBlockers) && completionBlockers.length
     ? completionBlockers
@@ -1466,6 +1476,13 @@ function renderAgentWorkingState(
       <span class="timeline-step">Acceptance ${escapeHtml(value.criterion_id || "criterion")}</span>
       <span class="timeline-status">${escapeHtml(value.status || "pending")}</span>
       <span>${escapeHtml(value.description || "No description")}${value.evidence_action_ids?.length ? ` | evidence ${escapeHtml(value.evidence_action_ids.join(", "))}` : ""}</span>
+    </div>
+  `).join("");
+  const proposalRows = virtualEdits.map((value) => `
+    <div class="timeline-event">
+      <span class="timeline-step">Virtual edit ${escapeHtml(value.path || "file")}</span>
+      <span class="timeline-status">revision ${escapeHtml(value.revision ?? 0)} | ${escapeHtml(value.status || "proposed")}</span>
+      <span>${value.inspected ? "Inspected" : "Inspection required"} | ${escapeHtml(value.hunk_count ?? 0)} cumulative hunk(s) | SHA-256 ${escapeHtml(value.current_sha256 || "unknown")}</span>
     </div>
   `).join("");
   const observationRows = observations.map((observation) => `
@@ -1512,6 +1529,11 @@ function renderAgentWorkingState(
     </div>
     ${planRows}
     ${acceptanceRows}
+    ${proposalRows}
+    ${proposedDiff ? `<div class="timeline-event">
+      <span class="timeline-step">Cumulative virtual diff</span>
+      <pre>${escapeHtml(proposedDiff)}</pre>
+    </div>` : ""}
     ${pendingQuestion ? `<div class="timeline-event">
       <span class="timeline-step">Pending question</span>
       <span>${escapeHtml(pendingQuestion)}</span>
@@ -1885,10 +1907,22 @@ function renderHistoryDetail(run) {
   const latestInputEvent = [...(run.agent_events || [])]
     .reverse()
     .find((event) => event.event_type === "input_required");
+  const latestVirtualDiffEvent = [...(run.agent_events || [])]
+    .reverse()
+    .find((event) => {
+      const observation = event.payload?.observation;
+      return observation?.status === "completed"
+        && ["inspect_proposed_diff", "propose_patch"].includes(observation.action_kind)
+        && typeof observation.data?.diff === "string";
+    });
   const agentState = run.agent_state || latestStateEvent?.payload?.working_state;
   const agentStopReason = run.agent_stop_reason || agentState?.stop_reason || "";
   const agentPendingQuestion = run.agent_pending_question
     || latestInputEvent?.payload?.observation?.data?.question
+    || "";
+  const agentProposedEdits = run.agent_proposed_edits || agentState?.proposed_edits || [];
+  const agentProposedDiff = run.agent_proposed_diff
+    || latestVirtualDiffEvent?.payload?.observation?.data?.diff
     || "";
   const pinnedTag = run.pinned ? ' <span class="tag ok">pinned</span>' : "";
   $("historyDetail").innerHTML = `
@@ -1914,7 +1948,11 @@ function renderHistoryDetail(run) {
       ${renderAgentWorkingState(
         agentState,
         agentStopReason,
-        agentPendingQuestion
+        agentPendingQuestion,
+        null,
+        [],
+        agentProposedEdits,
+        agentProposedDiff
       )}
     </div>
     <div class="item">

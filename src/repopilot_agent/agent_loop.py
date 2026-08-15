@@ -43,6 +43,7 @@ from .runtime import (
 
 DEFAULT_AGENT_MAX_STEPS = 6
 MAX_FILE_OBSERVATION_CHARS = 6_000
+MAX_PROPOSED_DIFF_CHARS = 24_000
 MAX_SEARCH_RESULTS = 5
 
 
@@ -56,6 +57,8 @@ class AgentLoopResult:
     working_state: AgentWorkingState | None = None
     stop_reason: str = ""
     pending_question: str = ""
+    proposed_edits: list[dict] = field(default_factory=list)
+    proposed_diff: str = ""
 
 
 def run_agent_loop(
@@ -246,6 +249,8 @@ def run_agent_loop(
         working_state=working_state,
         stop_reason=stop_reason,
         pending_question=pending_question,
+        proposed_edits=runtime.proposed_edits,
+        proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
     )
 
 
@@ -348,6 +353,63 @@ def _decision_record(decision: AgentDecision) -> dict:
 
 
 def _format_runtime_observation(observation) -> str:
+    if observation.action_kind == "propose_patch":
+        conflicts = observation.data.get("conflicts") or []
+        conflict_lines = "\n".join(
+            f"- {item.get('kind', 'conflict')}: expected {item.get('expected', '')}; "
+            f"actual {item.get('actual', '')}"
+            for item in conflicts[:5]
+            if isinstance(item, dict)
+        )
+        if observation.status != "completed":
+            return _clip(
+                "\n".join(
+                    part
+                    for part in [
+                        observation.error or observation.summary,
+                        conflict_lines,
+                    ]
+                    if part
+                ),
+                MAX_FILE_OBSERVATION_CHARS,
+            )
+        diff = str(observation.data.get("diff") or "").strip()
+        if observation.data.get("removed"):
+            return observation.summary
+        return _clip(
+            "\n".join(
+                [
+                    observation.summary,
+                    f"Base SHA-256: {observation.data.get('base_sha256', '')}",
+                    f"Previous virtual SHA-256: {observation.data.get('previous_sha256', '')}",
+                    f"Resulting virtual SHA-256: {observation.data.get('resulting_sha256', '')}",
+                    f"Revision: {observation.data.get('revision', 0)}",
+                    "Cumulative virtual diff:",
+                    diff or "(empty)",
+                ]
+            ),
+            MAX_FILE_OBSERVATION_CHARS,
+        )
+    if observation.action_kind == "inspect_proposed_diff":
+        if observation.status != "completed":
+            conflicts = observation.data.get("conflicts") or []
+            details = "\n".join(
+                f"- {item.get('path', '')}: expected {item.get('expected', '')}; "
+                f"actual {item.get('actual', '')}"
+                for item in conflicts[:5]
+                if isinstance(item, dict)
+            )
+            return _clip(
+                "\n".join(
+                    part for part in [observation.error or observation.summary, details] if part
+                ),
+                MAX_FILE_OBSERVATION_CHARS,
+            )
+        diff = str(observation.data.get("diff") or "").strip()
+        return _clip(
+            f"{observation.summary}\nCumulative virtual diff:\n{diff or '(empty)'}",
+            MAX_FILE_OBSERVATION_CHARS,
+        )
     if observation.status != "completed":
         return observation.error or observation.summary
     if observation.action_kind == "search_files":
@@ -363,7 +425,18 @@ def _format_runtime_observation(observation) -> str:
             )
         return "\n".join(lines)
     if observation.action_kind == "read_file":
-        return _clip(str(observation.data.get("content") or ""), MAX_FILE_OBSERVATION_CHARS)
+        return _clip(
+            "\n".join(
+                [
+                    f"Path: {observation.data.get('path', '')}",
+                    f"Complete-file SHA-256: {observation.data.get('sha256', '')}",
+                    f"Displayed content truncated: {'yes' if observation.data.get('truncated') else 'no'}",
+                    "Content:",
+                    str(observation.data.get("content") or ""),
+                ]
+            ),
+            MAX_FILE_OBSERVATION_CHARS,
+        )
     if observation.action_kind == "inspect_repository_map":
         matches = observation.data.get("matches", [])
         if not matches:
@@ -410,6 +483,10 @@ def _runtime_tool_input(action: RuntimeAction) -> str:
         return "git status"
     if action.kind == "inspect_diff":
         return "staged diff" if action.arguments.get("staged") else "working-tree diff"
+    if action.kind == "propose_patch":
+        return str(action.arguments.get("path") or "")
+    if action.kind == "inspect_proposed_diff":
+        return "virtual proposed diff"
     if action.kind == "ask_user":
         return str(action.arguments.get("question") or "")
     return action.kind

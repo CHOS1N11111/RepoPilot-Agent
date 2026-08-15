@@ -152,6 +152,113 @@ class AgentWorkingStateTests(unittest.TestCase):
         self.assertEqual(restored.expected_evidence, "")
         self.assertEqual(restored.plan, [])
         self.assertEqual(restored.acceptance_criteria, [])
+        self.assertEqual(restored.proposed_edits, [])
+
+    def test_virtual_proposal_state_requires_latest_revision_inspection(self) -> None:
+        state = create_agent_working_state("update parser")
+        proposed = advance_agent_working_state(
+            state,
+            RuntimeAction(
+                kind="propose_patch",
+                arguments={"path": "src/main.py"},
+                action_id="proposal-1",
+            ),
+            RuntimeObservation(
+                action_id="proposal-1",
+                action_kind="propose_patch",
+                status="completed",
+                summary="Prepared virtual edit.",
+                data={
+                    "proposal_status": "proposed",
+                    "path": "src/main.py",
+                    "base_sha256": "a" * 64,
+                    "current_sha256": "b" * 64,
+                    "revision": 1,
+                    "hunk_count": 2,
+                    "status": "proposed",
+                    "inspected": False,
+                },
+            ),
+            selected_paths=["src/main.py"],
+        )
+
+        self.assertEqual(proposed.version, AGENT_WORKING_STATE_VERSION)
+        self.assertEqual(proposed.phase, "proposal")
+        self.assertEqual(proposed.proposed_edits[0].revision, 1)
+        self.assertIn(
+            "proposal:src/main.py:uninspected",
+            agent_completion_blockers(proposed),
+        )
+        self.assertNotIn("base content", str(proposed.to_dict()))
+
+        inspected = advance_agent_working_state(
+            proposed,
+            RuntimeAction(kind="inspect_proposed_diff", action_id="inspect-1"),
+            RuntimeObservation(
+                action_id="inspect-1",
+                action_kind="inspect_proposed_diff",
+                status="completed",
+                summary="Inspected virtual diff.",
+                data={
+                    "proposal_status": "inspected",
+                    "files": [
+                        {
+                            **proposed.proposed_edits[0].to_dict(),
+                            "status": "inspected",
+                            "inspected": True,
+                        }
+                    ],
+                },
+            ),
+            selected_paths=["src/main.py"],
+        )
+
+        self.assertEqual(inspected.phase, "proposal_review")
+        self.assertTrue(inspected.proposed_edits[0].inspected)
+        self.assertNotIn(
+            "proposal:src/main.py:uninspected",
+            agent_completion_blockers(inspected),
+        )
+
+        stale_revision = advance_agent_working_state(
+            inspected,
+            RuntimeAction(
+                kind="propose_patch",
+                arguments={"path": "src/main.py"},
+                action_id="proposal-stale",
+            ),
+            RuntimeObservation(
+                action_id="proposal-stale",
+                action_kind="propose_patch",
+                status="conflict",
+                summary="Stale virtual revision.",
+                data={"conflicts": [{"kind": "stale_virtual_revision"}]},
+            ),
+            selected_paths=["src/main.py"],
+        )
+        self.assertTrue(stale_revision.proposed_edits[0].inspected)
+
+        stale_repository = advance_agent_working_state(
+            stale_revision,
+            RuntimeAction(
+                kind="propose_patch",
+                arguments={"path": "src/main.py"},
+                action_id="proposal-disk-stale",
+            ),
+            RuntimeObservation(
+                action_id="proposal-disk-stale",
+                action_kind="propose_patch",
+                status="conflict",
+                summary="Stale real baseline.",
+                data={"conflicts": [{"kind": "stale_repository"}]},
+            ),
+            selected_paths=["src/main.py"],
+        )
+        self.assertEqual(stale_repository.proposed_edits[0].status, "conflict")
+        self.assertIn(
+            "proposal:src/main.py:conflict",
+            agent_completion_blockers(stale_repository),
+        )
 
     def test_plan_and_acceptance_updates_require_completed_observation_evidence(self) -> None:
         state = create_agent_working_state("inspect repository")

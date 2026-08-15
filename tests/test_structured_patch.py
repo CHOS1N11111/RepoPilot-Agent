@@ -132,6 +132,17 @@ class StructuredPatchTests(unittest.TestCase):
                     "hunks": [{"old_text": "", "new_text": "after"}],
                 }
             )
+        with self.assertRaisesRegex(ValueError, "more than 20 hunks"):
+            parse_structured_patch(
+                {
+                    "path": "notes.txt",
+                    "expected_sha256": "a" * 64,
+                    "hunks": [
+                        {"old_text": f"before-{index}", "new_text": "after"}
+                        for index in range(21)
+                    ],
+                }
+            )
 
 
 if __name__ == "__main__":

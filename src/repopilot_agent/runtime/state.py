@@ -11,7 +11,7 @@ from ..models import AgentStateUpdate
 from .models import RuntimeAction, RuntimeEvent, RuntimeObservation
 
 
-AGENT_WORKING_STATE_VERSION = 3
+AGENT_WORKING_STATE_VERSION = 4
 MAX_RECENT_OBSERVATIONS = 8
 MAX_OBJECTIVE_CHARS = 2_000
 MAX_OBSERVATION_SUMMARY_CHARS = 500
@@ -21,6 +21,7 @@ MAX_STATE_QUESTIONS = 12
 MAX_STATE_ITEM_CHARS = 500
 MAX_AGENT_PLAN_ITEMS = 12
 MAX_AGENT_ACCEPTANCE_CRITERIA = 12
+MAX_AGENT_PROPOSED_EDITS = 12
 MAX_EVIDENCE_ACTION_IDS = 8
 SUCCESSFUL_EVIDENCE_STATUSES = frozenset({"completed", "applied", "no_change"})
 EVIDENCE_ACTION_KINDS = frozenset(
@@ -76,6 +77,20 @@ class AgentAcceptanceState:
 
 
 @dataclass(frozen=True)
+class AgentProposedEditState:
+    path: str
+    base_sha256: str
+    current_sha256: str
+    revision: int
+    hunk_count: int
+    status: str
+    inspected: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AgentWorkingState:
     version: int
     objective: str
@@ -89,6 +104,7 @@ class AgentWorkingState:
     expected_evidence: str
     plan: list[AgentPlanItem]
     acceptance_criteria: list[AgentAcceptanceState]
+    proposed_edits: list[AgentProposedEditState]
     recent_observations: list[AgentStateObservation]
     stop_reason: str | None
     updated_at: str
@@ -99,6 +115,7 @@ class AgentWorkingState:
         data["acceptance_criteria"] = [
             item.to_dict() for item in self.acceptance_criteria
         ]
+        data["proposed_edits"] = [item.to_dict() for item in self.proposed_edits]
         data["recent_observations"] = [item.to_dict() for item in self.recent_observations]
         return data
 
@@ -133,6 +150,7 @@ def create_agent_working_state(
             acceptance_criteria,
             normalized_objective,
         ),
+        proposed_edits=[],
         recent_observations=[],
         stop_reason=None,
         updated_at=_now(),
@@ -161,6 +179,11 @@ def advance_agent_working_state(
         ),
     ][-MAX_RECENT_OBSERVATIONS:]
     phase, status, stop_reason = _transition(action, observation)
+    proposed_edits = _advance_proposed_edits(
+        updated_state.proposed_edits,
+        action,
+        observation,
+    )
     return replace(
         updated_state,
         version=AGENT_WORKING_STATE_VERSION,
@@ -169,6 +192,7 @@ def advance_agent_working_state(
         iteration=iteration,
         selected_paths=_normalize_paths(selected_paths),
         expected_evidence=_bounded_text(expected_evidence, MAX_STATE_ITEM_CHARS),
+        proposed_edits=proposed_edits,
         recent_observations=recent,
         stop_reason=stop_reason,
         updated_at=_now(),
@@ -266,6 +290,7 @@ def agent_working_state_from_record(
         acceptance_criteria=_acceptance_from_record(
             value.get("acceptance_criteria")
         ),
+        proposed_edits=_proposed_edits_from_record(value.get("proposed_edits")),
         recent_observations=parsed_observations,
         stop_reason=(
             _bounded_text(value.get("stop_reason"), 100)
@@ -323,6 +348,12 @@ def render_agent_working_state(state: AgentWorkingState) -> str:
         )
         for item in state.acceptance_criteria
     ) or "- none"
+    proposed_edits = "\n".join(
+        f"- {item.path} [revision {item.revision}, {item.status}, "
+        f"{'inspected' if item.inspected else 'inspection required'}]: "
+        f"{item.hunk_count} cumulative hunk(s), virtual SHA-256 {item.current_sha256}"
+        for item in state.proposed_edits
+    ) or "- none"
     blockers = agent_completion_blockers(state)
     return "\n".join(
         [
@@ -340,6 +371,8 @@ def render_agent_working_state(state: AgentWorkingState) -> str:
             plan,
             "Acceptance state:",
             acceptance,
+            "Virtual proposed edits:",
+            proposed_edits,
             f"Completion ready: {'yes' if not blockers else 'no'}",
             f"Completion blockers: {'; '.join(blockers) if blockers else 'none'}",
             f"Expected evidence: {state.expected_evidence or 'none'}",
@@ -400,6 +433,11 @@ def agent_completion_blockers(state: AgentWorkingState) -> list[str]:
         blockers.append("plan:missing")
     if not state.acceptance_criteria:
         blockers.append("acceptance:missing")
+    blockers.extend(
+        f"proposal:{item.path}:{'conflict' if item.status == 'conflict' else 'uninspected'}"
+        for item in state.proposed_edits
+        if item.status == "conflict" or not item.inspected
+    )
     return blockers
 
 
@@ -542,6 +580,105 @@ def _initial_acceptance_state(
     return result
 
 
+def _advance_proposed_edits(
+    current: list[AgentProposedEditState],
+    action: RuntimeAction,
+    observation: RuntimeObservation,
+) -> list[AgentProposedEditState]:
+    edits = list(current)
+    if action.kind == "propose_patch":
+        path = _normalized_single_path(observation.data.get("path"))
+        if not path:
+            path = _normalized_single_path(action.arguments.get("path"))
+        if not path:
+            return edits
+        position = next(
+            (index for index, item in enumerate(edits) if item.path == path),
+            None,
+        )
+        if observation.status == "completed" and observation.data.get("removed"):
+            return [item for item in edits if item.path != path]
+        if observation.status == "completed" and observation.data.get("proposal_status") == "proposed":
+            parsed = _proposed_edit_from_record(observation.data)
+            if parsed is None:
+                return edits
+            if position is None:
+                edits.append(parsed)
+            else:
+                edits[position] = parsed
+        elif (
+            observation.status == "conflict"
+            and position is not None
+            and any(
+                isinstance(item, dict) and item.get("kind") == "stale_repository"
+                for item in observation.data.get("conflicts") or []
+            )
+        ):
+            edits[position] = replace(
+                edits[position],
+                status="conflict",
+                inspected=False,
+            )
+    elif action.kind == "inspect_proposed_diff":
+        raw_files = observation.data.get("files")
+        if isinstance(raw_files, list):
+            parsed_files = [
+                parsed
+                for raw in raw_files
+                if (parsed := _proposed_edit_from_record(raw)) is not None
+            ]
+            if parsed_files or observation.data.get("proposal_status") == "empty":
+                edits = parsed_files
+    return edits[-MAX_AGENT_PROPOSED_EDITS:]
+
+
+def _proposed_edits_from_record(value: object) -> list[AgentProposedEditState]:
+    if not isinstance(value, list):
+        return []
+    return [
+        parsed
+        for raw in value[-MAX_AGENT_PROPOSED_EDITS:]
+        if (parsed := _proposed_edit_from_record(raw)) is not None
+    ]
+
+
+def _proposed_edit_from_record(value: object) -> AgentProposedEditState | None:
+    if not isinstance(value, dict):
+        return None
+    path = _normalized_single_path(value.get("path"))
+    base_sha256 = _normalized_sha256(value.get("base_sha256"))
+    current_sha256 = _normalized_sha256(
+        value.get("current_sha256") or value.get("resulting_sha256")
+    )
+    if not path or not base_sha256 or not current_sha256:
+        return None
+    status = _bounded_text(value.get("status"), 50)
+    if status not in {"proposed", "inspected", "conflict"}:
+        status = "inspected" if bool(value.get("inspected")) else "proposed"
+    inspected = bool(value.get("inspected")) and status == "inspected"
+    return AgentProposedEditState(
+        path=path,
+        base_sha256=base_sha256,
+        current_sha256=current_sha256,
+        revision=_positive_int(value.get("revision"), 1),
+        hunk_count=_nonnegative_int(value.get("hunk_count")),
+        status=status,
+        inspected=inspected,
+    )
+
+
+def _normalized_single_path(value: object) -> str:
+    paths = _normalize_paths([value] if isinstance(value, str) else [])
+    return paths[0] if paths else ""
+
+
+def _normalized_sha256(value: object) -> str:
+    candidate = _bounded_text(value, 64).lower()
+    if len(candidate) != 64 or not all(character in "0123456789abcdef" for character in candidate):
+        return ""
+    return candidate
+
+
 def _plan_from_record(value: object) -> list[AgentPlanItem]:
     if not isinstance(value, list):
         return []
@@ -668,6 +805,8 @@ def _transition(
         "inspect_repository_map": "inspection",
         "inspect_git_status": "inspection",
         "inspect_diff": "inspection",
+        "propose_patch": "proposal",
+        "inspect_proposed_diff": "proposal_review",
         "edit_file": "editing",
         "apply_patch": "editing",
         "run_command": "validation",

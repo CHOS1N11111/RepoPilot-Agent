@@ -458,7 +458,10 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.agent_pending_question, "")
         self.assertTrue(report.agent_completion_ready)
         self.assertEqual(report.agent_completion_blockers, [])
-        self.assertEqual(report.agent_state["version"], 3)
+        self.assertEqual(report.agent_state["version"], 4)
+        self.assertEqual(report.agent_state["proposed_edits"], [])
+        self.assertEqual(report.agent_proposed_edits, [])
+        self.assertEqual(report.agent_proposed_diff, "")
         self.assertEqual(report.agent_state["plan"][0]["status"], "completed")
         self.assertEqual(
             report.agent_state["acceptance_criteria"][0]["status"],
