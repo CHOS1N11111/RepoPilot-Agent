@@ -20,6 +20,9 @@ class ActionReservation:
 
 
 class RuntimeEventStore(Protocol):
+    def lookup(self, run_id: str, action: RuntimeAction) -> ActionReservation:
+        ...
+
     def reserve(self, run_id: str, action: RuntimeAction) -> ActionReservation:
         ...
 
@@ -45,6 +48,19 @@ class InMemoryRuntimeStore:
         self._lock = threading.RLock()
         self._actions: dict[tuple[str, str], dict] = {}
         self._events: dict[str, list[RuntimeEvent]] = {}
+
+    def lookup(self, run_id: str, action: RuntimeAction) -> ActionReservation:
+        key = (run_id, action.effective_idempotency_key)
+        signature = _action_signature(action)
+        with self._lock:
+            current = self._actions.get(key)
+            if current is None:
+                return ActionReservation("missing")
+            if current["signature"] != signature:
+                return ActionReservation("conflict")
+            if current["state"] == "completed" and current["observation"]:
+                return ActionReservation("completed", current["observation"])
+            return ActionReservation("in_progress")
 
     def reserve(self, run_id: str, action: RuntimeAction) -> ActionReservation:
         key = (run_id, action.effective_idempotency_key)
@@ -107,6 +123,18 @@ class InMemoryRuntimeStore:
 class SQLiteRuntimeStore:
     def __init__(self, memory_store: MemoryStore) -> None:
         self.memory_store = memory_store
+
+    def lookup(self, run_id: str, action: RuntimeAction) -> ActionReservation:
+        record = self.memory_store.get_agent_runtime_action(
+            run_id,
+            action.effective_idempotency_key,
+            action.to_dict(),
+        )
+        observation = record.get("observation")
+        return ActionReservation(
+            status=str(record.get("status") or "conflict"),
+            observation=RuntimeObservation.from_dict(observation) if isinstance(observation, dict) else None,
+        )
 
     def reserve(self, run_id: str, action: RuntimeAction) -> ActionReservation:
         record = self.memory_store.reserve_agent_runtime_action(

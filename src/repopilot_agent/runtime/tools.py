@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -13,7 +14,12 @@ from ..patch_apply import apply_file_edits
 from ..repository_map import RepositoryMap, build_repository_map, rank_repository_map
 from ..scanner import scan_repository
 from ..search import search_files
-from ..structured_patch import apply_structured_patch, parse_structured_patch
+from ..structured_patch import (
+    apply_structured_patch,
+    file_sha256,
+    parse_structured_patch,
+    preview_structured_patch,
+)
 from ..validator import run_validation
 from .models import RuntimeAction, RuntimePolicy
 from .virtual_patch import VirtualPatchOverlay
@@ -33,6 +39,19 @@ class RuntimeToolResult:
     summary: str
     data: dict[str, Any]
     status: str = "completed"
+
+
+@dataclass(frozen=True)
+class RuntimeSideEffectPreview:
+    status: str
+    summary: str
+    file_scope: tuple[str, ...] = ()
+    command_allowlist: tuple[str, ...] = ()
+    baseline_hashes: dict[str, str] = field(default_factory=dict)
+    baseline_exists: dict[str, bool] = field(default_factory=dict)
+    diff: str = ""
+    diff_truncated: bool = False
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class RuntimeToolContext:
@@ -240,6 +259,76 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
         )
 
     raise RuntimeToolError(f"Action {action.kind} is not implemented by the runtime tool registry.")
+
+
+def preview_runtime_side_effect(
+    action: RuntimeAction,
+    context: RuntimeToolContext,
+) -> RuntimeSideEffectPreview:
+    """Describe the exact side effect without writing files or running commands."""
+    if action.kind == "edit_file":
+        path = _normalize_relative_path(_required_string(action, "path"))
+        new_content = action.arguments.get("new_content")
+        if not isinstance(new_content, str):
+            raise RuntimeToolError("edit_file requires new_content as a string.")
+        target = _safe_target(context.repo_path, path)
+        target_exists = target.exists()
+        if target_exists and not target.is_file():
+            raise RuntimeToolError(f"Repository edit target is not a file: {path}")
+        try:
+            original = target.read_text(encoding="utf-8") if target_exists else ""
+        except UnicodeDecodeError as exc:
+            raise RuntimeToolError(f"Repository file is not UTF-8 text: {path}") from exc
+        diff = "".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+            )
+        )
+        clipped, truncated = _clip(diff, MAX_DIFF_CHARS)
+        return RuntimeSideEffectPreview(
+            status="ready",
+            summary=f"Prepared an exact approval preview for edit_file on {path}.",
+            file_scope=(path,),
+            baseline_hashes={path: file_sha256(original)},
+            baseline_exists={path: target_exists},
+            diff=clipped,
+            diff_truncated=truncated,
+        )
+
+    if action.kind == "apply_patch":
+        patch = parse_structured_patch(action.arguments)
+        target = _safe_target(context.repo_path, patch.path)
+        if not target.is_file():
+            raise RuntimeToolError(f"Repository file does not exist: {patch.path}")
+        try:
+            current = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise RuntimeToolError(f"Repository file is not UTF-8 text: {patch.path}") from exc
+        result, _updated = preview_structured_patch(patch, current)
+        clipped, truncated = _clip(result.diff, MAX_DIFF_CHARS)
+        return RuntimeSideEffectPreview(
+            status="ready" if result.status in {"ready", "no_change"} else result.status,
+            summary=result.message,
+            file_scope=(patch.path,),
+            baseline_hashes={patch.path: file_sha256(current)},
+            baseline_exists={patch.path: True},
+            diff=clipped,
+            diff_truncated=truncated,
+            data=result.to_dict(),
+        )
+
+    if action.kind in {"run_command", "validate"}:
+        command = _required_string(action, "command")
+        return RuntimeSideEffectPreview(
+            status="ready",
+            summary=f"Prepared an exact approval preview for {action.kind}.",
+            command_allowlist=(command,),
+        )
+
+    raise RuntimeToolError(f"Action {action.kind} is not a runtime side effect.")
 
 
 def _required_string(action: RuntimeAction, name: str) -> str:

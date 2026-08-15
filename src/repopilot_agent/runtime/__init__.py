@@ -1,5 +1,13 @@
 """Typed, persistent action-observation runtime for RepoPilot agents."""
 
+from .approval import (
+    APPROVAL_PROTOCOL_VERSION,
+    DEFAULT_APPROVAL_TTL_SECONDS,
+    MAX_APPROVAL_TTL_SECONDS,
+    RuntimeApprovalGrant,
+    RuntimeApprovalRequest,
+    approval_payload_hash,
+)
 from .loop import AgentRuntime
 from .models import (
     READ_ONLY_ACTIONS,
@@ -40,10 +48,15 @@ __all__ = [
     "AgentStateObservation",
     "AgentWorkingState",
     "AGENT_WORKING_STATE_VERSION",
+    "APPROVAL_PROTOCOL_VERSION",
+    "DEFAULT_APPROVAL_TTL_SECONDS",
     "InMemoryRuntimeStore",
+    "MAX_APPROVAL_TTL_SECONDS",
     "MAX_RECENT_OBSERVATIONS",
     "READ_ONLY_ACTIONS",
     "RuntimeAction",
+    "RuntimeApprovalGrant",
+    "RuntimeApprovalRequest",
     "RuntimeEvent",
     "RuntimeEventStore",
     "RuntimeObservation",
@@ -54,6 +67,7 @@ __all__ = [
     "SQLiteRuntimeStore",
     "SUPPORTED_ACTIONS",
     "advance_agent_working_state",
+    "approval_payload_hash",
     "agent_completion_blockers",
     "agent_completion_ready",
     "agent_working_state_from_record",

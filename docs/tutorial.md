@@ -376,6 +376,19 @@ Before applying anything, check:
 
 Do not apply a proposal if the diff touches unexpected files.
 
+### Runtime Approval Records
+
+RepoPilot also has a lower-level durable approval protocol for typed runtime side effects. When such an action reaches the approval boundary, the Summary and saved History views can show a `Pending Runtime Approval` record with:
+
+- The exact action and action id.
+- The approval checkpoint and payload SHA-256.
+- The exact file scope or command allowlist.
+- The file baseline and exact diff seen at approval time.
+
+Approval grants are persisted in the ordered runtime event stream and expire after 15 minutes by default. A changed payload, changed file baseline, stale checkpoint, expired grant, or broader path or command requires a fresh approval.
+
+This runtime record is separate from the proposal checkboxes described below. The current CLI and Web iterative Agent still keep write and command actions disabled; normal proposal application continues to use the server-stored `proposal_id` and per-file approval flow.
+
 ## Step 9: Apply Approved Changes
 
 When the proposal looks correct:

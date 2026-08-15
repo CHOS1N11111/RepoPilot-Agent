@@ -366,6 +366,33 @@ class MemoryStore:
                 return {"status": "completed", "observation": observation}
             return {"status": "in_progress", "observation": None}
 
+    def get_agent_runtime_action(
+        self,
+        runtime_run_id: str,
+        idempotency_key: str,
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not runtime_run_id.strip() or not idempotency_key.strip():
+            raise ValueError("Runtime run id and idempotency key are required.")
+        signature = _runtime_action_signature(action)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT state, action_json, observation_json
+                FROM agent_runtime_actions
+                WHERE runtime_run_id = ? AND idempotency_key = ?
+                """,
+                (runtime_run_id, idempotency_key),
+            ).fetchone()
+        if row is None:
+            return {"status": "missing", "observation": None}
+        if _runtime_action_signature(_loads(row["action_json"], {})) != signature:
+            return {"status": "conflict", "observation": None}
+        observation = _loads(row["observation_json"], None)
+        if row["state"] == "completed" and isinstance(observation, dict):
+            return {"status": "completed", "observation": observation}
+        return {"status": "in_progress", "observation": None}
+
     def complete_agent_runtime_action(
         self,
         runtime_run_id: str,
@@ -549,6 +576,7 @@ class MemoryStore:
         data["llm_traces"] = [_row_to_trace(row) for row in traces]
         data["validation"] = [_row_to_validation(row) for row in validation]
         data["agent_events"] = [_row_to_agent_runtime_event(row) for row in runtime_events]
+        data["agent_pending_approval"] = _pending_runtime_approval(data["agent_events"])
         return data
 
     def delete_run(self, run_id: str) -> bool:
@@ -863,6 +891,25 @@ def _row_to_agent_runtime_event(row: sqlite3.Row) -> dict[str, Any]:
         "idempotency_key": row["idempotency_key"],
         "payload": _loads(row["payload_json"], {}),
     }
+
+
+def _pending_runtime_approval(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
+        if event.get("event_type") != "approval_required":
+            continue
+        payload = event.get("payload") or {}
+        request = payload.get("approval_request") if isinstance(payload, dict) else None
+        if not isinstance(request, dict) or not request.get("checkpoint"):
+            continue
+        checkpoint = str(request["checkpoint"])
+        resolved = any(
+            later.get("event_type") in {"approval_granted", "approval_rejected"}
+            and str((later.get("payload") or {}).get("checkpoint") or "") == checkpoint
+            for later in events[index + 1 :]
+        )
+        return {} if resolved else dict(request)
+    return {}
 
 
 def _json(data: Any) -> str:

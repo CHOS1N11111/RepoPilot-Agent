@@ -55,6 +55,21 @@ class CLIOutputTests(unittest.TestCase):
                 }
             ],
             agent_proposed_diff="--- a/src/main.py\n+++ b/src/main.py\n",
+            agent_pending_approval={
+                "checkpoint": "checkpoint-1",
+                "action_id": "apply-1",
+                "action_kind": "apply_patch",
+                "payload_hash": "a" * 64,
+                "file_scope": ["src/main.py"],
+                "command_allowlist": [],
+                "action": {
+                    "kind": "apply_patch",
+                    "action_id": "apply-1",
+                    "arguments": {"path": "src/main.py"},
+                },
+                "diff": "--- a/src/main.py\n+++ b/src/main.py\n",
+                "diff_truncated": False,
+            },
         )
 
         output = io.StringIO()
@@ -72,6 +87,11 @@ class CLIOutputTests(unittest.TestCase):
         self.assertIn("src/main.py [revision 2, proposed, inspection required]", rendered)
         self.assertIn("Agent virtual proposed diff", rendered)
         self.assertIn("+++ b/src/main.py", rendered)
+        self.assertIn("Pending runtime approval", rendered)
+        self.assertIn("apply_patch apply-1 at checkpoint checkpoint-1", rendered)
+        self.assertIn("Payload SHA-256: " + ("a" * 64), rendered)
+        self.assertIn("File scope: src/main.py", rendered)
+        self.assertIn('"kind": "apply_patch"', rendered)
 
 
 if __name__ == "__main__":

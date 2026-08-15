@@ -90,6 +90,12 @@ class MemoryStoreTests(unittest.TestCase):
                 files_scanned=2,
                 plan_metadata=PlanMetadata(source="llm", model="fake"),
                 agent_run_id="runtime-1",
+                agent_pending_approval={
+                    "checkpoint": "approval-1",
+                    "action_id": "apply-1",
+                    "action_kind": "apply_patch",
+                    "payload_hash": "a" * 64,
+                },
                 summary="RepoPilot analyzed the task.",
                 llm_traces=[
                     LLMCallTrace(
@@ -107,6 +113,12 @@ class MemoryStoreTests(unittest.TestCase):
                 "runtime-1",
                 "run_started",
                 payload={"task": "fix parser behavior"},
+            )
+            store.append_agent_runtime_event(
+                "runtime-1",
+                "approval_required",
+                action_id="apply-1",
+                payload={"approval_request": report.agent_pending_approval},
             )
 
             run_id = store.create_run(
@@ -127,6 +139,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(detail["llm_traces"][0]["name"], "planner")
             self.assertIn("Budget: 9000", detail["llm_traces"][0]["context_summary"])
             self.assertEqual(detail["agent_events"][0]["event_type"], "run_started")
+            self.assertEqual(detail["agent_pending_approval"]["checkpoint"], "approval-1")
             self.assertEqual(detail["timeline"][0]["step"], "scan")
             self.assertFalse(detail["pinned"])
 

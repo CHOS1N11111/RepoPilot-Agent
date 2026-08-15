@@ -540,6 +540,28 @@ def _print_report(report) -> None:
     print(report.agent_proposed_diff or "- No virtual proposed diff was produced.")
     print()
 
+    print("Pending runtime approval")
+    if report.agent_pending_approval:
+        request = report.agent_pending_approval
+        print(
+            f"- {request.get('action_kind', 'action')} "
+            f"{request.get('action_id', '')} at checkpoint {request.get('checkpoint', '')}"
+        )
+        print(f"  Payload SHA-256: {request.get('payload_hash', '')}")
+        if request.get("file_scope"):
+            print(f"  File scope: {', '.join(request['file_scope'])}")
+        if request.get("command_allowlist"):
+            print(f"  Command scope: {', '.join(request['command_allowlist'])}")
+        print("  Exact action:")
+        print(json.dumps(request.get("action") or {}, indent=2, ensure_ascii=False))
+        if request.get("diff"):
+            label = "Bounded diff (truncated):" if request.get("diff_truncated") else "Exact diff:"
+            print(f"  {label}")
+            print(request["diff"])
+    else:
+        print("- No runtime side effect is waiting for approval.")
+    print()
+
     print("Plan")
     for step in report.plan:
         print(f"{step.order}. {step.title}: {step.detail}")

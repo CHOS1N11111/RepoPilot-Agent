@@ -375,6 +375,12 @@ button:disabled:hover {
   overflow-wrap: anywhere;
 }
 
+.runtime-approval code,
+.runtime-approval li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .issue-actions {
   margin-top: 8px;
 }

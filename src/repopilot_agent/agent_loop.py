@@ -57,6 +57,7 @@ class AgentLoopResult:
     working_state: AgentWorkingState | None = None
     stop_reason: str = ""
     pending_question: str = ""
+    pending_approval: dict = field(default_factory=dict)
     proposed_edits: list[dict] = field(default_factory=list)
     proposed_diff: str = ""
 
@@ -249,6 +250,7 @@ def run_agent_loop(
         working_state=working_state,
         stop_reason=stop_reason,
         pending_question=pending_question,
+        pending_approval=runtime.pending_approval,
         proposed_edits=runtime.proposed_edits,
         proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
     )

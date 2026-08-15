@@ -147,7 +147,6 @@ class RuntimeEvent:
 class RuntimePolicy:
     allowed_actions: frozenset[str] = READ_ONLY_ACTIONS
     approval_required_actions: frozenset[str] = SIDE_EFFECT_ACTIONS
-    approved_action_ids: frozenset[str] = frozenset()
     allowed_edit_paths: tuple[str, ...] = ()
     allowed_commands: tuple[str, ...] = ()
 
@@ -159,18 +158,21 @@ class RuntimePolicy:
     def sandboxed(
         cls,
         *,
-        approved_action_ids: set[str] | frozenset[str] = frozenset(),
         allowed_edit_paths: list[str] | tuple[str, ...] = (),
         allowed_commands: list[str] | tuple[str, ...] = (),
     ) -> "RuntimePolicy":
         return cls(
             allowed_actions=SUPPORTED_ACTIONS,
-            approved_action_ids=frozenset(approved_action_ids),
             allowed_edit_paths=tuple(path.replace("\\", "/") for path in allowed_edit_paths),
             allowed_commands=tuple(command.strip() for command in allowed_commands),
         )
 
-    def evaluate(self, action: RuntimeAction) -> tuple[str, str]:
+    def evaluate(
+        self,
+        action: RuntimeAction,
+        *,
+        approval_granted: bool = False,
+    ) -> tuple[str, str]:
         if action.kind not in self.allowed_actions:
             return "deny", f"Action {action.kind} is disabled by the current runtime policy."
         if action.kind in {"edit_file", "apply_patch"}:
@@ -181,7 +183,7 @@ class RuntimePolicy:
             command = str(action.arguments.get("command") or "").strip()
             if not self.allowed_commands or command not in self.allowed_commands:
                 return "deny", f"Command is outside the approved runtime command set: {command or '(empty)'}"
-        if action.kind in self.approval_required_actions and action.action_id not in self.approved_action_ids:
+        if action.kind in self.approval_required_actions and not approval_granted:
             return "approval", f"Action {action.action_id} requires explicit approval before execution."
         return "allow", "Action is allowed."
 
@@ -195,6 +197,7 @@ class RuntimeRunResult:
     events: list[RuntimeEvent]
     selected_paths: list[str]
     summary: str = ""
+    pending_approval: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

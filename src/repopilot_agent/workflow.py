@@ -224,6 +224,7 @@ def run_workflow(
         ),
         agent_stop_reason=agent_result.stop_reason if agent_result else "",
         agent_pending_question=agent_result.pending_question if agent_result else "",
+        agent_pending_approval=agent_result.pending_approval if agent_result else {},
         agent_completion_ready=(
             agent_completion_ready(agent_result.working_state)
             if agent_result and agent_result.working_state

@@ -60,6 +60,7 @@ src/repopilot_agent/
   repo_source.py         local and GitHub repository resolution
   web_server.py          local HTTP API and static UI server
   runtime/
+    approval.py          exact-action approval requests and expiring grants
     models.py            actions, observations, events, and policies
     tools.py             typed tool registry
     virtual_patch.py     run-scoped in-memory patch overlay
@@ -195,6 +196,24 @@ The Web UI applies proposals by server-side `proposal_id`, not browser-supplied 
 
 The lower-level write-capable `apply_patch` tool remains separate from non-writing `propose_patch`. Write and command tools require an explicit file or command allowlist plus action approval.
 
+### Durable Runtime Approval Grants
+
+Runtime side effects use a versioned approval protocol instead of trusting an action id by itself. Before an `edit_file`, `apply_patch`, `run_command`, or `validate` action can execute, RepoPilot creates a non-writing preview and persists an `approval_required` event containing:
+
+- The exact typed action and action id.
+- A canonical SHA-256 over the action, current file baselines, exact diff, file scope, and command scope.
+- A unique request checkpoint and request timestamp.
+- The exact repository-relative file scope or command allowlist.
+- A bounded unified diff for file-changing actions.
+
+The approving caller must echo the checkpoint, payload hash, file scope, and command allowlist exactly. A resulting grant is bound to the runtime run, action kind, and request checkpoint, and has a 15-minute default expiration with a 24-hour maximum.
+
+Approval requests and grants are stored as ordered runtime events, so SQLite-backed runs retain them across process boundaries. Before execution, RepoPilot rebuilds the preview and verifies the current grant. It requires fresh approval when the action payload changes, a file baseline changes, the requested path or command expands, the checkpoint is stale, the request was rejected, or the grant expired. Successful authorization records `action_authorized` and `approval_consumed` before the side effect starts.
+
+Completed idempotent side effects can replay their stored observation without performing the operation again. Interrupted reservations still stop with `recovery_required`.
+
+The current top-level iterative Agent policy remains non-writing. These durable grants establish the approval boundary for the later sandboxed write-loop milestone; normal Web proposal application continues to use server-stored proposal ids and per-file approval.
+
 ## Worktree Sandboxes And Task Runs
 
 A managed sandbox is a detached Git worktree created from a clean committed source `HEAD`. It isolates approved edits, validation, repair proposals, and delivery preparation from the user's source branch.
@@ -256,6 +275,7 @@ RepoPilot's safety model is approval-first:
 
 - Non-writing Agent tools cannot modify the working tree.
 - Real edits are scoped to reviewed server-stored proposals.
+- Runtime side effects require unexpired grants bound to the exact action, diff, and scope.
 - File paths and validation commands are allowlisted.
 - Sensitive paths and repository escapes are rejected.
 - Hash preconditions prevent silent overwrite of newer content.

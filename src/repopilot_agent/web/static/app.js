@@ -1240,6 +1240,7 @@ function renderReport(report, payload) {
     report.agent_proposed_diff
   );
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
+  $("runtimeApproval").innerHTML = renderRuntimeApproval(report.agent_pending_approval);
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
   $("acceptanceCriteriaList").innerHTML = renderAcceptanceCriteria(
     report.acceptance_criteria || [],
@@ -1561,6 +1562,42 @@ function renderRuntimeEvents(events, runId = "") {
     })
     .join("");
   return `${header}${rows}`;
+}
+
+function renderRuntimeApproval(request) {
+  if (!request || !request.checkpoint) {
+    return item("No runtime side effect is waiting for approval.");
+  }
+  const fileScope = (request.file_scope || []).map((path) => `<li>${escapeHtml(path)}</li>`).join("");
+  const commandScope = (request.command_allowlist || []).map((command) => `<li><code>${escapeHtml(command)}</code></li>`).join("");
+  return `<div class="item runtime-approval">
+    <div class="item-title">Pending Runtime Approval: ${escapeHtml(request.action_kind || "action")} ${escapeHtml(request.action_id || "")}</div>
+    <p><strong>Checkpoint</strong> <code>${escapeHtml(request.checkpoint)}</code></p>
+    <p><strong>Payload SHA-256</strong> <code>${escapeHtml(request.payload_hash || "")}</code></p>
+    ${fileScope ? `<strong>File scope</strong><ul>${fileScope}</ul>` : ""}
+    ${commandScope ? `<strong>Command scope</strong><ul>${commandScope}</ul>` : ""}
+    <details open>
+      <summary>Exact action</summary>
+      <pre>${escapeHtml(JSON.stringify(request.action || {}, null, 2))}</pre>
+    </details>
+    ${request.diff ? `<details open><summary>${request.diff_truncated ? "Bounded diff (truncated)" : "Exact diff"}</summary><pre>${escapeHtml(request.diff)}</pre></details>` : ""}
+  </div>`;
+}
+
+function pendingApprovalFromEvents(events = []) {
+  const requestEvent = [...events]
+    .reverse()
+    .find((event) => event.event_type === "approval_required" && event.payload?.approval_request);
+  const request = requestEvent?.payload?.approval_request;
+  if (!request?.checkpoint) {
+    return null;
+  }
+  const resolved = events.some((event) =>
+    event.sequence > requestEvent.sequence
+    && ["approval_granted", "approval_rejected"].includes(event.event_type)
+    && event.payload?.checkpoint === request.checkpoint
+  );
+  return resolved ? null : request;
 }
 
 function editableProposalPaths(proposal = state.lastReport?.patch_proposal) {
@@ -1920,6 +1957,8 @@ function renderHistoryDetail(run) {
   const agentPendingQuestion = run.agent_pending_question
     || latestInputEvent?.payload?.observation?.data?.question
     || "";
+  const agentPendingApproval = run.agent_pending_approval
+    || pendingApprovalFromEvents(run.agent_events || []);
   const agentProposedEdits = run.agent_proposed_edits || agentState?.proposed_edits || [];
   const agentProposedDiff = run.agent_proposed_diff
     || latestVirtualDiffEvent?.payload?.observation?.data?.diff
@@ -1960,6 +1999,7 @@ function renderHistoryDetail(run) {
       <p><small>${escapeHtml(run.agent_runtime_run_id || "No runtime run id")}</small></p>
       <ul>${runtimeEvents || "<li>No typed runtime events saved.</li>"}</ul>
     </div>
+    ${renderRuntimeApproval(agentPendingApproval)}
     <div class="item">
       <div class="item-title">Validation</div>
       <ul>${validation || "<li>No validation saved.</li>"}</ul>
