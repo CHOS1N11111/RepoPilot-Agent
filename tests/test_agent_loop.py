@@ -65,6 +65,32 @@ class FakeLLMClient:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_empty_repository_keeps_opt_in_write_loop_read_only(self) -> None:
+        client = FakeLLMClient(
+            [
+                decision(
+                    "search_files",
+                    {"query": "bootstrap"},
+                    "Check whether the empty repository has any candidates.",
+                    "An empty structured search result.",
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_agent_loop(
+                "bootstrap the repository",
+                Path(tmp),
+                [],
+                [],
+                client,
+                max_steps=1,
+                allow_write_actions=True,
+            )
+
+        self.assertEqual(result.stop_reason, "step_limit")
+        self.assertEqual(result.pending_approval, {})
+        self.assertNotIn("apply_patch {", client.calls[0][0].content)
+
     def test_agent_loop_searches_reads_and_finishes(self) -> None:
         files = [
             RepoFile(

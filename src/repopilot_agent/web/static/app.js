@@ -66,6 +66,8 @@ $("checkTaskRunReadiness").addEventListener("click", checkTaskRunRecoveryReadine
 $("resumeTaskRun").addEventListener("click", resumeTaskRun);
 $("cancelTaskRun").addEventListener("click", cancelTaskRun);
 $("createTaskBranch").addEventListener("click", createTaskBranch);
+$("approveRuntimeWrite").addEventListener("click", approveRuntimeWrite);
+$("rejectRuntimeWrite").addEventListener("click", rejectRuntimeWrite);
 $("testLlm").addEventListener("click", testLlmConnection);
 $("applyProposal").addEventListener("click", applyProposal);
 $("revertProposal").addEventListener("click", revertProposal);
@@ -277,6 +279,78 @@ async function createTaskBranch() {
   }
 }
 
+function currentRuntimeApproval() {
+  const report = state.lastReport || currentTaskRunReport(state.taskRun);
+  const directRequest = report?.agent_pending_approval;
+  const request = directRequest?.checkpoint
+    ? directRequest
+    : pendingApprovalFromEvents(report?.agent_events || []);
+  return request?.checkpoint ? request : null;
+}
+
+async function approveRuntimeWrite() {
+  const request = currentRuntimeApproval();
+  if (!request || !state.taskRun?.can_approve_runtime) {
+    setStatus("No exact managed-worktree write is waiting for approval.");
+    return;
+  }
+  const scope = (request.file_scope || []).join(", ") || request.action_kind || "action";
+  const confirmed = window.confirm(
+    `Approve the exact ${request.action_kind || "write"} action for ${scope}? Only the managed task worktree will be modified.`
+  );
+  if (!confirmed) return;
+  setStatus("Executing the exact approved Runtime write...");
+  try {
+    const data = await postJson("/api/task-runs/runtime-approval/grant", {
+      ...taskRunControlPayload(),
+      checkpoint: request.checkpoint,
+      payload_hash: request.payload_hash,
+      file_scope: request.file_scope || [],
+      command_allowlist: request.command_allowlist || [],
+    });
+    if (data.error) {
+      if (data.task_run) updateTaskRun(data.task_run);
+      throw new Error(data.error);
+    }
+    state.taskRunRenderedProposalId = null;
+    updateTaskRun(data.task_run);
+    const resultingDiff = data.write_result?.resulting_diff || "No resulting diff.";
+    $("diffOutput").textContent = resultingDiff;
+    setStatus(data.task_run?.message || "Approved Runtime write completed.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
+async function rejectRuntimeWrite() {
+  const request = currentRuntimeApproval();
+  if (!request || !state.taskRun?.can_approve_runtime) {
+    setStatus("No exact managed-worktree write is waiting for rejection.");
+    return;
+  }
+  const confirmed = window.confirm(
+    "Reject this exact Runtime write? The managed worktree will remain unchanged."
+  );
+  if (!confirmed) return;
+  setStatus("Rejecting the pending Runtime write...");
+  try {
+    const data = await postJson("/api/task-runs/runtime-approval/reject", {
+      ...taskRunControlPayload(),
+      checkpoint: request.checkpoint,
+      reason: "Rejected in the RepoPilot Web UI.",
+    });
+    if (data.error) {
+      if (data.task_run) updateTaskRun(data.task_run);
+      throw new Error(data.error);
+    }
+    state.taskRunRenderedProposalId = null;
+    updateTaskRun(data.task_run);
+    setStatus(data.task_run?.message || "Runtime write rejected.");
+  } catch (error) {
+    setStatus(`Error: ${error.message}`);
+  }
+}
+
 function startTaskRunPolling() {
   stopTaskRunPolling();
   state.taskRunPoll = window.setInterval(() => {
@@ -339,7 +413,7 @@ function updateTaskRun(taskRun) {
   const report = currentTaskRunReport(taskRun);
   const manualRepairAvailable = taskRun.status === "repair_pending"
     && taskRun.proposal_id && report?.validation_feedback && !taskRun.repair_stop_reason;
-  if (["diagnosing", "replanning", "failed", "completed", "cancelled", "interrupted"].includes(taskRun.status)) {
+  if (["diagnosing", "replanning", "review_pending", "failed", "completed", "cancelled", "interrupted"].includes(taskRun.status)) {
     state.repairParentId = null;
   } else if (manualRepairAvailable) {
     state.repairParentId = taskRun.proposal_id;
@@ -353,7 +427,7 @@ function updateTaskRun(taskRun) {
     state.lastReport = report;
     renderReport(report, state.taskRunPayload || buildWorkflowPayload());
   }
-  if (["completed", "cancelled", "failed", "paused", "interrupted", "awaiting_approval", "repair_pending"].includes(taskRun.status)) {
+  if (["completed", "review_pending", "cancelled", "failed", "paused", "interrupted", "awaiting_approval", "repair_pending"].includes(taskRun.status)) {
     stopTaskRunPolling();
   }
 }
@@ -637,7 +711,7 @@ function taskRunPhaseIndex(taskRun) {
   if (status === "failed" && taskRun.repair_stop_reason) return 4;
   if (["exploring", "pausing", "cancelling", "interrupted", "failed"].includes(status)) return 1;
   if (status === "awaiting_approval") return 2;
-  if (status === "applying") return 3;
+  if (["applying", "review_pending"].includes(status)) return 3;
   if (["validating", "diagnosing", "replanning", "repair_pending"].includes(status)) return 4;
   return 5;
 }
@@ -1240,7 +1314,12 @@ function renderReport(report, payload) {
     report.agent_proposed_diff
   );
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
-  $("runtimeApproval").innerHTML = renderRuntimeApproval(report.agent_pending_approval);
+  const runtimeApproval = report.agent_pending_approval?.checkpoint
+    ? report.agent_pending_approval
+    : pendingApprovalFromEvents(report.agent_events || []);
+  $("runtimeApproval").innerHTML = renderRuntimeApproval(runtimeApproval);
+  updateRuntimeApprovalControls(runtimeApproval);
+  $("runtimeWriteResult").innerHTML = renderRuntimeWriteResult(report.agent_write_result);
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
   $("acceptanceCriteriaList").innerHTML = renderAcceptanceCriteria(
     report.acceptance_criteria || [],
@@ -1582,6 +1661,38 @@ function renderRuntimeApproval(request) {
     </details>
     ${request.diff ? `<details open><summary>${request.diff_truncated ? "Bounded diff (truncated)" : "Exact diff"}</summary><pre>${escapeHtml(request.diff)}</pre></details>` : ""}
   </div>`;
+}
+
+function updateRuntimeApprovalControls(request = currentRuntimeApproval()) {
+  const available = Boolean(request?.checkpoint && state.taskRun?.can_approve_runtime);
+  $("approveRuntimeWrite").disabled = !available;
+  $("rejectRuntimeWrite").disabled = !available;
+  $("runtimeApprovalStatus").textContent = available
+    ? "Review the exact action and diff before approving or rejecting it."
+    : "No managed-worktree write is waiting.";
+}
+
+function renderRuntimeWriteResult(result) {
+  if (!result || !result.write_observation) {
+    return item("No approved managed-worktree write has executed.");
+  }
+  const observation = result.write_observation;
+  const evidence = (observation.data?.write_evidence || []).map((entry) => `
+    <div class="timeline-event">
+      <span class="timeline-step">${escapeHtml(entry.path || "file")}</span>
+      <span class="timeline-status">${escapeHtml(observation.status || result.status || "unknown")}</span>
+      <span>Before ${escapeHtml(entry.before_sha256 || "missing")} | After ${escapeHtml(entry.after_sha256 || "missing")}</span>
+    </div>
+  `).join("");
+  const diff = result.resulting_diff || observation.data?.resulting_diff || "";
+  return `
+    <div class="item runtime-write-result">
+      <div class="item-title">Managed-worktree write ${escapeHtml(result.status || observation.status || "completed")}</div>
+      <p><small>Action ${escapeHtml(result.action_id || observation.action_id || "unknown")} | Rollback snapshot ${result.rollback_available ? "recorded" : "not available"}</small></p>
+      ${evidence || "<p>No file hash evidence was recorded.</p>"}
+      <details open><summary>Resulting Git diff</summary><pre>${escapeHtml(diff || "No diff.")}</pre></details>
+    </div>
+  `;
 }
 
 function pendingApprovalFromEvents(events = []) {

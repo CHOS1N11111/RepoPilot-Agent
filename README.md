@@ -16,7 +16,7 @@ RepoPilot Agent is a local, approval-first coding agent that turns repository ta
 
 - Builds task-aware repository context from files, symbols, imports, Git state, and source/test relationships.
 - Runs a typed multi-step Agent loop with bounded context, persistent events, evidence-backed plans, and inspectable LLM traces.
-- Prepares SHA-256-guarded virtual patches and cumulative diffs without writing to the working tree.
+- Prepares SHA-256-guarded virtual patches, then lets sandboxed Task Runs request an exact approval-gated write.
 - Persists expiring exact-action approval grants bound to payload hashes, current diffs, checkpoints, and file or command scope.
 - Stores proposals server-side and applies only the files explicitly approved by the user.
 - Executes complete tasks inside managed Git worktrees with validation, bounded repair proposals, checkpoints, and restart recovery.
@@ -28,16 +28,16 @@ RepoPilot Agent is a local, approval-first coding agent that turns repository ta
 flowchart LR
     A[Task or GitHub issue] --> B[Repository context]
     B --> C[Agent plan and proposal]
-    C --> D[Diff and safety review]
-    D --> E{Human approval}
-    E -->|Approve| F[Protected apply]
+    C --> D[Virtual diff and safety review]
+    D --> E{Exact human approval}
+    E -->|Approve| F[Managed worktree write]
     E -->|Revise| C
-    F --> G[Validation]
+    F --> G[Diff review and validation]
     G -->|Fail| C
     G -->|Pass| H[Local branch and PR draft]
 ```
 
-Agent exploration and virtual patching are non-writing. Real file changes remain behind explicit approval, and RepoPilot never commits or pushes task changes automatically.
+Normal local Agent runs remain non-writing. In a sandboxed Task Run, an Agent write must exactly reproduce the latest inspected virtual revision, pauses for explicit approval, and can modify only the registered managed worktree. RepoPilot never commits or pushes task changes automatically.
 
 ## Quick Start
 
@@ -82,7 +82,7 @@ The local Web UI provides:
 - Local path or GitHub URL repository selection and synchronization.
 - LLM model, endpoint, API key, timeout, JSON compatibility, and connection testing.
 - Agent steps, Working State, context budgets, LLM input/output traces, and runtime events.
-- Proposed changes, per-file approval, cumulative diffs, validation feedback, and rollback.
+- Proposed changes, exact Runtime or per-file approval, cumulative diffs, write hashes, validation feedback, and rollback evidence.
 - Sandboxed task progress, pause/resume/cancel controls, recovery readiness, and local branch delivery.
 - GitHub issue, pull request, review, comment, and CI/check inspection.
 
@@ -119,6 +119,7 @@ Provider-side JSON mode is enabled by default and automatically retried without 
 
 - Repository-writing actions require explicit approval and approved file scope.
 - Runtime grants expire and cannot authorize changed payloads, stale file baselines, or broader paths and commands.
+- LLM-selected writes are enabled only in registered managed worktrees and must match an inspected virtual revision.
 - Exact patches use SHA-256 preconditions and reject stale or ambiguous changes.
 - Validation commands pass through an allowlist.
 - Sensitive paths, repository escapes, and unsafe sandbox removal are blocked.

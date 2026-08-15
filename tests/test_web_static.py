@@ -197,6 +197,27 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("run.agent_events || []", self.app_js)
         self.assertIn(".runtime-event", self.app_css)
 
+    def test_runtime_write_approval_controls_are_exact_and_task_scoped(self) -> None:
+        for element_id in [
+            "approveRuntimeWrite",
+            "rejectRuntimeWrite",
+            "runtimeApprovalStatus",
+            "runtimeWriteResult",
+        ]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        for endpoint in [
+            "/api/task-runs/runtime-approval/grant",
+            "/api/task-runs/runtime-approval/reject",
+        ]:
+            self.assertIn(endpoint, self.app_js)
+        self.assertIn("async function approveRuntimeWrite", self.app_js)
+        self.assertIn("async function rejectRuntimeWrite", self.app_js)
+        self.assertIn("payload_hash: request.payload_hash", self.app_js)
+        self.assertIn("file_scope: request.file_scope || []", self.app_js)
+        self.assertIn("function renderRuntimeWriteResult", self.app_js)
+        self.assertIn("Before ${escapeHtml(entry.before_sha256", self.app_js)
+        self.assertIn("Rollback snapshot", self.app_js)
+
     def test_summary_exposes_repository_map_metrics_and_entries(self) -> None:
         self.assertIn('id="symbolsIndexed"', self.index_html)
         self.assertIn('id="repositoryMapList"', self.index_html)

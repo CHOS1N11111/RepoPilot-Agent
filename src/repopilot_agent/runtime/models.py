@@ -149,6 +149,8 @@ class RuntimePolicy:
     approval_required_actions: frozenset[str] = SIDE_EFFECT_ACTIONS
     allowed_edit_paths: tuple[str, ...] = ()
     allowed_commands: tuple[str, ...] = ()
+    requires_managed_worktree: bool = False
+    worktree_root: str = ""
 
     @classmethod
     def read_only(cls) -> "RuntimePolicy":
@@ -165,6 +167,32 @@ class RuntimePolicy:
             allowed_actions=SUPPORTED_ACTIONS,
             allowed_edit_paths=tuple(path.replace("\\", "/") for path in allowed_edit_paths),
             allowed_commands=tuple(command.strip() for command in allowed_commands),
+        )
+
+    @classmethod
+    def managed_worktree(
+        cls,
+        *,
+        allowed_edit_paths: list[str] | tuple[str, ...],
+        worktree_root: str = "",
+    ) -> "RuntimePolicy":
+        normalized_paths = tuple(
+            dict.fromkeys(
+                path.strip().replace("\\", "/")
+                for path in allowed_edit_paths
+                if path.strip()
+            )
+        )
+        if not normalized_paths:
+            raise ValueError(
+                "Managed-worktree policy requires at least one exact editable path."
+            )
+        return cls(
+            allowed_actions=READ_ONLY_ACTIONS | {"edit_file", "apply_patch"},
+            allowed_edit_paths=normalized_paths,
+            allowed_commands=(),
+            requires_managed_worktree=True,
+            worktree_root=str(worktree_root or "").strip(),
         )
 
     def evaluate(

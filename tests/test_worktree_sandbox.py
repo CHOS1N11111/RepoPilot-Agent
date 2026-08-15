@@ -15,6 +15,7 @@ from repopilot_agent.worktree_sandbox import (
     WorktreeSandboxError,
     create_worktree_sandbox,
     list_worktree_sandboxes,
+    require_managed_worktree,
     remove_worktree_sandbox,
 )
 
@@ -213,6 +214,40 @@ class WorktreeSandboxTests(unittest.TestCase):
                 with self.subTest(name=name):
                     with self.assertRaises(WorktreeSandboxError):
                         create_worktree_sandbox(repo, name=name, worktree_root=root / "managed")
+
+    def test_require_managed_worktree_rejects_primary_and_returns_registered_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            managed = root / "managed"
+            initialize_repository(repo)
+
+            with self.assertRaisesRegex(WorktreeSandboxError, "primary Git worktree"):
+                require_managed_worktree(repo, worktree_root=managed)
+
+            sandbox = create_worktree_sandbox(
+                repo,
+                name="write-boundary",
+                worktree_root=managed,
+            )
+            try:
+                verified = require_managed_worktree(
+                    sandbox.path,
+                    worktree_root=managed,
+                )
+
+                self.assertEqual(verified.path, sandbox.path)
+                self.assertEqual(verified.source_repo, str(repo.resolve()))
+                self.assertTrue(verified.managed)
+                self.assertFalse(verified.primary)
+            finally:
+                if Path(sandbox.path).exists():
+                    remove_worktree_sandbox(
+                        repo,
+                        sandbox.path,
+                        force=True,
+                        worktree_root=managed,
+                    )
 
 
 if __name__ == "__main__":

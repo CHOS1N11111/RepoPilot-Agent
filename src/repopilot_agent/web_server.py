@@ -13,6 +13,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .agent_write import (
+    AgentWriteError,
+    execute_pending_agent_write,
+    reject_pending_agent_write,
+)
 from .execution import (
     ExecutionBudget,
     ExecutionUsage,
@@ -233,6 +238,12 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/task-runs/branch":
             self._handle_task_run_branch()
+            return
+        if parsed.path == "/api/task-runs/runtime-approval/grant":
+            self._handle_runtime_approval_grant()
+            return
+        if parsed.path == "/api/task-runs/runtime-approval/reject":
+            self._handle_runtime_approval_reject()
             return
         if parsed.path == "/api/history/delete":
             self._handle_history_delete()
@@ -1562,6 +1573,190 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"task_run": task_run.to_public_dict()})
 
+    def _handle_runtime_approval_grant(self) -> None:
+        payload = self._read_json()
+        task_run = self._task_run_from_payload_or_error(payload)
+        if task_run is None:
+            return
+        request = _pending_runtime_approval(task_run)
+        if not request:
+            self._send_json(
+                {"error": "This task run has no pending runtime approval."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if not task_run.sandbox_path:
+            self._send_json(
+                {"error": "The task run has no managed worktree sandbox."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        current_budget = execution_budget_state(
+            task_run.execution_budget,
+            task_run.execution_usage,
+        )
+        remaining = current_budget["remaining"]
+        if (
+            current_budget["exhausted"]
+            or remaining["tool_calls"] < 2
+            or remaining["elapsed_ms"] <= 0
+        ):
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Execution budget is insufficient for the approved write and resulting diff inspection.",
+            )
+            self._persist_task_run(task_run)
+            self._send_json(
+                {
+                    "error": "Execution budget cannot cover the write and resulting diff inspection.",
+                    "execution_budget": current_budget,
+                    "task_run": task_run.to_public_dict(),
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        started_at = time.monotonic()
+        try:
+            file_scope = _payload_string_list(payload, "file_scope")
+            command_allowlist = _payload_string_list(payload, "command_allowlist")
+            result = execute_pending_agent_write(
+                task_run.source_repo,
+                task_run.sandbox_path,
+                task_run.task,
+                task_run.run_id,
+                SQLiteRuntimeStore(self._memory(task_run.source_repo)),
+                checkpoint=str(payload.get("checkpoint") or ""),
+                payload_hash=str(payload.get("payload_hash") or ""),
+                file_scope=file_scope,
+                command_allowlist=command_allowlist,
+            )
+        except (AgentWriteError, ValueError, WorktreeSandboxError) as exc:
+            self._send_json(
+                {"error": str(exc), "task_run": task_run.to_public_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        task_result = dict(task_run.result or {})
+        store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
+        task_result["agent_events"] = _public_runtime_events(
+            store.list_events(task_run.run_id)
+        )
+        task_result["agent_state"] = result.working_state
+        task_result["agent_write_result"] = result.to_dict()
+        task_result["agent_resulting_diff"] = result.to_dict()["resulting_diff"]
+        task_run.execution_usage = task_run.execution_usage.add(
+            tool_calls=2 if result.diff_observation else 1,
+            elapsed_ms=max(int((time.monotonic() - started_at) * 1000), 0),
+        )
+        task_result["execution_budget"] = execution_budget_state(
+            task_run.execution_budget,
+            task_run.execution_usage,
+        )
+        if result.status == "approval_required":
+            fresh_request = result.write_observation.data.get("approval_request") or {}
+            task_result["agent_pending_approval"] = fresh_request
+            task_result["agent_stop_reason"] = "approval_required"
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "The managed-worktree baseline changed; review the fresh exact approval request.",
+                result=task_result,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_approval_refreshed",
+                "The previous grant became stale before execution and a fresh diff is waiting.",
+                "review_runtime_action",
+            )
+        else:
+            task_result["agent_pending_approval"] = {}
+            task_result["agent_stop_reason"] = "write_complete"
+            update_task_run(
+                task_run,
+                "review_pending",
+                "Approved Agent write completed in the managed worktree; post-write validation has not run yet.",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_write_complete",
+                "The exact approved write completed and the Runtime observed its Git diff.",
+                "review_diff",
+            )
+        self._persist_task_run(task_run)
+        self._send_json(
+            {
+                "write_result": result.to_dict(),
+                "task_run": task_run.to_public_dict(),
+            }
+        )
+
+    def _handle_runtime_approval_reject(self) -> None:
+        payload = self._read_json()
+        task_run = self._task_run_from_payload_or_error(payload)
+        if task_run is None:
+            return
+        request = _pending_runtime_approval(task_run)
+        if not request:
+            self._send_json(
+                {"error": "This task run has no pending runtime approval."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if not task_run.sandbox_path:
+            self._send_json(
+                {"error": "The task run has no managed worktree sandbox."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        reason = str(payload.get("reason") or "Rejected by the user.").strip()
+        try:
+            rejected = reject_pending_agent_write(
+                task_run.source_repo,
+                task_run.sandbox_path,
+                task_run.task,
+                task_run.run_id,
+                SQLiteRuntimeStore(self._memory(task_run.source_repo)),
+                checkpoint=str(payload.get("checkpoint") or ""),
+                file_scope=list(request.get("file_scope") or []),
+                reason=reason,
+            )
+        except (AgentWriteError, ValueError, WorktreeSandboxError) as exc:
+            self._send_json(
+                {"error": str(exc), "task_run": task_run.to_public_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        task_result = dict(task_run.result or {})
+        store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
+        task_result["agent_events"] = _public_runtime_events(
+            store.list_events(task_run.run_id)
+        )
+        task_result["agent_state"] = rejected["working_state"]
+        task_result["agent_pending_approval"] = {}
+        task_result["agent_stop_reason"] = "approval_rejected"
+        task_result["agent_write_result"] = rejected
+        update_task_run(
+            task_run,
+            "cancelled",
+            "The pending Agent write was rejected; the managed worktree was not modified.",
+            result=task_result,
+            error=None,
+        )
+        record_task_run_checkpoint(
+            task_run,
+            "runtime_approval_rejected",
+            "The user rejected the exact pending Runtime write action.",
+            "review_report",
+        )
+        self._persist_task_run(task_run)
+        self._send_json(
+            {"rejection": rejected, "task_run": task_run.to_public_dict()}
+        )
+
     def _handle_task_run_pause(self) -> None:
         payload = self._read_json()
         task_run = self._task_run_from_payload_or_error(payload)
@@ -1752,6 +1947,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 agent_run_id=task_run.run_id,
                 agent_event_store=runtime_store,
                 execution_budget=task_run.execution_budget,
+                allow_agent_writes=True,
             )
             task_run.acceptance_criteria = criteria_from_records(report.acceptance_criteria)
             task_run.execution_usage = ExecutionUsage.from_dict(
@@ -1762,7 +1958,19 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             proposal_id = None
             proposal_session = None
             budget_exhausted = bool(report.execution_budget.get("exhausted"))
-            if proposal and proposal.file_edits and proposal.apply_ready and not budget_exhausted:
+            runtime_approval = (
+                report.agent_pending_approval
+                if report.agent_pending_approval.get("action_kind")
+                in {"apply_patch", "edit_file"}
+                else {}
+            )
+            if (
+                not runtime_approval
+                and proposal
+                and proposal.file_edits
+                and proposal.apply_ready
+                and not budget_exhausted
+            ):
                 validation_commands = task_run.validation_commands or (
                     proposal.validation_plan.commands if proposal.validation_plan else []
                 )
@@ -1840,8 +2048,13 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 else completion_from_record(report.completion_evidence)
             )
             if task_run.cancel_requested:
-                checkpoint_task_run(task_run, "awaiting_approval" if proposal_id else "completed")
-            elif task_run.pause_requested and proposal_id:
+                checkpoint_task_run(
+                    task_run,
+                    "awaiting_approval"
+                    if proposal_id or runtime_approval
+                    else "completed",
+                )
+            elif task_run.pause_requested and (proposal_id or runtime_approval):
                 checkpoint_task_run(task_run, "awaiting_approval")
             elif budget_exhausted:
                 update_task_run(
@@ -1855,6 +2068,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     "analysis_failed",
                     "Analysis stopped after exhausting the execution budget.",
                     "inspect_failure",
+                )
+            elif runtime_approval:
+                update_task_run(
+                    task_run,
+                    "awaiting_approval",
+                    "The Agent requested an exact managed-worktree write. Waiting for human approval.",
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_approval_ready",
+                    "An exact Runtime write action and diff are waiting for human approval.",
+                    "review_runtime_action",
                 )
             elif proposal_id:
                 update_task_run(task_run, "awaiting_approval", "Proposal ready. Waiting for human approval.")
@@ -2546,6 +2771,45 @@ def _payload_approved_paths(payload: dict[str, Any], file_edits: list[FileEditPr
             + ", ".join(unknown)
         )
     return [path for path in available_paths if path in requested]
+
+
+def _payload_string_list(payload: dict[str, Any], name: str) -> list[str]:
+    value = payload.get(name)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{name} must be a list of strings.")
+    return list(value)
+
+
+def _public_runtime_events(events: list[Any]) -> list[dict[str, Any]]:
+    public_events: list[dict[str, Any]] = []
+    for event in events:
+        data = event.to_dict()
+        if data.get("event_type") == "rollback_snapshot_recorded":
+            payload = dict(data.get("payload") or {})
+            snapshots = payload.get("snapshots")
+            if isinstance(snapshots, list):
+                payload["snapshots"] = [
+                    {
+                        "path": snapshot.get("path"),
+                        "existed": snapshot.get("existed"),
+                    }
+                    for snapshot in snapshots
+                    if isinstance(snapshot, dict)
+                ]
+            else:
+                payload["snapshots"] = []
+            data["payload"] = payload
+        public_events.append(data)
+    return public_events
+
+
+def _pending_runtime_approval(task_run: TaskRun) -> dict[str, Any]:
+    if task_run.status != "awaiting_approval" or not isinstance(task_run.result, dict):
+        return {}
+    request = task_run.result.get("agent_pending_approval")
+    if not isinstance(request, dict) or not request.get("checkpoint"):
+        return {}
+    return request
 
 
 def _normalize_approved_path(path: str) -> str:

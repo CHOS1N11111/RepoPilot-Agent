@@ -11,6 +11,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.llm.base import LLMError
 from repopilot_agent.llm.schema import (
+    AGENT_WRITE_ACTIONS,
+    ALLOWED_AGENT_DECISION_ACTIONS,
     parse_agent_action_json,
     parse_agent_decision_json,
 )
@@ -156,6 +158,37 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         for payload in invalid_payloads:
             with self.subTest(kind=payload["action"]["kind"]), self.assertRaises(LLMError):
                 parse_agent_decision_json(json.dumps(payload))
+
+    def test_write_actions_require_an_explicit_parser_capability(self) -> None:
+        payload = decision_payload(
+            "apply_patch",
+            {
+                "path": "main.py",
+                "expected_sha256": "a" * 64,
+                "hunks": [{"old_text": "before", "new_text": "after"}],
+            },
+        )
+
+        with self.assertRaisesRegex(LLMError, "Invalid Agent decision action"):
+            parse_agent_decision_json(json.dumps(payload))
+
+        parsed = parse_agent_decision_json(
+            json.dumps(payload),
+            allowed_actions=ALLOWED_AGENT_DECISION_ACTIONS | AGENT_WRITE_ACTIONS,
+        )
+        edit = parse_agent_decision_json(
+            json.dumps(
+                decision_payload(
+                    "edit_file",
+                    {"path": "notes.txt", "new_content": "updated\n"},
+                )
+            ),
+            allowed_actions=ALLOWED_AGENT_DECISION_ACTIONS | AGENT_WRITE_ACTIONS,
+        )
+
+        self.assertEqual(parsed.action_kind, "apply_patch")
+        self.assertEqual(parsed.action_arguments["hunks"][0]["expected_occurrences"], 1)
+        self.assertEqual(edit.action_arguments["new_content"], "updated\n")
 
     def test_plan_and_acceptance_state_updates_are_typed(self) -> None:
         payload = decision_payload()

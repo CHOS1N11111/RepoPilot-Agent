@@ -629,6 +629,18 @@ def _advance_proposed_edits(
             ]
             if parsed_files or observation.data.get("proposal_status") == "empty":
                 edits = parsed_files
+    elif action.kind in {"apply_patch", "edit_file"} and (
+        observation.status == "applied"
+        or (
+            observation.status == "completed"
+            and observation.data.get("applied")
+        )
+    ):
+        path = _normalized_single_path(observation.data.get("path"))
+        if not path:
+            path = _normalized_single_path(action.arguments.get("path"))
+        if path:
+            edits = [item for item in edits if item.path != path]
     return edits[-MAX_AGENT_PROPOSED_EDITS:]
 
 

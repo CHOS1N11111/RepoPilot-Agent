@@ -75,6 +75,35 @@ AGENT_SYSTEM_PROMPT = (
     "Use finish only when Working State reports completion readiness."
 )
 
+AGENT_WRITE_SYSTEM_PROMPT = (
+    AGENT_SYSTEM_PROMPT
+    .replace(
+        "non-writing repository analysis and proposed-edit loop",
+        "approval-gated managed-worktree analysis and edit loop",
+    )
+    .replace(
+        "search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|ask_user|finish",
+        "search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|apply_patch|edit_file|ask_user|finish",
+    )
+    .replace(
+        "inspect_proposed_diff {}; ask_user {}; ",
+        "inspect_proposed_diff {}; apply_patch {path, expected_sha256, hunks}; "
+        "edit_file {path, new_content}; ask_user {}; ",
+    )
+    .replace(
+        "Use only non-writing actions. A proposed patch changes an in-memory overlay, never the repository. ",
+        "Use write actions only after the latest virtual proposal was inspected. "
+        "apply_patch or edit_file pauses for exact human approval and may write only the managed worktree. "
+        "propose_patch still changes only an in-memory overlay. ",
+    )
+    + " A write action must reproduce the complete latest inspected virtual content exactly. "
+    "Never request commands, validation, commits, pushes, branches, or pull requests."
+)
+
+
+def agent_system_prompt(allow_write_actions: bool = False) -> str:
+    return AGENT_WRITE_SYSTEM_PROMPT if allow_write_actions else AGENT_SYSTEM_PROMPT
+
 
 def build_planner_prompt(
     task: str,
@@ -175,6 +204,7 @@ def build_agent_prompt(
     step_number: int,
     max_steps: int,
     allow_user_questions: bool = False,
+    allow_write_actions: bool = False,
 ) -> str:
     actions = [
         "- search_files: find repo files by task-focused query.",
@@ -185,6 +215,13 @@ def build_agent_prompt(
         "- propose_patch: apply exact hunks to a run-scoped in-memory overlay without writing the repository.",
         "- inspect_proposed_diff: review the cumulative virtual diff and recheck real baseline hashes.",
     ]
+    if allow_write_actions:
+        actions.extend(
+            [
+                "- apply_patch: request approval for exact hunks that reproduce an inspected virtual proposal in the managed worktree.",
+                "- edit_file: request approval for complete file content that reproduces an inspected virtual proposal in the managed worktree.",
+            ]
+        )
     if allow_user_questions:
         actions.append(
             "- ask_user: pause when essential information cannot be obtained from repository tools."
@@ -195,20 +232,30 @@ def build_agent_prompt(
             f"Task: {task}",
             f"Step: {step_number} of {max_steps}",
             "",
-            "Available non-writing actions:",
+            "Available managed-worktree actions:"
+            if allow_write_actions
+            else "Available non-writing actions:",
             *actions,
             "",
             "Managed context packet:",
             managed_context or "No managed context is available.",
             "",
-            "Choose the single next decision that will most improve repository understanding. "
-            "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "
-            "Use inspect_diff when exact changed lines matter. Ask the user only when the answer is essential "
-            "and cannot be obtained with the available repository tools. "
-            "For change tasks, read the target before propose_patch, then inspect_proposed_diff after the latest revision. "
-            "Prefer finish if the useful files are already known. Update focus and open questions "
-            "conservatively, revise the plan when evidence changes the approach, and only record findings "
-            "or completion evidence supported by previous observations and their action ids.",
+            (
+                "Choose the single next decision that will most improve repository understanding. "
+                "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "
+                "Use inspect_diff when exact changed lines matter. Ask the user only when the answer is essential "
+                "and cannot be obtained with the available repository tools. "
+                "For change tasks, read the target before propose_patch, then inspect_proposed_diff after the latest revision. "
+                + (
+                    "After inspection, use apply_patch or edit_file only when the requested write exactly matches that virtual revision; "
+                    "the controller will pause for human approval before writing. "
+                    if allow_write_actions
+                    else ""
+                )
+                + "Prefer finish if the useful files are already known. Update focus and open questions "
+                "conservatively, revise the plan when evidence changes the approach, and only record findings "
+                "or completion evidence supported by previous observations and their action ids."
+            ),
         ]
     )
 

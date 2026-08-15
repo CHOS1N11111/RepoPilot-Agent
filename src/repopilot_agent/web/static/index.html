@@ -217,6 +217,13 @@
           <div id="runtimeEventList" class="timeline"></div>
           <h2>Pending Runtime Approval</h2>
           <div id="runtimeApproval"></div>
+          <div class="toolbar">
+            <button id="approveRuntimeWrite" class="secondary" disabled>Approve Exact Write</button>
+            <button id="rejectRuntimeWrite" class="secondary danger-button" disabled>Reject</button>
+            <span id="runtimeApprovalStatus" class="status-line">No managed-worktree write is waiting.</span>
+          </div>
+          <h2>Sandbox Write Result</h2>
+          <div id="runtimeWriteResult" class="stack"></div>
           <h2>Repository Map</h2>
           <div id="repositoryMapList" class="stack"></div>
           <h2>Acceptance Criteria</h2>

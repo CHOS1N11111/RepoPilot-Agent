@@ -14,8 +14,13 @@ from .execution import (
     execution_budget_state,
 )
 from .llm.base import LLMClient, LLMError, LLMMessage
-from .llm.prompts import AGENT_SYSTEM_PROMPT, build_agent_prompt
-from .llm.schema import parse_agent_decision_json
+from .git_tools import get_git_diff
+from .llm.prompts import agent_system_prompt, build_agent_prompt
+from .llm.schema import (
+    AGENT_WRITE_ACTIONS,
+    ALLOWED_AGENT_DECISION_ACTIONS,
+    parse_agent_decision_json,
+)
 from .llm.tracing import traced_llm_json_call
 from .models import (
     AgentDecision,
@@ -40,6 +45,7 @@ from .runtime import (
     create_agent_working_state,
     stop_agent_working_state,
 )
+from .structured_patch import file_sha256, parse_structured_patch, preview_structured_patch
 
 DEFAULT_AGENT_MAX_STEPS = 6
 MAX_FILE_OBSERVATION_CHARS = 6_000
@@ -78,12 +84,15 @@ def run_agent_loop(
     acceptance_criteria: list[AcceptanceCriterion] | None = None,
     execution_budget: ExecutionBudget | None = None,
     allow_user_questions: bool = True,
+    allow_write_actions: bool = False,
+    managed_worktree_root: str | Path | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
 
     root = Path(repo_path)
     by_path = {repo_file.relative_path: repo_file for repo_file in files}
+    write_actions_enabled = allow_write_actions and bool(by_path)
     steps: list[AgentStep] = []
     selected_paths: list[str] = []
     summary = ""
@@ -99,7 +108,18 @@ def run_agent_loop(
         loop_budget.max_agent_steps,
         loop_budget.max_tool_calls,
     )
-    runtime_policy = RuntimePolicy.read_only()
+    runtime_policy = (
+        RuntimePolicy.managed_worktree(
+            allowed_edit_paths=sorted(by_path),
+            worktree_root=(
+                str(Path(managed_worktree_root).expanduser().resolve())
+                if managed_worktree_root is not None
+                else ""
+            ),
+        )
+        if write_actions_enabled
+        else RuntimePolicy.read_only()
+    )
     if not allow_user_questions:
         runtime_policy = replace(
             runtime_policy,
@@ -137,7 +157,11 @@ def run_agent_loop(
                 steps,
                 repository_map_context=map_context,
                 memory_context=memory_context,
-                current_diff=current_diff,
+                current_diff=(
+                    _load_current_diff(root)
+                    if write_actions_enabled
+                    else current_diff
+                ),
                 acceptance_criteria=acceptance_criteria,
                 remaining_budget=_remaining_execution_budget(
                     loop_budget,
@@ -155,6 +179,7 @@ def run_agent_loop(
                 llm_client,
                 traces,
                 allow_user_questions,
+                write_actions_enabled,
             )
             runtime_action = _to_runtime_action(decision, step_number)
             try:
@@ -170,11 +195,25 @@ def run_agent_loop(
                 if runtime_action.kind == "finish"
                 else []
             )
-            runtime_observation = (
-                runtime.block_finish(runtime_action, completion_blockers)
-                if completion_blockers
-                else runtime.execute(runtime_action)
+            write_conflict = (
+                _managed_write_conflict(root, working_state, runtime_action)
+                if write_actions_enabled and runtime_action.kind in AGENT_WRITE_ACTIONS
+                else None
             )
+            if completion_blockers:
+                runtime_observation = runtime.block_finish(
+                    runtime_action,
+                    completion_blockers,
+                )
+            elif write_conflict is not None:
+                reason, conflict_data = write_conflict
+                runtime_observation = runtime.block_action_conflict(
+                    runtime_action,
+                    reason,
+                    data=conflict_data,
+                )
+            else:
+                runtime_observation = runtime.execute(runtime_action)
             selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
             working_state = advance_agent_working_state(
                 working_state,
@@ -293,6 +332,98 @@ def select_agent_hits(
     return ordered[:limit]
 
 
+def _managed_write_conflict(
+    root: Path,
+    working_state: AgentWorkingState,
+    action: RuntimeAction,
+) -> tuple[str, dict] | None:
+    path = str(action.arguments.get("path") or "").replace("\\", "/")
+    proposal = next(
+        (item for item in working_state.proposed_edits if item.path == path),
+        None,
+    )
+    if proposal is None or proposal.status != "inspected" or not proposal.inspected:
+        return (
+            "Write actions require a latest inspected virtual proposal for the same path.",
+            {"kind": "proposal_not_inspected", "path": path},
+        )
+    target = (root / Path(*path.split("/"))).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return (
+            "Write action path escapes the managed worktree.",
+            {"kind": "unsafe_path", "path": path},
+        )
+    if not target.is_file():
+        return (
+            "The inspected virtual proposal target no longer exists.",
+            {"kind": "missing_target", "path": path},
+        )
+    try:
+        current_content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return (
+            "The inspected virtual proposal target is no longer UTF-8 text.",
+            {"kind": "non_utf8_target", "path": path},
+        )
+    current_hash = file_sha256(current_content)
+    if current_hash != proposal.base_sha256:
+        return (
+            "The managed worktree changed after the virtual proposal was inspected.",
+            {
+                "kind": "stale_repository",
+                "path": path,
+                "expected": proposal.base_sha256,
+                "actual": current_hash,
+            },
+        )
+    try:
+        if action.kind == "edit_file":
+            updated_content = action.arguments.get("new_content")
+            if not isinstance(updated_content, str):
+                raise ValueError("edit_file requires new_content as a string.")
+        else:
+            patch = parse_structured_patch(action.arguments)
+            preview, updated_content = preview_structured_patch(
+                patch,
+                current_content,
+            )
+            if preview.status != "ready" or updated_content is None:
+                return (
+                    preview.message,
+                    {
+                        "kind": "write_preview_conflict",
+                        "path": path,
+                        "conflicts": preview.conflicts,
+                    },
+                )
+    except (TypeError, ValueError) as exc:
+        return (
+            f"The managed write action is invalid: {exc}",
+            {"kind": "invalid_write_action", "path": path},
+        )
+    resulting_hash = file_sha256(updated_content)
+    if resulting_hash != proposal.current_sha256:
+        return (
+            "The write action does not reproduce the latest inspected virtual proposal.",
+            {
+                "kind": "virtual_diff_mismatch",
+                "path": path,
+                "expected": proposal.current_sha256,
+                "actual": resulting_hash,
+            },
+        )
+    return None
+
+
+def _load_current_diff(root: Path) -> str:
+    try:
+        return get_git_diff(root)
+    except Exception:
+        return ""
+
+
 def _choose_next_decision(
     task: str,
     context_packet: AgentContextPacket,
@@ -301,12 +432,19 @@ def _choose_next_decision(
     llm_client: LLMClient,
     traces: list[LLMCallTrace] | None,
     allow_user_questions: bool,
+    allow_write_actions: bool,
 ) -> AgentDecision:
+    allowed_actions = set(ALLOWED_AGENT_DECISION_ACTIONS)
+    if allow_write_actions:
+        allowed_actions.update(AGENT_WRITE_ACTIONS)
     return traced_llm_json_call(
         f"agent_step_{step_number}",
         llm_client,
         [
-            LLMMessage(role="system", content=AGENT_SYSTEM_PROMPT),
+            LLMMessage(
+                role="system",
+                content=agent_system_prompt(allow_write_actions),
+            ),
             LLMMessage(
                 role="user",
                 content=build_agent_prompt(
@@ -315,10 +453,14 @@ def _choose_next_decision(
                     step_number,
                     max_steps,
                     allow_user_questions=allow_user_questions,
+                    allow_write_actions=allow_write_actions,
                 ),
             ),
         ],
-        parse_agent_decision_json,
+        lambda response: parse_agent_decision_json(
+            response,
+            allowed_actions=allowed_actions,
+        ),
         traces,
         context_summary=f"Step {step_number}/{max_steps}. {context_packet.summary}",
     )
@@ -412,6 +554,46 @@ def _format_runtime_observation(observation) -> str:
             f"{observation.summary}\nCumulative virtual diff:\n{diff or '(empty)'}",
             MAX_FILE_OBSERVATION_CHARS,
         )
+    if observation.action_kind in {"apply_patch", "edit_file"}:
+        if observation.status == "approval_required":
+            request = observation.data.get("approval_request") or {}
+            diff = str(request.get("diff") or observation.data.get("diff") or "")
+            return _clip(
+                "\n".join(
+                    [
+                        observation.summary,
+                        f"Approval checkpoint: {request.get('checkpoint', '')}",
+                        f"Payload SHA-256: {request.get('payload_hash', '')}",
+                        "Exact proposed write diff:",
+                        diff or "(empty)",
+                    ]
+                ),
+                MAX_FILE_OBSERVATION_CHARS,
+            )
+        if observation.status in {"completed", "applied", "no_change"}:
+            evidence_lines = [
+                f"- {item.get('path', '')}: before {item.get('before_sha256') or '(missing)'}; "
+                f"after {item.get('after_sha256') or '(missing)'}"
+                for item in observation.data.get("write_evidence") or []
+                if isinstance(item, dict)
+            ]
+            diff = str(
+                observation.data.get("resulting_diff")
+                or observation.data.get("diff")
+                or ""
+            )
+            return _clip(
+                "\n".join(
+                    [
+                        observation.summary,
+                        "Write hashes:",
+                        *(evidence_lines or ["- none"]),
+                        "Resulting managed-worktree diff:",
+                        diff or "(empty)",
+                    ]
+                ),
+                MAX_FILE_OBSERVATION_CHARS,
+            )
     if observation.status != "completed":
         return observation.error or observation.summary
     if observation.action_kind == "search_files":
@@ -489,6 +671,8 @@ def _runtime_tool_input(action: RuntimeAction) -> str:
         return str(action.arguments.get("path") or "")
     if action.kind == "inspect_proposed_diff":
         return "virtual proposed diff"
+    if action.kind in {"apply_patch", "edit_file"}:
+        return str(action.arguments.get("path") or "")
     if action.kind == "ask_user":
         return str(action.arguments.get("question") or "")
     return action.kind

@@ -28,8 +28,8 @@ The major boundaries are:
 
 1. Repository understanding is local and bounded.
 2. LLM output is parsed as strict structured data.
-3. Agent exploration and virtual patching do not write repository files.
-4. Real writes require a server-stored proposal and explicit approval.
+3. Normal local Agent runs and all virtual patch actions do not write repository files.
+4. LLM-selected writes are available only in registered managed worktrees, must match an inspected virtual revision, and require exact approval.
 5. Validation and completion are evidence-based rather than inferred from model prose.
 6. RepoPilot never commits or pushes task changes automatically.
 
@@ -45,6 +45,7 @@ src/repopilot_agent/
   repository_map.py      symbols, dependencies, and source/test relations
   agent_context.py       bounded and redacted iterative context packets
   agent_loop.py          LLM decision loop adapter
+  agent_write.py         exact approved-write continuation and diff observation
   structured_patch.py    exact-text patch checks and guarded writes
   patch_proposer.py      deterministic and LLM patch proposals
   patch_apply.py         protected file application and rollback snapshots
@@ -212,7 +213,25 @@ Approval requests and grants are stored as ordered runtime events, so SQLite-bac
 
 Completed idempotent side effects can replay their stored observation without performing the operation again. Interrupted reservations still stop with `recovery_required`.
 
-The current top-level iterative Agent policy remains non-writing. These durable grants establish the approval boundary for the later sandboxed write-loop milestone; normal Web proposal application continues to use server-stored proposal ids and per-file approval.
+Normal local iterative Agent runs remain non-writing. A sandboxed Task Run uses the same grant protocol for LLM-selected writes; normal Web proposal application continues to support server-stored proposal ids and per-file approval.
+
+### Sandboxed Agent Write Loop
+
+Task Runs may opt into `apply_patch` and `edit_file` decisions because they execute in a detached managed worktree. Runtime construction verifies that the target is a non-primary worktree registered by Git and located under RepoPilot's configured managed root. The policy contains an exact allowlist of scanned repository paths and does not expose command or validation actions at this milestone.
+
+The controller accepts a write decision only when it reproduces the latest inspected virtual proposal for the same file. It rechecks the disk baseline, previews the requested content, and compares the resulting SHA-256 with the virtual revision hash. A mismatch becomes an `action_conflict`; it never creates an approval request.
+
+An exact match follows this sequence:
+
+1. Runtime creates and persists the exact approval request without writing.
+2. The Task Run stops at `awaiting_approval`; no downstream planner or duplicate patch proposer call is made.
+3. The Web caller echoes the checkpoint, payload hash, file scope, and empty command scope.
+4. Runtime rechecks the payload and baseline, consumes the grant, and writes only the managed worktree.
+5. The write observation records file existence plus before/after SHA-256 values.
+6. Complete rollback content is stored in a separate `rollback_snapshot_recorded` runtime event under RepoPilot's ignored local state.
+7. Runtime executes a read-only `inspect_diff`, appends both observations to Working State, and stops at `write_complete`.
+
+The Task Run then enters `review_pending`: the resulting diff is ready for inspection, but post-write validation has not run and completion is not claimed. Integrating approved validation decisions into this same controller is the next workflow milestone. The approved-write continuation is deliberately limited to the one persisted pending action; it is not generic process-restart recovery.
 
 ## Worktree Sandboxes And Task Runs
 
@@ -273,7 +292,8 @@ Public repositories can usually be read without a token. Private repositories an
 
 RepoPilot's safety model is approval-first:
 
-- Non-writing Agent tools cannot modify the working tree.
+- Normal local Agent tools and all virtual proposal actions cannot modify the working tree.
+- LLM-selected writes require a registered managed worktree and an exact match to the inspected virtual revision.
 - Real edits are scoped to reviewed server-stored proposals.
 - Runtime side effects require unexpired grants bound to the exact action, diff, and scope.
 - File paths and validation commands are allowlisted.

@@ -10,7 +10,7 @@ from typing import Any
 
 from ..git_tools import get_git_diff, inspect_repository
 from ..models import FileEditProposal, RepoFile
-from ..patch_apply import apply_file_edits
+from ..patch_apply import FileRollbackSnapshot, apply_file_edits
 from ..repository_map import RepositoryMap, build_repository_map, rank_repository_map
 from ..scanner import scan_repository
 from ..search import search_files
@@ -39,6 +39,7 @@ class RuntimeToolResult:
     summary: str
     data: dict[str, Any]
     status: str = "completed"
+    rollback_snapshots: tuple[FileRollbackSnapshot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,8 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
         if not isinstance(new_content, str):
             raise RuntimeToolError("edit_file requires new_content as a string.")
         rationale = str(action.arguments.get("rationale") or action.rationale or "Runtime-approved edit.")
+        target = _safe_target(context.repo_path, path)
+        before_exists, before_content = _read_write_target(target, path)
         allowed_paths = list(context.policy.allowed_edit_paths) or [path]
         result = apply_file_edits(
             context.repo_path,
@@ -198,9 +201,24 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
             task=context.task,
             allowed_paths=allowed_paths,
         )
-        context.refresh_files()
-        context.select_path(path)
         diff, truncated = _clip(result.diff, MAX_DIFF_CHARS)
+        after_exists, after_content = _read_write_target(target, path)
+        evidence = _write_evidence(
+            path,
+            before_exists,
+            before_content,
+            after_exists,
+            after_content,
+        )
+        snapshots = (
+            FileRollbackSnapshot(
+                path=path,
+                existed=before_exists,
+                original_content=before_content if before_exists else None,
+                applied_content=after_content,
+            ),
+        ) if result.applied else ()
+        refresh_error = _refresh_after_write(context, path)
         return RuntimeToolResult(
             summary=result.message,
             data={
@@ -208,12 +226,21 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
                 "changed_files": result.changed_files,
                 "diff": diff,
                 "diff_truncated": truncated,
+                "resulting_diff": diff,
+                "resulting_diff_truncated": truncated,
+                "write_evidence": [evidence],
+                "rollback_available": bool(snapshots),
+                "rollback_snapshot_paths": [item.path for item in snapshots],
+                "refresh_error": refresh_error,
                 "selected_paths": list(context.selected_paths),
             },
+            rollback_snapshots=snapshots,
         )
 
     if action.kind == "apply_patch":
         patch = parse_structured_patch(action.arguments)
+        target = _safe_target(context.repo_path, patch.path)
+        before_exists, before_content = _read_write_target(target, patch.path)
         allowed_paths = list(context.policy.allowed_edit_paths) or [patch.path]
         result = apply_structured_patch(
             context.repo_path,
@@ -221,12 +248,50 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
             task=context.task,
             allowed_paths=allowed_paths,
         )
-        if result.applied:
-            context.refresh_files()
-            context.select_path(patch.path)
+        after_exists, after_content = _read_write_target(target, patch.path)
+        evidence = _write_evidence(
+            patch.path,
+            before_exists,
+            before_content,
+            after_exists,
+            after_content,
+        )
+        snapshots = (
+            FileRollbackSnapshot(
+                path=patch.path,
+                existed=before_exists,
+                original_content=before_content if before_exists else None,
+                applied_content=after_content,
+            ),
+        ) if result.applied and before_content != after_content else ()
+        refresh_error = (
+            _refresh_after_write(context, patch.path)
+            if result.applied
+            else None
+        )
         data = result.to_dict()
         data["diff"], data["diff_truncated"] = _clip(result.diff, MAX_DIFF_CHARS)
-        return RuntimeToolResult(summary=result.message, data=data, status=result.status)
+        resulting_diff, resulting_truncated = _clip(
+            _safe_current_diff(context.repo_path, result.diff),
+            MAX_DIFF_CHARS,
+        )
+        data.update(
+            {
+                "resulting_diff": resulting_diff,
+                "resulting_diff_truncated": resulting_truncated,
+                "write_evidence": [evidence],
+                "rollback_available": bool(snapshots),
+                "rollback_snapshot_paths": [item.path for item in snapshots],
+                "refresh_error": refresh_error,
+                "selected_paths": list(context.selected_paths),
+            }
+        )
+        return RuntimeToolResult(
+            summary=result.message,
+            data=data,
+            status=result.status,
+            rollback_snapshots=snapshots,
+        )
 
     if action.kind in {"run_command", "validate"}:
         command = _required_string(action, "command")
@@ -352,6 +417,49 @@ def _safe_target(root: Path, path: str) -> Path:
     except ValueError as exc:
         raise RuntimeToolError(f"Path escapes the repository: {path}") from exc
     return target
+
+
+def _read_write_target(target: Path, path: str) -> tuple[bool, str]:
+    if target.exists() and not target.is_file():
+        raise RuntimeToolError(f"Repository edit target is not a file: {path}")
+    if not target.exists():
+        return False, ""
+    try:
+        return True, target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeToolError(f"Repository file is not UTF-8 text: {path}") from exc
+
+
+def _write_evidence(
+    path: str,
+    before_exists: bool,
+    before_content: str,
+    after_exists: bool,
+    after_content: str,
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "before_exists": before_exists,
+        "before_sha256": file_sha256(before_content) if before_exists else None,
+        "after_exists": after_exists,
+        "after_sha256": file_sha256(after_content) if after_exists else None,
+    }
+
+
+def _safe_current_diff(root: Path, fallback: str = "") -> str:
+    try:
+        return get_git_diff(root)
+    except Exception:
+        return fallback
+
+
+def _refresh_after_write(context: RuntimeToolContext, path: str) -> str | None:
+    context.select_path(path)
+    try:
+        context.refresh_files()
+    except Exception as exc:
+        return str(exc)
+    return None
 
 
 def _clip(text: str, limit: int) -> tuple[str, bool]:

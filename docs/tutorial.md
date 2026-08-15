@@ -163,7 +163,7 @@ To use Codex-like multi-step exploration and virtual edit preparation before pla
 python repopilot.py run --repo . --task "fix parser behavior" --use-llm --iterative-agent --agent-max-steps 6
 ```
 
-This mode lets the LLM choose non-writing actions such as `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `propose_patch`, and `inspect_proposed_diff` across several smaller calls. Each call returns one `AgentDecision` v2 object and RepoPilot validates it before executing the action:
+For a normal local CLI run, this mode lets the LLM choose non-writing actions such as `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `propose_patch`, and `inspect_proposed_diff` across several smaller calls. A managed Web Task Run may additionally choose approval-gated `apply_patch` or `edit_file`. Each call returns one `AgentDecision` v2 object and RepoPilot validates it before executing the action:
 
 ```json
 {
@@ -184,7 +184,7 @@ This mode lets the LLM choose non-writing actions such as `search_files`, `read_
 }
 ```
 
-The action schema is specific to its kind: search uses `query`, read uses `path`, repository-map inspection accepts optional `query` and `limit`, Git status accepts no arguments, diff inspection accepts an optional boolean `staged`, `propose_patch` requires `path`, `expected_sha256`, and exact hunks, `inspect_proposed_diff` accepts no arguments, and finish uses `selected_paths`. The core controller also supports an opt-in `ask_user` action with empty arguments, a non-empty `user_question`, and the same question added to Working State. `plan_updates` upsert bounded plan items with `pending`, `in_progress`, or `completed` status. `acceptance_updates` upsert bounded criteria and attach evidence. RepoPilot rejects extra fields, extra action arguments, unsafe paths, wrong types, oversized hunk payloads, empty expected evidence, and inconsistent finish, question, plan, or acceptance fields. The actions run through RepoPilot's typed runtime and produce persistent decision-action-observation events. They do not write files; real changes still require a reviewed proposal and human approval.
+The action schema is specific to its kind: search uses `query`, read uses `path`, repository-map inspection accepts optional `query` and `limit`, Git status accepts no arguments, diff inspection accepts an optional boolean `staged`, `propose_patch` and `apply_patch` require `path`, `expected_sha256`, and exact hunks, `edit_file` requires `path` and complete `new_content`, `inspect_proposed_diff` accepts no arguments, and finish uses `selected_paths`. The core controller also supports an opt-in `ask_user` action with empty arguments, a non-empty `user_question`, and the same question added to Working State. `plan_updates` upsert bounded plan items with `pending`, `in_progress`, or `completed` status. `acceptance_updates` upsert bounded criteria and attach evidence. RepoPilot rejects extra fields, extra action arguments, unsafe paths, wrong types, oversized payloads, empty expected evidence, and inconsistent finish, question, plan, or acceptance fields. The actions run through RepoPilot's typed runtime and produce persistent decision-action-observation events. Write actions are absent from normal local runs and are exposed only inside a registered managed worktree.
 
 For a change task, the virtual edit sequence is:
 
@@ -192,9 +192,12 @@ For a change task, the virtual edit sequence is:
 2. Call `propose_patch` with that hash and one or more exact old/new text hunks.
 3. For another revision of the same file, use the previous proposal's `resulting_sha256`, not the disk hash.
 4. Call `inspect_proposed_diff` after the latest revision.
-5. Finish only after Working State reports no proposal conflict or uninspected revision.
+5. In a normal local run, finish only after Working State reports no proposal conflict or uninspected revision.
+6. In a managed Task Run, the Agent may instead request `apply_patch` or `edit_file`; the requested result must exactly match the inspected virtual SHA-256.
 
 `propose_patch` applies the hunks to a run-scoped in-memory overlay, runs Python or JSON syntax checks when applicable, and returns a cumulative diff from the real baseline to the latest virtual content. It never calls the file-write path. Every proposal and inspection rechecks the real baseline hash. If another process changes the target, RepoPilot reports `stale_repository`; re-read the file and propose with the new real hash to reset that file's virtual baseline. A stale virtual revision reports `stale_virtual_revision` instead of replacing newer proposed work.
+
+When a managed Task Run requests the matching write, it stops at `awaiting_approval`. In Summary, review `Pending Runtime Approval`, including the exact action, checkpoint, payload hash, path scope, and diff. `Approve Exact Write` echoes those values to the local server; `Reject` records the rejection without changing the sandbox. A successful write displays before/after hashes, rollback availability, and the resulting Git diff under `Sandbox Write Result`. The source repository remains unchanged.
 
 A completed plan update must include `evidence_action_ids`. An acceptance update passes its criterion only when it includes valid evidence ids and a summary. Each id must identify a previously completed evidence-producing observation shown in Working State, such as `read_file`, Repository Map inspection, Git status, or diff inspection. `search_files` returns candidates and is deliberately not sufficient. A virtual proposal proves what the Agent wants to change, not that the task is complete, so `propose_patch`, the current action, a user question, model prose, and `finish` are also not acceptance evidence. Required criteria remain required even if a later model update sets `required` to false.
 
@@ -239,6 +242,8 @@ Important LLM-related fields:
 - `agent_completion_blockers`: stable `plan:<id>`, `acceptance:<id>`, and `proposal:<path>:<reason>` identifiers preventing finish.
 - `agent_proposed_edits`: bounded path, hash, revision, hunk-count, conflict, and inspection metadata.
 - `agent_proposed_diff`: bounded cumulative virtual diff; it is a proposal and does not mean the repository changed.
+- `agent_pending_approval`: exact pending action, payload hash, checkpoint, scope, baseline metadata, and diff.
+- `agent_write_result`: task-run-only write observation, before/after hashes, rollback availability, and resulting diff after approval.
 - `llm_traces`: prompt previews, output previews, parse status, fallback state, and latency.
 - `context_summary`: file inclusion/edit diagnostics for planner and proposal calls, or per-section usage plus full/truncated/omitted/redacted state for iterative Agent calls.
 - `repository_map`: indexed file/symbol/relation counts and the task-ranked files, symbols, and dependencies.
@@ -595,10 +600,10 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 4. Click `Start Sandboxed Task`.
 5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
 6. At `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
-7. Select the approved files and click `Apply Proposal`.
-8. Leave `Auto-generate repairs` enabled to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
-9. When the run reaches `completed`, inspect the final working Diff.
-10. Optionally enter a feature branch name and click `Create Branch`.
+7. If Summary shows `Pending Runtime Approval`, inspect the exact action and click `Approve Exact Write` or `Reject`. This path writes only the managed worktree, observes the resulting diff, and stops at `review_pending`; post-write validation is a later controller milestone.
+8. If the run produced the compatible server-stored proposal flow instead, select approved files and click `Apply Proposal`; that existing path runs its configured validation commands.
+9. Leave `Auto-generate repairs` enabled for the compatible proposal path to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
+10. Inspect the final working Diff. Local branch creation remains available only after a fully completed task, not at `review_pending`.
 
 Each task receives its own detached managed worktree. RepoPilot automatically selects that path in the repository controls, so proposal application, validation, rollback, Git inspection, and diff display all target the sandbox rather than the source worktree.
 
@@ -606,7 +611,7 @@ Task runs are saved in the source repository's `.repopilot/memory.sqlite3`. Repo
 
 The advanced task settings include four execution limits: Agent steps, tool calls, validation commands, and elapsed seconds. Agent exploration consumes step and tool-call capacity. Applying an approved file and running a validation command also consume tool-call capacity. RepoPilot checks the remaining command and tool budget before writing, records elapsed usage, and preserves the proposal without applying it when the configured capacity is insufficient.
 
-Acceptance criteria are generated from the task, proposal file scope, and validation commands. After apply, the Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded. A missing automated validation command is shown as a manual-review recommendation rather than silently presented as automated proof.
+Acceptance criteria are generated from the task, proposal file scope, and validation commands. In the compatible proposal path, the Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded. The unified Runtime write path intentionally uses `review_pending` after write and diff observation because its validation loop has not been integrated yet.
 
 Existing UTF-8 proposal files are converted from full replacement content into exact-text structured hunks. Each patch carries the file's proposal-time SHA-256. If the file changes before approval, RepoPilot rejects the patch instead of overwriting the newer content. If a later file conflicts during a multi-file apply, earlier writes from that apply attempt are restored from the captured snapshots.
 

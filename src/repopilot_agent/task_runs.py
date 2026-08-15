@@ -30,6 +30,7 @@ TASK_RUN_STATUSES = {
     "exploring",
     "awaiting_approval",
     "applying",
+    "review_pending",
     "validating",
     "diagnosing",
     "replanning",
@@ -168,6 +169,16 @@ class TaskRun:
         data["can_resume"] = self.status in RESUMABLE_TASK_RUN_STATUSES and resume_plan.allowed
         data["can_cancel"] = self.status not in {"cancelled", "completed"}
         data["can_approve"] = self.status == "awaiting_approval" and bool(self.proposal_id)
+        pending_runtime_approval = (
+            self.result.get("agent_pending_approval")
+            if isinstance(self.result, dict)
+            else None
+        )
+        data["can_approve_runtime"] = bool(
+            self.status == "awaiting_approval"
+            and isinstance(pending_runtime_approval, dict)
+            and pending_runtime_approval.get("checkpoint")
+        )
         data["can_repair"] = self.status == "repair_pending"
         data["can_create_branch"] = self.status == "completed" and not self.delivery_branch
         data["execution_budget"] = execution_budget_state(self.execution_budget, self.execution_usage)
@@ -427,7 +438,14 @@ def request_task_run_cancel(task_run: TaskRun) -> TaskRun:
     if not task_run.resume_checkpoint:
         task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, task_run.status)
         task_run.resume_blocked_reason = blocked or None
-    if task_run.status in {"awaiting_approval", "repair_pending", "paused", "failed", "interrupted"}:
+    if task_run.status in {
+        "awaiting_approval",
+        "repair_pending",
+        "review_pending",
+        "paused",
+        "failed",
+        "interrupted",
+    }:
         update_task_run(
             task_run,
             "cancelled",

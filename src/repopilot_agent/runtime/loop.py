@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from ..models import RepoFile
+from ..patch_apply import FileRollbackSnapshot
 from ..repository_map import RepositoryMap
+from ..worktree_sandbox import WorktreeSandbox, require_managed_worktree
 from .approval import (
     DEFAULT_APPROVAL_TTL_SECONDS,
     MAX_APPROVAL_TTL_SECONDS,
@@ -55,6 +58,12 @@ class AgentRuntime:
         self.task = task
         self.policy = policy or RuntimePolicy.read_only()
         self.store = store or InMemoryRuntimeStore()
+        self.sandbox: WorktreeSandbox | None = None
+        if self.policy.requires_managed_worktree:
+            self.sandbox = require_managed_worktree(
+                repo_path,
+                worktree_root=self.policy.worktree_root or None,
+            )
         self.context = RuntimeToolContext(
             repo_path,
             task,
@@ -85,6 +94,46 @@ class AgentRuntime:
     @property
     def proposed_diff(self) -> str:
         return self.context.virtual_patches.current_diff()
+
+    def rollback_snapshots(self, action_id: str) -> list[FileRollbackSnapshot]:
+        """Load the latest durable rollback snapshot for one runtime action."""
+
+        for event in reversed(self.events):
+            if event.event_type != "rollback_snapshot_recorded":
+                continue
+            if event.action_id != action_id:
+                continue
+            raw_snapshots = event.payload.get("snapshots")
+            if not isinstance(raw_snapshots, list):
+                return []
+            snapshots: list[FileRollbackSnapshot] = []
+            for raw in raw_snapshots:
+                if not isinstance(raw, dict):
+                    continue
+                path = raw.get("path")
+                existed = raw.get("existed")
+                original_content = raw.get("original_content")
+                applied_content = raw.get("applied_content")
+                if (
+                    not isinstance(path, str)
+                    or not isinstance(existed, bool)
+                    or (
+                        original_content is not None
+                        and not isinstance(original_content, str)
+                    )
+                    or not isinstance(applied_content, str)
+                ):
+                    continue
+                snapshots.append(
+                    FileRollbackSnapshot(
+                        path=path,
+                        existed=existed,
+                        original_content=original_content,
+                        applied_content=applied_content,
+                    )
+                )
+            return snapshots
+        return []
 
     @property
     def pending_approval(self) -> dict:
@@ -275,13 +324,55 @@ class AgentRuntime:
         )
         return observation
 
+    def block_action_conflict(
+        self,
+        action: RuntimeAction,
+        reason: str,
+        *,
+        data: dict | None = None,
+    ) -> RuntimeObservation:
+        """Record a controller-level conflict without authorizing the action."""
+
+        self.start()
+        observation = RuntimeObservation(
+            action_id=action.action_id,
+            action_kind=action.kind,
+            status="conflict",
+            summary=reason,
+            data=dict(data or {}),
+            error=reason,
+        )
+        self.store.append_event(
+            self.run_id,
+            "action_conflict",
+            action=action,
+            payload={
+                "action": action.to_dict(),
+                "observation": observation.to_dict(),
+            },
+        )
+        return observation
+
     def start(self) -> None:
         if self._started:
             return
         self.store.append_event(
             self.run_id,
             "run_started",
-            payload={"task": self.task, "repo_path": str(self.context.repo_path)},
+            payload={
+                "task": self.task,
+                "repo_path": str(self.context.repo_path),
+                "execution_boundary": (
+                    {
+                        "kind": "managed_worktree",
+                        "source_repo": self.sandbox.source_repo,
+                        "path": self.sandbox.path,
+                        "head": self.sandbox.head,
+                    }
+                    if self.sandbox
+                    else {"kind": "repository"}
+                ),
+            },
         )
         self._started = True
 
@@ -504,8 +595,10 @@ class AgentRuntime:
             action=action,
             payload={"action": action.to_dict()},
         )
+        rollback_snapshots: tuple[FileRollbackSnapshot, ...] = ()
         try:
             tool_result = execute_runtime_tool(action, self.context)
+            rollback_snapshots = tool_result.rollback_snapshots
             observation = RuntimeObservation(
                 action_id=action.action_id,
                 action_kind=action.kind,
@@ -520,6 +613,16 @@ class AgentRuntime:
                 status="failed",
                 summary=f"Action {action.kind} failed.",
                 error=str(exc),
+            )
+        if rollback_snapshots:
+            self.store.append_event(
+                self.run_id,
+                "rollback_snapshot_recorded",
+                action=action,
+                payload={
+                    "snapshots": [asdict(snapshot) for snapshot in rollback_snapshots],
+                    "write_evidence": observation.data.get("write_evidence", []),
+                },
             )
         observation = self.store.complete(self.run_id, action, observation)
         self.store.append_event(

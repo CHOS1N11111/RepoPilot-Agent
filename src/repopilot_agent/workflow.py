@@ -56,6 +56,8 @@ def run_workflow(
     agent_run_id: str | None = None,
     agent_event_store: RuntimeEventStore | None = None,
     execution_budget: ExecutionBudget | None = None,
+    allow_agent_writes: bool = False,
+    managed_worktree_root: str | Path | None = None,
 ) -> WorkflowReport:
     started_at = time.monotonic()
     budget = execution_budget or ExecutionBudget(max_agent_steps=agent_max_steps)
@@ -78,6 +80,7 @@ def run_workflow(
     llm_traces: list[LLMCallTrace] = []
     llm_creation_error: LLMError | None = None
     agent_result: AgentLoopResult | None = None
+    agent_waiting_for_write = False
     if use_llm:
         if llm_client is None:
             try:
@@ -117,6 +120,13 @@ def run_workflow(
                         acceptance_criteria=agent_acceptance_criteria,
                         execution_budget=budget,
                         allow_user_questions=False,
+                        allow_write_actions=allow_agent_writes,
+                        managed_worktree_root=managed_worktree_root,
+                    )
+                    agent_waiting_for_write = bool(
+                        agent_result.pending_approval
+                        and agent_result.pending_approval.get("action_kind")
+                        in {"apply_patch", "edit_file"}
                     )
                     hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
                     repository_map_context = render_repository_map(
@@ -127,25 +137,38 @@ def run_workflow(
                 except LLMError:
                     if not allow_llm_fallback:
                         raise
-            plan, plan_metadata = create_plan_with_optional_llm(
-                task,
-                hits,
-                llm_client=llm_client,
-                allow_fallback=allow_llm_fallback,
-                traces=llm_traces,
-                memory_context=related_memory,
-                repository_map_context=repository_map_context,
-                agent_state_context=(
-                    render_agent_working_state(agent_result.working_state)
-                    if agent_result and agent_result.working_state
-                    else ""
-                ),
-            )
+            if agent_waiting_for_write:
+                plan = create_plan(task, hits, memory_context=related_memory)
+                plan_metadata = PlanMetadata(
+                    source="agent_runtime",
+                    model=getattr(llm_client, "model", llm_model),
+                )
+            else:
+                plan, plan_metadata = create_plan_with_optional_llm(
+                    task,
+                    hits,
+                    llm_client=llm_client,
+                    allow_fallback=allow_llm_fallback,
+                    traces=llm_traces,
+                    memory_context=related_memory,
+                    repository_map_context=repository_map_context,
+                    agent_state_context=(
+                        render_agent_working_state(agent_result.working_state)
+                        if agent_result and agent_result.working_state
+                        else ""
+                    ),
+                )
     else:
         plan = create_plan(task, hits, memory_context=related_memory)
         plan_metadata = PlanMetadata(source="rules")
 
-    if use_llm:
+    if agent_waiting_for_write:
+        patch_proposal = propose_patch(task, hits)
+        patch_proposal_metadata = PatchProposalMetadata(
+            source="agent_runtime",
+            model=getattr(llm_client, "model", llm_model),
+        )
+    elif use_llm:
         if llm_client is None:
             patch_proposal = propose_patch(task, hits)
             patch_proposal_metadata = PatchProposalMetadata(
@@ -172,7 +195,7 @@ def run_workflow(
     patch_proposal = _attach_validation_plan(root, patch_proposal)
     patch_proposal = _attach_safety_check(root, task, patch_proposal)
     patch_review = None
-    if use_llm and llm_client is not None:
+    if use_llm and llm_client is not None and not agent_waiting_for_write:
         patch_review = review_patch_with_optional_llm(
             task,
             patch_proposal,

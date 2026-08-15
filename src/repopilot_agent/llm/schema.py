@@ -34,6 +34,7 @@ ALLOWED_AGENT_DECISION_ACTIONS = {
     "ask_user",
     "finish",
 }
+AGENT_WRITE_ACTIONS = {"edit_file", "apply_patch"}
 AGENT_DECISION_KEYS = {
     "version",
     "rationale",
@@ -63,6 +64,7 @@ MAX_STATE_IDENTIFIER_CHARS = 100
 MAX_PROPOSE_PATCH_HUNKS = 20
 MAX_PROPOSE_PATCH_TEXT_CHARS = 12_000
 MAX_PROPOSE_PATCH_TOTAL_CHARS = 24_000
+MAX_EDIT_FILE_CONTENT_CHARS = 250_000
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -86,7 +88,11 @@ def parse_plan_steps_json(response: str) -> list[PlanStep]:
     return steps
 
 
-def parse_agent_decision_json(response: str) -> AgentDecision:
+def parse_agent_decision_json(
+    response: str,
+    *,
+    allowed_actions: set[str] | frozenset[str] | None = None,
+) -> AgentDecision:
     data = parse_json_object(response)
     _require_exact_keys(data, AGENT_DECISION_KEYS, "Agent decision")
     version = data.get("version")
@@ -116,7 +122,12 @@ def parse_agent_decision_json(response: str) -> AgentDecision:
         raise LLMError("Agent decision action must be an object.")
     _require_exact_keys(action, {"kind", "arguments"}, "Agent decision action")
     action_kind = action.get("kind")
-    if action_kind not in ALLOWED_AGENT_DECISION_ACTIONS:
+    active_actions = (
+        ALLOWED_AGENT_DECISION_ACTIONS
+        if allowed_actions is None
+        else set(allowed_actions)
+    )
+    if action_kind not in active_actions:
         raise LLMError(f"Invalid Agent decision action: {action_kind}")
     raw_arguments = action.get("arguments")
     if not isinstance(raw_arguments, dict):
@@ -421,58 +432,59 @@ def _parse_agent_decision_arguments(
         if not isinstance(staged, bool):
             raise LLMError("inspect_diff staged must be a boolean.")
         return {"staged": staged}
-    if action_kind == "propose_patch":
+    if action_kind in {"propose_patch", "apply_patch"}:
+        action_label = action_kind
         _require_exact_keys(
             arguments,
             {"path", "expected_sha256", "hunks"},
-            "propose_patch arguments",
+            f"{action_label} arguments",
         )
         path = _required_bounded_string(
             arguments,
             "path",
             MAX_STATE_ITEM_CHARS,
-            "propose_patch arguments",
+            f"{action_label} arguments",
         )
         expected_sha256 = arguments.get("expected_sha256")
         if not isinstance(expected_sha256, str) or not SHA256_PATTERN.fullmatch(
             expected_sha256
         ):
             raise LLMError(
-                "propose_patch expected_sha256 must be a 64-character SHA-256 hex digest."
+                f"{action_label} expected_sha256 must be a 64-character SHA-256 hex digest."
             )
         raw_hunks = arguments.get("hunks")
         if not isinstance(raw_hunks, list) or not raw_hunks:
-            raise LLMError("propose_patch hunks must be a non-empty list.")
+            raise LLMError(f"{action_label} hunks must be a non-empty list.")
         if len(raw_hunks) > MAX_PROPOSE_PATCH_HUNKS:
             raise LLMError(
-                f"propose_patch cannot contain more than {MAX_PROPOSE_PATCH_HUNKS} hunks."
+                f"{action_label} cannot contain more than {MAX_PROPOSE_PATCH_HUNKS} hunks."
             )
         hunks: list[dict] = []
         total_chars = 0
         for index, raw_hunk in enumerate(raw_hunks, start=1):
             if not isinstance(raw_hunk, dict):
-                raise LLMError(f"propose_patch hunk {index} must be an object.")
+                raise LLMError(f"{action_label} hunk {index} must be an object.")
             _reject_unknown_keys(
                 raw_hunk,
                 {"old_text", "new_text", "expected_occurrences"},
-                f"propose_patch hunk {index}",
+                f"{action_label} hunk {index}",
             )
             old_text = raw_hunk.get("old_text")
             new_text = raw_hunk.get("new_text")
             if not isinstance(old_text, str) or not old_text:
                 raise LLMError(
-                    f"propose_patch hunk {index} requires non-empty old_text."
+                    f"{action_label} hunk {index} requires non-empty old_text."
                 )
             if not isinstance(new_text, str):
                 raise LLMError(
-                    f"propose_patch hunk {index} requires new_text as a string."
+                    f"{action_label} hunk {index} requires new_text as a string."
                 )
             if (
                 len(old_text) > MAX_PROPOSE_PATCH_TEXT_CHARS
                 or len(new_text) > MAX_PROPOSE_PATCH_TEXT_CHARS
             ):
                 raise LLMError(
-                    f"propose_patch hunk text cannot exceed "
+                    f"{action_label} hunk text cannot exceed "
                     f"{MAX_PROPOSE_PATCH_TEXT_CHARS} characters."
                 )
             total_chars += len(old_text) + len(new_text)
@@ -483,7 +495,7 @@ def _parse_agent_decision_arguments(
                 or not 1 <= expected_occurrences <= 100
             ):
                 raise LLMError(
-                    "propose_patch expected_occurrences must be an integer from 1 to 100."
+                    f"{action_label} expected_occurrences must be an integer from 1 to 100."
                 )
             hunks.append(
                 {
@@ -494,13 +506,37 @@ def _parse_agent_decision_arguments(
             )
         if total_chars > MAX_PROPOSE_PATCH_TOTAL_CHARS:
             raise LLMError(
-                f"propose_patch hunk text exceeds the "
+                f"{action_label} hunk text exceeds the "
                 f"{MAX_PROPOSE_PATCH_TOTAL_CHARS}-character total limit."
             )
         return {
             "path": _normalize_agent_path(path),
             "expected_sha256": expected_sha256.lower(),
             "hunks": hunks,
+        }
+    if action_kind == "edit_file":
+        _require_exact_keys(
+            arguments,
+            {"path", "new_content"},
+            "edit_file arguments",
+        )
+        path = _required_bounded_string(
+            arguments,
+            "path",
+            MAX_STATE_ITEM_CHARS,
+            "edit_file arguments",
+        )
+        new_content = arguments.get("new_content")
+        if not isinstance(new_content, str):
+            raise LLMError("edit_file new_content must be a string.")
+        if len(new_content) > MAX_EDIT_FILE_CONTENT_CHARS:
+            raise LLMError(
+                "edit_file new_content cannot exceed "
+                f"{MAX_EDIT_FILE_CONTENT_CHARS} characters."
+            )
+        return {
+            "path": _normalize_agent_path(path),
+            "new_content": new_content,
         }
     if action_kind == "inspect_proposed_diff":
         _require_exact_keys(arguments, set(), "inspect_proposed_diff arguments")

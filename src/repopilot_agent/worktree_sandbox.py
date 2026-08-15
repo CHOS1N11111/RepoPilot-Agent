@@ -109,6 +109,39 @@ def list_worktree_sandboxes(
     ]
 
 
+def require_managed_worktree(
+    repo_path: str | Path,
+    *,
+    worktree_root: str | Path | None = None,
+) -> WorktreeSandbox:
+    """Return a sandbox only when the path is a registered managed worktree."""
+
+    target = _resolve_repository_root(repo_path)
+    managed_root = resolve_worktree_root(worktree_root)
+    worktrees = _list_all_worktrees(target, managed_root)
+    selected = next(
+        (item for item in worktrees if _same_path(item.path, target)),
+        None,
+    )
+    if selected is None:
+        raise WorktreeSandboxError(
+            f"Path is not a registered Git worktree: {target}"
+        )
+    if selected.primary:
+        raise WorktreeSandboxError(
+            "The primary Git worktree cannot be used for Agent writes."
+        )
+    if not selected.managed or not _is_relative_to(target, managed_root):
+        raise WorktreeSandboxError(
+            "Agent writes require a registered worktree inside RepoPilot's managed root."
+        )
+    if selected.prunable or not target.is_dir():
+        raise WorktreeSandboxError(
+            "The managed worktree is unavailable or marked prunable by Git."
+        )
+    return selected
+
+
 def remove_worktree_sandbox(
     repo_path: str | Path,
     worktree_path: str | Path,
