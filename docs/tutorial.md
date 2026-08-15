@@ -720,4 +720,4 @@ This tutorial follows a common open-source documentation pattern:
 - Show one complete path before explaining every option.
 - Add troubleshooting after the main workflow.
 
-Examples of this style can be found in the OpenAI Agents Python quickstart, the Hugging Face smolagents README, and the Microsoft AutoGen README.
+Examples of this split between a concise repository entry point and deeper documentation can be found in [Aider](https://github.com/Aider-AI/aider), [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent), [LangGraph](https://github.com/langchain-ai/langgraph), and [OpenHands](https://github.com/OpenHands/OpenHands).
