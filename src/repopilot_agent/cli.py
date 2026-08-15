@@ -483,8 +483,11 @@ def _print_report(report) -> None:
             print(f"  Open questions: {'; '.join(open_questions)}")
         if report.agent_state.get("expected_evidence"):
             print(f"  Expected evidence: {report.agent_state['expected_evidence']}")
-        if report.agent_state.get("stop_reason"):
-            print(f"  Stop reason: {report.agent_state['stop_reason']}")
+        stop_reason = report.agent_stop_reason or report.agent_state.get("stop_reason")
+        if stop_reason:
+            print(f"  Stop reason: {stop_reason}")
+        if report.agent_pending_question:
+            print(f"  Pending question: {report.agent_pending_question}")
     else:
         print("- No Agent working state was recorded.")
     print()

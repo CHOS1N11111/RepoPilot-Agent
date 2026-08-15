@@ -422,6 +422,8 @@ class WorkflowReport:
     agent_run_id: str | None = None
     agent_events: list[Any] = field(default_factory=list)
     agent_state: dict[str, Any] = field(default_factory=dict)
+    agent_stop_reason: str = ""
+    agent_pending_question: str = ""
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None

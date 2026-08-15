@@ -56,15 +56,18 @@ class AgentRuntimeTests(unittest.TestCase):
                 result.observations[1].data["sha256"],
                 hashlib.sha256("def parse(value):\n    return value\n".encode("utf-8")).hexdigest(),
             )
-            self.assertEqual([event.sequence for event in result.events], list(range(1, 9)))
+            self.assertEqual([event.sequence for event in result.events], list(range(1, 12)))
             self.assertEqual(
                 [event.event_type for event in result.events],
                 [
                     "run_started",
+                    "action_authorized",
                     "action_started",
                     "action_completed",
+                    "action_authorized",
                     "action_started",
                     "action_completed",
+                    "action_authorized",
                     "action_started",
                     "action_completed",
                     "run_stopped",
@@ -95,6 +98,10 @@ class AgentRuntimeTests(unittest.TestCase):
 
             self.assertEqual(waiting.status, "approval_required")
             self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+            self.assertNotIn(
+                "action_authorized",
+                [event.event_type for event in store.list_events("run-edit")],
+            )
 
             approved_runtime = AgentRuntime(
                 root,
@@ -232,6 +239,9 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertIn("+after", diff.data["diff"])
             self.assertEqual(question.status, "input_required")
             self.assertEqual(question.data["question"], "Should this change be applied?")
+            event_types = [event.event_type for event in runtime.events]
+            self.assertEqual(event_types.count("action_authorized"), 3)
+            self.assertIn("input_required", event_types)
 
     def test_edit_outside_allowed_path_is_denied_before_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -253,6 +263,10 @@ class AgentRuntimeTests(unittest.TestCase):
 
             self.assertEqual(observation.status, "policy_denied")
             self.assertFalse(Path(tmp, "other.txt").exists())
+            self.assertNotIn(
+                "action_authorized",
+                [event.event_type for event in runtime.events],
+            )
 
     def test_sqlite_store_persists_events_and_terminal_observation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

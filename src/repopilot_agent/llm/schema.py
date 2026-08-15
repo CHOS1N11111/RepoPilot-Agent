@@ -25,6 +25,8 @@ ALLOWED_AGENT_DECISION_ACTIONS = {
     "read_file",
     "inspect_repository_map",
     "inspect_git_status",
+    "inspect_diff",
+    "ask_user",
     "finish",
 }
 AGENT_DECISION_KEYS = {
@@ -136,6 +138,15 @@ def parse_agent_decision_json(response: str) -> AgentDecision:
         raise LLMError(
             "Agent decision cannot add and resolve the same open question."
         )
+    if action_kind == "ask_user":
+        if not user_question:
+            raise LLMError("ask_user decisions require a non-empty user_question.")
+        if _normalized_text(user_question) not in added_questions:
+            raise LLMError(
+                "ask_user decisions must add user_question to open questions."
+            )
+    elif user_question:
+        raise LLMError("user_question must be empty unless the action is ask_user.")
     return AgentDecision(
         version=version,
         rationale=rationale,
@@ -199,6 +210,15 @@ def _parse_agent_decision_arguments(
         return parsed
     if action_kind == "inspect_git_status":
         _require_exact_keys(arguments, set(), "inspect_git_status arguments")
+        return {}
+    if action_kind == "inspect_diff":
+        _reject_unknown_keys(arguments, {"staged"}, "inspect_diff arguments")
+        staged = arguments.get("staged", False)
+        if not isinstance(staged, bool):
+            raise LLMError("inspect_diff staged must be a boolean.")
+        return {"staged": staged}
+    if action_kind == "ask_user":
+        _require_exact_keys(arguments, set(), "ask_user arguments")
         return {}
     if action_kind == "finish":
         _require_exact_keys(arguments, {"selected_paths"}, "finish arguments")

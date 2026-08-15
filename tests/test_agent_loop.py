@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -13,6 +14,7 @@ from repopilot_agent.agent_loop import run_agent_loop, select_agent_hits
 from repopilot_agent.execution import AcceptanceCriterion, ExecutionBudget
 from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.models import MemoryContextItem, RepoFile, SearchHit
+from repopilot_agent.runtime import RuntimeObservation, STOPPING_OBSERVATION_STATUSES
 
 
 def decision(
@@ -26,6 +28,7 @@ def decision(
     open_questions: list[str] | None = None,
     resolved_questions: list[str] | None = None,
     finish_reason: str = "",
+    user_question: str = "",
 ) -> str:
     return json.dumps(
         {
@@ -40,7 +43,7 @@ def decision(
                 "resolve_open_questions": resolved_questions or [],
             },
             "finish_reason": finish_reason,
-            "user_question": "",
+            "user_question": user_question,
         }
     )
 
@@ -173,6 +176,11 @@ class AgentLoopTests(unittest.TestCase):
             ["main.py matched the parse search."],
         )
         self.assertEqual(result.steps[2].finish_reason, result.summary)
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertEqual(result.pending_question, "")
+        event_types = [event.event_type for event in result.events]
+        self.assertEqual(event_types.count("decision_recorded"), 3)
+        self.assertEqual(event_types.count("action_authorized"), 3)
         state_events = [
             event for event in result.events if event.event_type == "working_state_updated"
         ]
@@ -251,6 +259,188 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.working_state.selected_paths, ["README.md"])
         self.assertEqual(result.working_state.status, "stopped")
         self.assertEqual(result.working_state.stop_reason, "step_limit")
+        self.assertEqual(result.stop_reason, "step_limit")
+
+    def test_agent_loop_inspects_diff_through_the_unified_runtime_cycle(self) -> None:
+        client = FakeLLMClient(
+            [
+                decision(
+                    "inspect_diff",
+                    {"staged": True},
+                    "Inspect the staged implementation change.",
+                    "A bounded staged diff.",
+                    focus="Review staged changes.",
+                    findings=["A staged change needs inspection."],
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["main.py"]},
+                    "The staged change is understood.",
+                    "A completed finish observation.",
+                    focus="Summarize the staged change.",
+                    finish_reason="The staged change updates main.py.",
+                ),
+            ]
+        )
+        files = [RepoFile(Path("main.py"), "main.py", 12, "python", "value = 2\n")]
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "repopilot_agent.runtime.tools.get_git_diff",
+            return_value="diff --git a/main.py b/main.py\n+value = 2",
+        ):
+            result = run_agent_loop(
+                "review staged change",
+                tmp,
+                files,
+                [],
+                client,
+                max_steps=2,
+            )
+
+        self.assertEqual([step.action for step in result.steps], ["inspect_diff", "finish"])
+        self.assertIn("Staged diff", result.steps[0].observation)
+        self.assertIn("+value = 2", result.steps[0].observation)
+        self.assertEqual(result.stop_reason, "finished")
+        event_types = [event.event_type for event in result.events]
+        self.assertEqual(event_types.count("decision_recorded"), 2)
+        self.assertEqual(event_types.count("action_authorized"), 2)
+        self.assertEqual(event_types.count("action_started"), 2)
+        self.assertEqual(event_types.count("action_completed"), 2)
+
+    def test_agent_loop_stops_and_exposes_a_pending_user_question(self) -> None:
+        question = "Which parser behavior should remain backward compatible?"
+        client = FakeLLMClient(
+            [
+                decision(
+                    "ask_user",
+                    {},
+                    "The repository does not define the compatibility requirement.",
+                    "A user-provided compatibility requirement.",
+                    focus="Clarify parser compatibility.",
+                    open_questions=[question],
+                    user_question=question,
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_agent_loop(
+                "change parser behavior",
+                tmp,
+                [],
+                [],
+                client,
+                max_steps=3,
+                allow_user_questions=True,
+            )
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(result.stop_reason, "input_required")
+        self.assertEqual(result.pending_question, question)
+        self.assertEqual(result.steps[0].user_question, question)
+        self.assertEqual(result.working_state.status, "waiting")
+        self.assertEqual(result.working_state.phase, "input")
+        self.assertEqual(result.working_state.stop_reason, "input_required")
+        self.assertEqual(result.working_state.open_questions, [question])
+        self.assertEqual(
+            [event.event_type for event in result.events],
+            [
+                "run_started",
+                "working_state_updated",
+                "decision_recorded",
+                "action_authorized",
+                "input_required",
+                "working_state_updated",
+                "run_stopped",
+            ],
+        )
+
+    def test_agent_loop_stops_after_a_failed_tool_observation(self) -> None:
+        client = FakeLLMClient(
+            [
+                decision(
+                    "inspect_diff",
+                    {},
+                    "Inspect the current working-tree changes.",
+                    "A bounded working-tree diff.",
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": []},
+                    "This response must not be consumed.",
+                    "A finish observation.",
+                    finish_reason="This response must not be consumed.",
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "repopilot_agent.runtime.tools.get_git_diff",
+            side_effect=RuntimeError("diff unavailable"),
+        ):
+            result = run_agent_loop(
+                "inspect changes",
+                tmp,
+                [],
+                [],
+                client,
+                max_steps=2,
+            )
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(result.stop_reason, "failed")
+        self.assertIn("diff unavailable", result.summary)
+        self.assertEqual(result.working_state.status, "failed")
+
+    def test_agent_loop_stops_on_every_runtime_stopping_status(self) -> None:
+        for status in sorted(STOPPING_OBSERVATION_STATUSES):
+            with self.subTest(status=status):
+                client = FakeLLMClient(
+                    [
+                        decision(
+                            "search_files",
+                            {"query": "parser"},
+                            "Search for parser evidence.",
+                            "Repository paths related to parser.",
+                        ),
+                        decision(
+                            "finish",
+                            {"selected_paths": []},
+                            "This response must not be consumed.",
+                            "A finish observation.",
+                            finish_reason="This response must not be consumed.",
+                        ),
+                    ]
+                )
+                observation = RuntimeObservation(
+                    action_id="agent-step-1",
+                    action_kind="search_files",
+                    status=status,
+                    summary=f"Stopped with {status}.",
+                    data={"question": "What behavior is required?"}
+                    if status == "input_required"
+                    else {},
+                    error=f"Stopped with {status}."
+                    if status != "input_required"
+                    else None,
+                )
+
+                with tempfile.TemporaryDirectory() as tmp, patch(
+                    "repopilot_agent.agent_loop.AgentRuntime.execute",
+                    return_value=observation,
+                ):
+                    result = run_agent_loop(
+                        "inspect parser",
+                        tmp,
+                        [],
+                        [],
+                        client,
+                        max_steps=2,
+                    )
+
+                self.assertEqual(len(client.calls), 1)
+                self.assertEqual(result.stop_reason, status)
+                self.assertEqual(result.working_state.stop_reason, status)
 
 
 if __name__ == "__main__":

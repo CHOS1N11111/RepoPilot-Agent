@@ -4,6 +4,7 @@ from .loop import AgentRuntime
 from .models import (
     READ_ONLY_ACTIONS,
     SIDE_EFFECT_ACTIONS,
+    STOPPING_OBSERVATION_STATUSES,
     SUPPORTED_ACTIONS,
     RuntimeAction,
     RuntimeEvent,
@@ -40,6 +41,7 @@ __all__ = [
     "RuntimePolicy",
     "RuntimeRunResult",
     "SIDE_EFFECT_ACTIONS",
+    "STOPPING_OBSERVATION_STATUSES",
     "SQLiteRuntimeStore",
     "SUPPORTED_ACTIONS",
     "advance_agent_working_state",

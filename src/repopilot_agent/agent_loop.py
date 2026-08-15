@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .agent_context import AgentContextPacket, build_agent_context_packet
@@ -33,6 +33,7 @@ from .runtime import (
     RuntimeEvent,
     RuntimeEventStore,
     RuntimePolicy,
+    STOPPING_OBSERVATION_STATUSES,
     advance_agent_working_state,
     create_agent_working_state,
     stop_agent_working_state,
@@ -51,6 +52,8 @@ class AgentLoopResult:
     runtime_run_id: str = ""
     events: list[RuntimeEvent] = field(default_factory=list)
     working_state: AgentWorkingState | None = None
+    stop_reason: str = ""
+    pending_question: str = ""
 
 
 def run_agent_loop(
@@ -68,6 +71,7 @@ def run_agent_loop(
     current_diff: str = "",
     acceptance_criteria: list[AcceptanceCriterion] | None = None,
     execution_budget: ExecutionBudget | None = None,
+    allow_user_questions: bool = True,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -77,7 +81,8 @@ def run_agent_loop(
     steps: list[AgentStep] = []
     selected_paths: list[str] = []
     summary = ""
-    finished = False
+    stop_reason = ""
+    pending_question = ""
     loop_started_at = time.monotonic()
     loop_budget = execution_budget or ExecutionBudget(
         max_agent_steps=max_steps,
@@ -88,11 +93,17 @@ def run_agent_loop(
         loop_budget.max_agent_steps,
         loop_budget.max_tool_calls,
     )
+    runtime_policy = RuntimePolicy.read_only()
+    if not allow_user_questions:
+        runtime_policy = replace(
+            runtime_policy,
+            allowed_actions=runtime_policy.allowed_actions - {"ask_user"},
+        )
     runtime = AgentRuntime(
         root,
         task,
         run_id=runtime_run_id,
-        policy=RuntimePolicy.read_only(),
+        policy=runtime_policy,
         store=runtime_store,
         files=files,
         repository_map=repository_map,
@@ -134,8 +145,10 @@ def run_agent_loop(
                 max_steps,
                 llm_client,
                 traces,
+                allow_user_questions,
             )
             runtime_action = _to_runtime_action(decision, step_number)
+            runtime.record_decision(runtime_action, _decision_record(decision))
             runtime_observation = runtime.execute(runtime_action)
             selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
             working_state = advance_agent_working_state(
@@ -147,8 +160,6 @@ def run_agent_loop(
                 expected_evidence=decision.expected_evidence,
             )
             runtime.record_working_state(working_state)
-            if runtime_observation.status in {"approval_required", "policy_denied", "recovery_required"}:
-                raise LLMError(runtime_observation.error or runtime_observation.summary)
             observation = _format_runtime_observation(runtime_observation)
             tool_input = _runtime_tool_input(runtime_action)
             agent_step = AgentStep(
@@ -164,13 +175,23 @@ def run_agent_loop(
                 user_question=decision.user_question,
             )
             steps.append(agent_step)
+            if runtime_observation.status in STOPPING_OBSERVATION_STATUSES:
+                stop_reason = runtime_observation.status
+                summary = runtime_observation.error or runtime_observation.summary
+                if stop_reason == "input_required":
+                    pending_question = str(
+                        runtime_observation.data.get("question")
+                        or decision.user_question
+                        or runtime_observation.summary
+                    )
+                break
             if decision.action_kind == "finish" and runtime_observation.status == "completed":
                 summary = str(
                     runtime_observation.data.get("summary")
                     or decision.finish_reason
                     or observation
                 )
-                finished = True
+                stop_reason = "finished"
                 break
     except Exception as exc:
         if working_state.stop_reason is None:
@@ -183,9 +204,10 @@ def run_agent_loop(
         selected_paths = _merge_paths([], [step.tool_input for step in steps if step.action == "read_file"], by_path)
     if not selected_paths:
         selected_paths = [hit.path for hit in initial_hits[:MAX_SEARCH_RESULTS] if hit.path in by_path]
+    if not stop_reason:
+        stop_reason = "step_limit"
     if not summary:
         summary = "Agent exploration reached the step limit; selected the best observed files."
-    stop_reason = "finished" if finished else "step_limit"
     if working_state.stop_reason != stop_reason or working_state.selected_paths != selected_paths:
         working_state = stop_agent_working_state(
             working_state,
@@ -201,6 +223,8 @@ def run_agent_loop(
         runtime_run_id=runtime.run_id,
         events=runtime.events,
         working_state=working_state,
+        stop_reason=stop_reason,
+        pending_question=pending_question,
     )
 
 
@@ -248,6 +272,7 @@ def _choose_next_decision(
     max_steps: int,
     llm_client: LLMClient,
     traces: list[LLMCallTrace] | None,
+    allow_user_questions: bool,
 ) -> AgentDecision:
     return traced_llm_json_call(
         f"agent_step_{step_number}",
@@ -261,6 +286,7 @@ def _choose_next_decision(
                     context_packet.text,
                     step_number,
                     max_steps,
+                    allow_user_questions=allow_user_questions,
                 ),
             ),
         ],
@@ -274,6 +300,8 @@ def _to_runtime_action(decision: AgentDecision, step_number: int) -> RuntimeActi
     arguments = dict(decision.action_arguments)
     if decision.action_kind == "finish":
         arguments["summary"] = decision.finish_reason
+    elif decision.action_kind == "ask_user":
+        arguments["question"] = decision.user_question
     return RuntimeAction(
         kind=decision.action_kind,
         arguments=arguments,
@@ -281,6 +309,21 @@ def _to_runtime_action(decision: AgentDecision, step_number: int) -> RuntimeActi
         action_id=f"explore-{step_number}",
         idempotency_key=f"explore-step-{step_number}",
     )
+
+
+def _decision_record(decision: AgentDecision) -> dict:
+    return {
+        "version": decision.version,
+        "rationale": decision.rationale,
+        "action": {
+            "kind": decision.action_kind,
+            "arguments": dict(decision.action_arguments),
+        },
+        "expected_evidence": decision.expected_evidence,
+        "state_update": asdict(decision.state_update),
+        "finish_reason": decision.finish_reason,
+        "user_question": decision.user_question,
+    }
 
 
 def _format_runtime_observation(observation) -> str:
@@ -328,6 +371,10 @@ def _format_runtime_observation(observation) -> str:
                 change_lines,
             ]
         )
+    if observation.action_kind == "inspect_diff":
+        diff = str(observation.data.get("diff") or "").strip()
+        label = "Staged diff" if observation.data.get("staged") else "Working-tree diff"
+        return f"{label}:\n{_clip(diff, MAX_FILE_OBSERVATION_CHARS) if diff else '(empty)'}"
     return observation.summary
 
 
@@ -340,6 +387,10 @@ def _runtime_tool_input(action: RuntimeAction) -> str:
         return str(action.arguments.get("query") or "current task")
     if action.kind == "inspect_git_status":
         return "git status"
+    if action.kind == "inspect_diff":
+        return "staged diff" if action.arguments.get("staged") else "working-tree diff"
+    if action.kind == "ask_user":
+        return str(action.arguments.get("question") or "")
     return action.kind
 
 

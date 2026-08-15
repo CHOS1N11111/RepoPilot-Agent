@@ -74,6 +74,28 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         self.assertEqual(repository_map.action_arguments, {"query": "parse", "limit": 8})
         self.assertEqual(git_status.action_arguments, {})
 
+    def test_diff_and_user_question_arguments_are_typed(self) -> None:
+        unstaged_diff = parse_agent_decision_json(
+            json.dumps(decision_payload("inspect_diff", {}))
+        )
+        staged_diff = parse_agent_decision_json(
+            json.dumps(decision_payload("inspect_diff", {"staged": True}))
+        )
+        ask_payload = decision_payload("ask_user", {})
+        ask_payload["user_question"] = "Which behavior should remain compatible?"
+        ask_payload["state_update"]["add_open_questions"] = [
+            "Which behavior should remain compatible?"
+        ]
+        ask_user = parse_agent_decision_json(json.dumps(ask_payload))
+
+        self.assertEqual(unstaged_diff.action_arguments, {"staged": False})
+        self.assertEqual(staged_diff.action_arguments, {"staged": True})
+        self.assertEqual(ask_user.action_arguments, {})
+        self.assertEqual(
+            ask_user.user_question,
+            "Which behavior should remain compatible?",
+        )
+
     def test_rejects_unknown_missing_and_invalid_contract_fields(self) -> None:
         cases: list[tuple[str, dict]] = []
 
@@ -105,6 +127,12 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         invalid_limit = decision_payload("inspect_repository_map", {"limit": 0})
         cases.append(("invalid map limit", invalid_limit))
 
+        invalid_staged = decision_payload("inspect_diff", {"staged": "yes"})
+        cases.append(("invalid staged flag", invalid_staged))
+
+        unknown_diff_argument = decision_payload("inspect_diff", {"path": "main.py"})
+        cases.append(("unknown diff argument", unknown_diff_argument))
+
         for label, payload in cases:
             with self.subTest(label=label), self.assertRaises(LLMError):
                 parse_agent_decision_json(json.dumps(payload))
@@ -125,11 +153,22 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             f"Finding {index}" for index in range(13)
         ]
 
+        missing_user_question = decision_payload("ask_user", {})
+
+        untracked_user_question = decision_payload("ask_user", {})
+        untracked_user_question["user_question"] = "Which behavior is expected?"
+
+        unexpected_user_question = decision_payload()
+        unexpected_user_question["user_question"] = "Should I continue?"
+
         for payload in [
             missing_finish_reason,
             unexpected_finish_reason,
             question_conflict,
             excessive_findings,
+            missing_user_question,
+            untracked_user_question,
+            unexpected_user_question,
         ]:
             with self.assertRaises(LLMError):
                 parse_agent_decision_json(json.dumps(payload))

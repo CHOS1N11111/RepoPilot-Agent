@@ -67,6 +67,19 @@ class AgentRuntime:
             payload={"working_state": state.to_dict()},
         )
 
+    def record_decision(
+        self,
+        action: RuntimeAction,
+        decision: dict,
+    ) -> RuntimeEvent:
+        self.start()
+        return self.store.append_event(
+            self.run_id,
+            "decision_recorded",
+            action=action,
+            payload={"decision": dict(decision), "action": action.to_dict()},
+        )
+
     def start(self) -> None:
         if self._started:
             return
@@ -119,6 +132,12 @@ class AgentRuntime:
                 payload={"action": action.to_dict(), "observation": observation.to_dict()},
             )
             return observation
+        self.store.append_event(
+            self.run_id,
+            "action_authorized",
+            action=action,
+            payload={"action": action.to_dict(), "reason": reason},
+        )
         if action.kind == "ask_user":
             question = str(action.arguments.get("question") or "").strip()
             if not question:

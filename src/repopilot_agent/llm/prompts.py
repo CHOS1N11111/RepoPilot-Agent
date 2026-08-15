@@ -37,19 +37,22 @@ AGENT_SYSTEM_PROMPT = (
     "You are RepoPilot Agent's read-only repository exploration loop. "
     "Choose exactly one next decision and return only JSON with this exact shape: "
     '{"version":2,"rationale":"why this action is useful",'
-    '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|finish",'
+    '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|ask_user|finish",'
     '"arguments":{}},"expected_evidence":"what result would make this action useful",'
     '"state_update":{"focus":"current investigation focus","add_findings":[],'
     '"add_open_questions":[],"resolve_open_questions":[]},'
     '"finish_reason":"","user_question":""}. '
     "Action arguments must be exactly one of: search_files {query}; read_file {path}; "
     "inspect_repository_map with optional {query, limit}; inspect_git_status {}; "
+    "inspect_diff with optional {staged}; ask_user {}; "
     "finish {selected_paths}. "
     "Use only read-only actions. Do not propose file edits here. "
     "Always provide non-empty rationale and expected_evidence. "
     "Only add findings already supported by previous observations; expected future tool output is not a finding. "
     "Use finish_reason only for finish, and set it to a non-empty completion summary. "
-    "Keep finish_reason empty for all other actions. user_question is reserved for a future interaction loop, so keep it empty. "
+    "Keep finish_reason empty for all other actions. For ask_user, provide a non-empty user_question "
+    "and add exactly that question to state_update.add_open_questions. Keep user_question empty for every other action. "
+    "Only choose actions listed as available in the user prompt. "
     "For normal code, documentation, or explanation tasks, start by searching or reading files. "
     "Use inspect_git_status only when the task is about Git state, diffs, branches, delivery, or local changes. "
     "Treat search results as candidates; read important files before selecting them. "
@@ -149,24 +152,35 @@ def build_agent_prompt(
     managed_context: str,
     step_number: int,
     max_steps: int,
+    allow_user_questions: bool = False,
 ) -> str:
+    actions = [
+        "- search_files: find repo files by task-focused query.",
+        "- read_file: inspect one repo-relative file returned by search or initial context.",
+        "- inspect_repository_map: inspect task-relevant symbols, dependencies, and source/test relations.",
+        "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
+        "- inspect_diff: inspect the current working-tree or staged diff.",
+    ]
+    if allow_user_questions:
+        actions.append(
+            "- ask_user: pause when essential information cannot be obtained from repository tools."
+        )
+    actions.append("- finish: stop exploration and select the files most useful for planning/proposal.")
     return "\n".join(
         [
             f"Task: {task}",
             f"Step: {step_number} of {max_steps}",
             "",
             "Available read-only actions:",
-            "- search_files: find repo files by task-focused query.",
-            "- read_file: inspect one repo-relative file returned by search or initial context.",
-            "- inspect_repository_map: inspect task-relevant symbols, dependencies, and source/test relations.",
-            "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
-            "- finish: stop exploration and select the files most useful for planning/proposal.",
+            *actions,
             "",
             "Managed context packet:",
             managed_context or "No managed context is available.",
             "",
             "Choose the single next decision that will most improve repository understanding. "
             "For non-Git tasks, prefer search_files or read_file before inspect_git_status. "
+            "Use inspect_diff when exact changed lines matter. Ask the user only when the answer is essential "
+            "and cannot be obtained with the available repository tools. "
             "Prefer finish if the useful files are already known. Update focus and open questions "
             "conservatively, and only record findings supported by previous observations.",
         ]

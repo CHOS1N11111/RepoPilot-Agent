@@ -110,6 +110,7 @@ def run_workflow(
                         current_diff=current_diff,
                         acceptance_criteria=agent_acceptance_criteria,
                         execution_budget=budget,
+                        allow_user_questions=False,
                     )
                     hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
                     repository_map_context = render_repository_map(
@@ -210,6 +211,8 @@ def run_workflow(
             if agent_result and agent_result.working_state
             else {}
         ),
+        agent_stop_reason=agent_result.stop_reason if agent_result else "",
+        agent_pending_question=agent_result.pending_question if agent_result else "",
         llm_traces=llm_traces,
         validation=validation,
         validation_feedback=validation_feedback,
