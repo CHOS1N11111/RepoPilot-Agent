@@ -9,7 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.memory import MemoryStore
-from repopilot_agent.models import AgentStateUpdate
+from repopilot_agent.models import (
+    AgentAcceptanceUpdate,
+    AgentPlanUpdate,
+    AgentStateUpdate,
+)
 from repopilot_agent.runtime import (
     AGENT_WORKING_STATE_VERSION,
     MAX_RECENT_OBSERVATIONS,
@@ -18,7 +22,10 @@ from repopilot_agent.runtime import (
     RuntimeObservation,
     SQLiteRuntimeStore,
     advance_agent_working_state,
+    agent_completion_blockers,
+    agent_completion_ready,
     agent_working_state_from_record,
+    apply_agent_state_update,
     create_agent_working_state,
     latest_agent_working_state,
     stop_agent_working_state,
@@ -143,6 +150,168 @@ class AgentWorkingStateTests(unittest.TestCase):
         self.assertEqual(restored.findings, [])
         self.assertEqual(restored.open_questions, [])
         self.assertEqual(restored.expected_evidence, "")
+        self.assertEqual(restored.plan, [])
+        self.assertEqual(restored.acceptance_criteria, [])
+
+    def test_plan_and_acceptance_updates_require_completed_observation_evidence(self) -> None:
+        state = create_agent_working_state("inspect repository")
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(kind="read_file", action_id="read-1"),
+            RuntimeObservation(
+                action_id="read-1",
+                action_kind="read_file",
+                status="completed",
+                summary="Read README.md.",
+            ),
+            selected_paths=["README.md"],
+        )
+        state = apply_agent_state_update(
+            state,
+            AgentStateUpdate(
+                plan_updates=[
+                    AgentPlanUpdate(
+                        step_id="investigate_repository",
+                        title="Investigate repository evidence",
+                        detail="Read repository documentation.",
+                        status="completed",
+                        evidence_action_ids=["read-1"],
+                    )
+                ],
+                acceptance_updates=[
+                    AgentAcceptanceUpdate(
+                        criterion_id="analysis_complete",
+                        kind="analysis",
+                        description="Repository evidence addresses the task.",
+                        required=False,
+                        evidence_action_ids=["read-1"],
+                        evidence_summary="README.md was read successfully.",
+                    )
+                ],
+            ),
+        )
+
+        self.assertTrue(agent_completion_ready(state))
+        self.assertEqual(agent_completion_blockers(state), [])
+        self.assertEqual(state.plan[0].status, "completed")
+        self.assertEqual(state.plan[0].evidence_action_ids, ["read-1"])
+        self.assertEqual(state.acceptance_criteria[0].status, "passed")
+        self.assertTrue(state.acceptance_criteria[0].required)
+        self.assertEqual(
+            state.acceptance_criteria[0].evidence_action_ids,
+            ["read-1"],
+        )
+
+    def test_unknown_or_finish_observations_cannot_be_completion_evidence(self) -> None:
+        state = create_agent_working_state("inspect repository")
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(kind="finish", action_id="finish-1"),
+            RuntimeObservation(
+                action_id="finish-1",
+                action_kind="finish",
+                status="completed",
+                summary="Unsupported finish attempt.",
+            ),
+            selected_paths=[],
+        )
+
+        for action_id in ["missing-action", "finish-1"]:
+            with self.subTest(action_id=action_id), self.assertRaises(ValueError):
+                apply_agent_state_update(
+                    state,
+                    AgentStateUpdate(
+                        plan_updates=[
+                            AgentPlanUpdate(
+                                step_id="investigate_repository",
+                                title="Investigate repository evidence",
+                                detail="Inspect repository evidence.",
+                                status="completed",
+                                evidence_action_ids=[action_id],
+                            )
+                        ]
+                    ),
+                )
+
+    def test_search_candidates_are_not_completion_evidence(self) -> None:
+        state = create_agent_working_state("inspect repository")
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(kind="search_files", action_id="search-1"),
+            RuntimeObservation(
+                action_id="search-1",
+                action_kind="search_files",
+                status="completed",
+                summary="Found README.md.",
+            ),
+            selected_paths=[],
+        )
+
+        with self.assertRaises(ValueError):
+            apply_agent_state_update(
+                state,
+                AgentStateUpdate(
+                    acceptance_updates=[
+                        AgentAcceptanceUpdate(
+                            criterion_id="analysis_complete",
+                            kind="analysis",
+                            description="Repository evidence addresses the task.",
+                            required=True,
+                            evidence_action_ids=["search-1"],
+                            evidence_summary="README.md appeared in search.",
+                        )
+                    ]
+                ),
+            )
+
+    def test_state_api_and_record_restore_reject_unsupported_completion(self) -> None:
+        state = create_agent_working_state("inspect repository")
+
+        with self.assertRaises(ValueError):
+            apply_agent_state_update(
+                state,
+                AgentStateUpdate(
+                    plan_updates=[
+                        AgentPlanUpdate(
+                            step_id="investigate_repository",
+                            title="Investigate repository evidence",
+                            detail="Inspect repository evidence.",
+                            status="completed",
+                            evidence_action_ids=[],
+                        )
+                    ]
+                ),
+            )
+
+        restored = agent_working_state_from_record(
+            {
+                **state.to_dict(),
+                "plan": [
+                    {
+                        "step_id": "unsupported",
+                        "title": "Unsupported plan",
+                        "detail": "No evidence exists.",
+                        "status": "completed",
+                        "evidence_action_ids": [],
+                    }
+                ],
+                "acceptance_criteria": [
+                    {
+                        "criterion_id": "unsupported",
+                        "kind": "analysis",
+                        "description": "Unsupported acceptance claim.",
+                        "required": True,
+                        "status": "passed",
+                        "evidence_action_ids": [],
+                        "evidence_summary": "",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(restored.plan[0].status, "pending")
+        self.assertEqual(restored.acceptance_criteria[0].status, "pending")
+        self.assertFalse(agent_completion_ready(restored))
 
     def test_invalid_latest_snapshot_is_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

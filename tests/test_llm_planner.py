@@ -29,6 +29,8 @@ def iterative_decision(
     open_questions: list[str] | None = None,
     resolved_questions: list[str] | None = None,
     finish_reason: str = "",
+    plan_updates: list[dict] | None = None,
+    acceptance_updates: list[dict] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -41,6 +43,8 @@ def iterative_decision(
                 "add_findings": findings or [],
                 "add_open_questions": open_questions or [],
                 "resolve_open_questions": resolved_questions or [],
+                "plan_updates": plan_updates or [],
+                "acceptance_updates": acceptance_updates or [],
             },
             "finish_reason": finish_reason,
             "user_question": "",
@@ -386,6 +390,25 @@ class LLMPlannerTests(unittest.TestCase):
                     focus="Prepare the implementation plan.",
                     findings=["main.py contains the parser implementation."],
                     finish_reason="main.py is the implementation target.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read the parser implementation.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-2"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the parser task.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-2"],
+                            "evidence_summary": "main.py was read successfully.",
+                        }
+                    ],
                 ),
                 '{"steps":[{"title":"Inspect parser","detail":"Review main.py parser behavior."}]}',
                 '{"objective":"Fix parser failure safely","files":[{"path":"main.py","change_type":"bugfix",'
@@ -433,6 +456,14 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.agent_state["status"], "completed")
         self.assertEqual(report.agent_stop_reason, "finished")
         self.assertEqual(report.agent_pending_question, "")
+        self.assertTrue(report.agent_completion_ready)
+        self.assertEqual(report.agent_completion_blockers, [])
+        self.assertEqual(report.agent_state["version"], 3)
+        self.assertEqual(report.agent_state["plan"][0]["status"], "completed")
+        self.assertEqual(
+            report.agent_state["acceptance_criteria"][0]["status"],
+            "passed",
+        )
         self.assertEqual(report.agent_state["iteration"], 3)
         self.assertEqual(report.agent_state["selected_paths"], ["main.py"])
         self.assertEqual(report.agent_state["focus"], "Prepare the implementation plan.")
@@ -459,6 +490,13 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("function parse", client.calls[0][1].content)
         self.assertIn("- inspect_diff:", client.calls[0][1].content)
         self.assertNotIn("- ask_user:", client.calls[0][1].content)
+        self.assertIn("Implementation plan:", client.calls[0][1].content)
+        self.assertIn("Acceptance state:", client.calls[0][1].content)
+        self.assertIn("explore-1", client.calls[1][1].content)
+        self.assertIn("Completion ready: no", client.calls[1][1].content)
+        self.assertIn("Agent plan and acceptance handoff:", client.calls[3][1].content)
+        self.assertIn("Completion ready: yes", client.calls[3][1].content)
+        self.assertIn("evidence: explore-2", client.calls[3][1].content.lower())
         self.assertIn("Agent context:", report.llm_traces[0].context_summary)
         self.assertIn("remaining_budget", report.llm_traces[0].context_summary)
         self.assertEqual(report.execution_budget["limits"]["max_agent_steps"], 3)

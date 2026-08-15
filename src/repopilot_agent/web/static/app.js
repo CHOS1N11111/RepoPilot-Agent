@@ -1233,7 +1233,9 @@ function renderReport(report, payload) {
   $("agentWorkingState").innerHTML = renderAgentWorkingState(
     report.agent_state,
     report.agent_stop_reason,
-    report.agent_pending_question
+    report.agent_pending_question,
+    report.agent_completion_ready,
+    report.agent_completion_blockers
   );
   $("runtimeEventList").innerHTML = renderRuntimeEvents(report.agent_events || [], report.agent_run_id);
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
@@ -1393,6 +1395,10 @@ function renderAgentSteps(steps) {
         ...(update.add_findings || []).map((value) => `finding +: ${value}`),
         ...(update.add_open_questions || []).map((value) => `question +: ${value}`),
         ...(update.resolve_open_questions || []).map((value) => `question resolved: ${value}`),
+        ...(update.plan_updates || []).map((value) => `plan ${value.step_id}: ${value.status}`),
+        ...(update.acceptance_updates || []).map((value) => (
+          `acceptance ${value.criterion_id}: ${(value.evidence_action_ids || []).length ? "evidence attached" : "pending"}`
+        )),
       ].filter(Boolean);
       return `<div class="item">
       <div class="item-title">Step ${escapeHtml(step.order)}: ${escapeHtml(step.action)}</div>
@@ -1409,7 +1415,13 @@ function renderAgentSteps(steps) {
     .join("");
 }
 
-function renderAgentWorkingState(agentState, stopReason = "", pendingQuestion = "") {
+function renderAgentWorkingState(
+  agentState,
+  stopReason = "",
+  pendingQuestion = "",
+  completionReady = null,
+  completionBlockers = []
+) {
   if (!agentState || !agentState.objective) {
     return item("No Agent working state was recorded for this workflow.");
   }
@@ -1424,9 +1436,41 @@ function renderAgentWorkingState(agentState, stopReason = "", pendingQuestion = 
   const openQuestions = Array.isArray(agentState.open_questions)
     ? agentState.open_questions
     : [];
+  const plan = Array.isArray(agentState.plan) ? agentState.plan : [];
+  const acceptance = Array.isArray(agentState.acceptance_criteria)
+    ? agentState.acceptance_criteria
+    : [];
+  const inferredBlockers = [
+    ...plan
+      .filter((value) => value.status !== "completed")
+      .map((value) => `plan:${value.step_id}`),
+    ...acceptance
+      .filter((value) => value.required !== false && value.status !== "passed")
+      .map((value) => `acceptance:${value.criterion_id}`),
+  ];
+  const resolvedBlockers = Array.isArray(completionBlockers) && completionBlockers.length
+    ? completionBlockers
+    : inferredBlockers;
+  const resolvedCompletionReady = typeof completionReady === "boolean"
+    ? completionReady
+    : plan.length > 0 && acceptance.length > 0 && resolvedBlockers.length === 0;
+  const planRows = plan.map((value) => `
+    <div class="timeline-event">
+      <span class="timeline-step">Plan ${escapeHtml(value.step_id || "step")}</span>
+      <span class="timeline-status">${escapeHtml(value.status || "pending")}</span>
+      <span>${escapeHtml(value.title || "Untitled step")}${value.evidence_action_ids?.length ? ` | evidence ${escapeHtml(value.evidence_action_ids.join(", "))}` : ""}</span>
+    </div>
+  `).join("");
+  const acceptanceRows = acceptance.map((value) => `
+    <div class="timeline-event">
+      <span class="timeline-step">Acceptance ${escapeHtml(value.criterion_id || "criterion")}</span>
+      <span class="timeline-status">${escapeHtml(value.status || "pending")}</span>
+      <span>${escapeHtml(value.description || "No description")}${value.evidence_action_ids?.length ? ` | evidence ${escapeHtml(value.evidence_action_ids.join(", "))}` : ""}</span>
+    </div>
+  `).join("");
   const observationRows = observations.map((observation) => `
     <div class="timeline-event">
-      <span class="timeline-step">#${escapeHtml(observation.iteration ?? 0)} ${escapeHtml(observation.action_kind || "action")}</span>
+      <span class="timeline-step">#${escapeHtml(observation.iteration ?? 0)} ${escapeHtml(observation.action_id || "action")} ${escapeHtml(observation.action_kind || "action")}</span>
       <span class="timeline-status">${escapeHtml(observation.status || "unknown")}</span>
       <span>${escapeHtml(observation.summary || "No summary recorded.")}</span>
     </div>
@@ -1461,6 +1505,13 @@ function renderAgentWorkingState(agentState, stopReason = "", pendingQuestion = 
       <span class="timeline-step">Expected evidence</span>
       <span>${escapeHtml(agentState.expected_evidence || "none")}</span>
     </div>
+    <div class="timeline-event">
+      <span class="timeline-step">Completion ready</span>
+      <span class="timeline-status">${resolvedCompletionReady ? "yes" : "no"}</span>
+      <span>${escapeHtml(resolvedBlockers.join(" | ") || "No blockers")}</span>
+    </div>
+    ${planRows}
+    ${acceptanceRows}
     ${pendingQuestion ? `<div class="timeline-event">
       <span class="timeline-step">Pending question</span>
       <span>${escapeHtml(pendingQuestion)}</span>

@@ -22,7 +22,13 @@ from .memory import MemoryStore, default_memory_path
 from .models import LLMCallTrace, MemoryContextItem, PatchProposalMetadata, PlanMetadata, WorkflowReport
 from .patch_proposer import propose_patch, propose_patch_with_optional_llm, review_patch_with_optional_llm
 from .planner import create_plan, create_plan_with_optional_llm
-from .runtime import RuntimeEventStore, SQLiteRuntimeStore
+from .runtime import (
+    RuntimeEventStore,
+    SQLiteRuntimeStore,
+    agent_completion_blockers,
+    agent_completion_ready,
+    render_agent_working_state,
+)
 from .repository_map import build_repository_map, render_repository_map
 from .safety import check_file_edits
 from .scanner import scan_repository
@@ -129,6 +135,11 @@ def run_workflow(
                 traces=llm_traces,
                 memory_context=related_memory,
                 repository_map_context=repository_map_context,
+                agent_state_context=(
+                    render_agent_working_state(agent_result.working_state)
+                    if agent_result and agent_result.working_state
+                    else ""
+                ),
             )
     else:
         plan = create_plan(task, hits, memory_context=related_memory)
@@ -213,6 +224,16 @@ def run_workflow(
         ),
         agent_stop_reason=agent_result.stop_reason if agent_result else "",
         agent_pending_question=agent_result.pending_question if agent_result else "",
+        agent_completion_ready=(
+            agent_completion_ready(agent_result.working_state)
+            if agent_result and agent_result.working_state
+            else False
+        ),
+        agent_completion_blockers=(
+            agent_completion_blockers(agent_result.working_state)
+            if agent_result and agent_result.working_state
+            else []
+        ),
         llm_traces=llm_traces,
         validation=validation,
         validation_feedback=validation_feedback,

@@ -29,6 +29,8 @@ def decision(
     resolved_questions: list[str] | None = None,
     finish_reason: str = "",
     user_question: str = "",
+    plan_updates: list[dict] | None = None,
+    acceptance_updates: list[dict] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -41,6 +43,8 @@ def decision(
                 "add_findings": findings or [],
                 "add_open_questions": open_questions or [],
                 "resolve_open_questions": resolved_questions or [],
+                "plan_updates": plan_updates or [],
+                "acceptance_updates": acceptance_updates or [],
             },
             "finish_reason": finish_reason,
             "user_question": user_question,
@@ -109,6 +113,25 @@ class AgentLoopTests(unittest.TestCase):
                     findings=["main.py defines parse and returns the provided value."],
                     resolved_questions=["How does parse handle values?"],
                     finish_reason="main.py contains the parser behavior.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read the parser implementation.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-2"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the parser task.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-2"],
+                            "evidence_summary": "main.py was read successfully.",
+                        }
+                    ],
                 ),
             ]
         )
@@ -198,6 +221,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Iteration: 0", client.calls[0][1].content)
         self.assertIn("Iteration: 1", client.calls[1][1].content)
         self.assertIn('"version":2', client.calls[0][0].content)
+        self.assertIn('"plan_updates"', client.calls[0][0].content)
+        self.assertIn('"acceptance_updates"', client.calls[0][0].content)
         self.assertIn("Expected evidence:", client.calls[1][1].content)
         self.assertEqual(len(traces), 3)
         self.assertIn("Agent context:", traces[0].context_summary)
@@ -279,6 +304,25 @@ class AgentLoopTests(unittest.TestCase):
                     "A completed finish observation.",
                     focus="Summarize the staged change.",
                     finish_reason="The staged change updates main.py.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Inspect the staged diff.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-1"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the staged change.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-1"],
+                            "evidence_summary": "The staged diff was inspected.",
+                        }
+                    ],
                 ),
             ]
         )
@@ -391,6 +435,78 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "failed")
         self.assertIn("diff unavailable", result.summary)
         self.assertEqual(result.working_state.status, "failed")
+
+    def test_finish_is_blocked_until_plan_and_acceptance_have_observation_evidence(self) -> None:
+        files = [RepoFile(Path("README.md"), "README.md", 8, "markdown", "# Docs\n")]
+        client = FakeLLMClient(
+            [
+                decision(
+                    "finish",
+                    {"selected_paths": ["README.md"]},
+                    "Attempt to finish before collecting evidence.",
+                    "A finish decision guarded by acceptance state.",
+                    finish_reason="The repository is understood.",
+                ),
+                decision(
+                    "read_file",
+                    {"path": "README.md"},
+                    "Collect evidence for the task.",
+                    "The repository documentation.",
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["README.md"]},
+                    "Finish with cited repository evidence.",
+                    "A completed evidence-backed finish observation.",
+                    finish_reason="README.md documents the repository.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read the repository documentation.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-2"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the task.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-2"],
+                            "evidence_summary": "README.md was read successfully.",
+                        }
+                    ],
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_agent_loop(
+                "explain repository",
+                tmp,
+                files,
+                [],
+                client,
+                max_steps=3,
+            )
+
+        self.assertEqual([step.action for step in result.steps], ["finish", "read_file", "finish"])
+        self.assertEqual(result.steps[0].observation.split(":", 1)[0], "Finish blocked until plan and acceptance evidence are complete")
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertEqual(result.working_state.plan[0].status, "completed")
+        self.assertEqual(result.working_state.acceptance_criteria[0].status, "passed")
+        event_types = [event.event_type for event in result.events]
+        self.assertEqual(event_types.count("finish_blocked"), 1)
+        self.assertEqual(event_types.count("action_authorized"), 2)
+        authorized_action_ids = [
+            event.action_id
+            for event in result.events
+            if event.event_type == "action_authorized"
+        ]
+        self.assertNotIn("explore-1", authorized_action_ids)
+        self.assertEqual(authorized_action_ids, ["explore-2", "explore-3"])
 
     def test_agent_loop_stops_on_every_runtime_stopping_status(self) -> None:
         for status in sorted(STOPPING_OBSERVATION_STATUSES):

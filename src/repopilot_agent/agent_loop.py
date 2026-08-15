@@ -35,6 +35,8 @@ from .runtime import (
     RuntimePolicy,
     STOPPING_OBSERVATION_STATUSES,
     advance_agent_working_state,
+    agent_completion_blockers,
+    apply_agent_state_update,
     create_agent_working_state,
     stop_agent_working_state,
 )
@@ -108,7 +110,10 @@ def run_agent_loop(
         files=files,
         repository_map=repository_map,
     )
-    working_state = create_agent_working_state(task)
+    working_state = create_agent_working_state(
+        task,
+        acceptance_criteria=acceptance_criteria,
+    )
     runtime.record_working_state(working_state)
 
     try:
@@ -148,8 +153,24 @@ def run_agent_loop(
                 allow_user_questions,
             )
             runtime_action = _to_runtime_action(decision, step_number)
+            try:
+                preview_state = apply_agent_state_update(
+                    working_state,
+                    decision.state_update,
+                )
+            except ValueError as exc:
+                raise LLMError(f"Agent state update is not supported by evidence: {exc}") from exc
             runtime.record_decision(runtime_action, _decision_record(decision))
-            runtime_observation = runtime.execute(runtime_action)
+            completion_blockers = (
+                agent_completion_blockers(preview_state)
+                if runtime_action.kind == "finish"
+                else []
+            )
+            runtime_observation = (
+                runtime.block_finish(runtime_action, completion_blockers)
+                if completion_blockers
+                else runtime.execute(runtime_action)
+            )
             selected_paths = _merge_paths(selected_paths, runtime.selected_paths, by_path)
             working_state = advance_agent_working_state(
                 working_state,

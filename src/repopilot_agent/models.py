@@ -57,11 +57,32 @@ AGENT_DECISION_VERSION = 2
 
 
 @dataclass(frozen=True)
+class AgentPlanUpdate:
+    step_id: str
+    title: str
+    detail: str
+    status: str
+    evidence_action_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentAcceptanceUpdate:
+    criterion_id: str
+    kind: str
+    description: str
+    required: bool
+    evidence_action_ids: list[str] = field(default_factory=list)
+    evidence_summary: str = ""
+
+
+@dataclass(frozen=True)
 class AgentStateUpdate:
     focus: str = ""
     add_findings: list[str] = field(default_factory=list)
     add_open_questions: list[str] = field(default_factory=list)
     resolve_open_questions: list[str] = field(default_factory=list)
+    plan_updates: list[AgentPlanUpdate] = field(default_factory=list)
+    acceptance_updates: list[AgentAcceptanceUpdate] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -424,6 +445,8 @@ class WorkflowReport:
     agent_state: dict[str, Any] = field(default_factory=dict)
     agent_stop_reason: str = ""
     agent_pending_question: str = ""
+    agent_completion_ready: bool = False
+    agent_completion_blockers: list[str] = field(default_factory=list)
     llm_traces: list[LLMCallTrace] = field(default_factory=list)
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None

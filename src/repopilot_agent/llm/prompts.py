@@ -40,7 +40,12 @@ AGENT_SYSTEM_PROMPT = (
     '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|ask_user|finish",'
     '"arguments":{}},"expected_evidence":"what result would make this action useful",'
     '"state_update":{"focus":"current investigation focus","add_findings":[],'
-    '"add_open_questions":[],"resolve_open_questions":[]},'
+    '"add_open_questions":[],"resolve_open_questions":[],'
+    '"plan_updates":[{"step_id":"stable id","title":"short step","detail":"specific action",'
+    '"status":"pending|in_progress|completed","evidence_action_ids":[]}],'
+    '"acceptance_updates":[{"criterion_id":"stable id","kind":"analysis",'
+    '"description":"observable completion condition","required":true,'
+    '"evidence_action_ids":[],"evidence_summary":""}]},'
     '"finish_reason":"","user_question":""}. '
     "Action arguments must be exactly one of: search_files {query}; read_file {path}; "
     "inspect_repository_map with optional {query, limit}; inspect_git_status {}; "
@@ -49,6 +54,11 @@ AGENT_SYSTEM_PROMPT = (
     "Use only read-only actions. Do not propose file edits here. "
     "Always provide non-empty rationale and expected_evidence. "
     "Only add findings already supported by previous observations; expected future tool output is not a finding. "
+    "Use plan_updates to add or revise implementation steps. A completed plan step must cite one or more "
+    "previously completed evidence-producing action ids. Use acceptance_updates to add or revise criteria and "
+    "attach evidence from previously completed evidence-producing action ids. Search candidates, the current "
+    "action, user questions, and finish are not completion evidence. "
+    "Keep evidence fields empty when no evidence has been observed. "
     "Use finish_reason only for finish, and set it to a non-empty completion summary. "
     "Keep finish_reason empty for all other actions. For ask_user, provide a non-empty user_question "
     "and add exactly that question to state_update.add_open_questions. Keep user_question empty for every other action. "
@@ -56,7 +66,7 @@ AGENT_SYSTEM_PROMPT = (
     "For normal code, documentation, or explanation tasks, start by searching or reading files. "
     "Use inspect_git_status only when the task is about Git state, diffs, branches, delivery, or local changes. "
     "Treat search results as candidates; read important files before selecting them. "
-    "Use finish once enough context has been gathered."
+    "Use finish only when Working State reports completion readiness."
 )
 
 
@@ -66,6 +76,7 @@ def build_planner_prompt(
     context_summary: str = "",
     memory_context: list[MemoryContextItem] | None = None,
     repository_map_context: str = "",
+    agent_state_context: str = "",
 ) -> str:
     return "\n".join(
         [
@@ -85,6 +96,11 @@ def build_planner_prompt(
             "",
             "Task-relevant repository map:",
             repository_map_context or "No repository map context was available.",
+            "",
+            "Agent plan and acceptance handoff:",
+            _clip(agent_state_context, 6_000)
+            if agent_state_context
+            else "No iterative Agent state was provided.",
             "",
             "Relevant repository context:",
             context,
@@ -182,7 +198,8 @@ def build_agent_prompt(
             "Use inspect_diff when exact changed lines matter. Ask the user only when the answer is essential "
             "and cannot be obtained with the available repository tools. "
             "Prefer finish if the useful files are already known. Update focus and open questions "
-            "conservatively, and only record findings supported by previous observations.",
+            "conservatively, revise the plan when evidence changes the approach, and only record findings "
+            "or completion evidence supported by previous observations and their action ids.",
         ]
     )
 

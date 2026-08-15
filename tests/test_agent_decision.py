@@ -96,6 +96,37 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             "Which behavior should remain compatible?",
         )
 
+    def test_plan_and_acceptance_state_updates_are_typed(self) -> None:
+        payload = decision_payload()
+        payload["state_update"]["plan_updates"] = [
+            {
+                "step_id": "inspect_parser",
+                "title": "Inspect parser",
+                "detail": "Read the parser implementation.",
+                "status": "completed",
+                "evidence_action_ids": ["agent-step-1"],
+            }
+        ]
+        payload["state_update"]["acceptance_updates"] = [
+            {
+                "criterion_id": "analysis_complete",
+                "kind": "analysis",
+                "description": "Parser behavior is supported by repository evidence.",
+                "required": True,
+                "evidence_action_ids": ["agent-step-1"],
+                "evidence_summary": "The parser file was read.",
+            }
+        ]
+
+        parsed = parse_agent_decision_json(json.dumps(payload))
+
+        self.assertEqual(parsed.state_update.plan_updates[0].step_id, "inspect_parser")
+        self.assertEqual(parsed.state_update.plan_updates[0].status, "completed")
+        self.assertEqual(
+            parsed.state_update.acceptance_updates[0].evidence_action_ids,
+            ["agent-step-1"],
+        )
+
     def test_rejects_unknown_missing_and_invalid_contract_fields(self) -> None:
         cases: list[tuple[str, dict]] = []
 
@@ -161,6 +192,88 @@ class AgentDecisionSchemaTests(unittest.TestCase):
         unexpected_user_question = decision_payload()
         unexpected_user_question["user_question"] = "Should I continue?"
 
+        completed_plan_without_evidence = decision_payload()
+        completed_plan_without_evidence["state_update"]["plan_updates"] = [
+            {
+                "step_id": "inspect_parser",
+                "title": "Inspect parser",
+                "detail": "Read the parser implementation.",
+                "status": "completed",
+                "evidence_action_ids": [],
+            }
+        ]
+
+        acceptance_summary_without_evidence = decision_payload()
+        acceptance_summary_without_evidence["state_update"]["acceptance_updates"] = [
+            {
+                "criterion_id": "analysis_complete",
+                "kind": "analysis",
+                "description": "Parser behavior is understood.",
+                "required": True,
+                "evidence_action_ids": [],
+                "evidence_summary": "Unsupported model claim.",
+            }
+        ]
+
+        pending_plan_with_evidence = decision_payload()
+        pending_plan_with_evidence["state_update"]["plan_updates"] = [
+            {
+                "step_id": "inspect_parser",
+                "title": "Inspect parser",
+                "detail": "Read the parser implementation.",
+                "status": "pending",
+                "evidence_action_ids": ["explore-1"],
+            }
+        ]
+
+        duplicate_plan_ids = decision_payload()
+        duplicate_plan_ids["state_update"]["plan_updates"] = [
+            {
+                "step_id": "inspect_parser",
+                "title": f"Inspect parser {index}",
+                "detail": "Read the parser implementation.",
+                "status": "pending",
+                "evidence_action_ids": [],
+            }
+            for index in range(2)
+        ]
+
+        excessive_plan_updates = decision_payload()
+        excessive_plan_updates["state_update"]["plan_updates"] = [
+            {
+                "step_id": f"step_{index}",
+                "title": f"Step {index}",
+                "detail": "Inspect repository evidence.",
+                "status": "pending",
+                "evidence_action_ids": [],
+            }
+            for index in range(13)
+        ]
+
+        invalid_acceptance_required = decision_payload()
+        invalid_acceptance_required["state_update"]["acceptance_updates"] = [
+            {
+                "criterion_id": "analysis_complete",
+                "kind": "analysis",
+                "description": "Parser behavior is understood.",
+                "required": "yes",
+                "evidence_action_ids": [],
+                "evidence_summary": "",
+            }
+        ]
+
+        acceptance_evidence_without_summary = decision_payload()
+        acceptance_evidence_without_summary["state_update"]["acceptance_updates"] = [
+            {
+                "criterion_id": "analysis_complete",
+                "kind": "analysis",
+                "description": "Parser behavior is understood.",
+                "required": True,
+                "evidence_action_ids": ["explore-1"],
+                "evidence_summary": "",
+            }
+        ]
+
         for payload in [
             missing_finish_reason,
             unexpected_finish_reason,
@@ -169,6 +282,13 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             missing_user_question,
             untracked_user_question,
             unexpected_user_question,
+            completed_plan_without_evidence,
+            acceptance_summary_without_evidence,
+            pending_plan_with_evidence,
+            duplicate_plan_ids,
+            excessive_plan_updates,
+            invalid_acceptance_required,
+            acceptance_evidence_without_summary,
         ]:
             with self.assertRaises(LLMError):
                 parse_agent_decision_json(json.dumps(payload))

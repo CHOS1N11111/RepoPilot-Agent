@@ -80,6 +80,37 @@ class AgentRuntime:
             payload={"decision": dict(decision), "action": action.to_dict()},
         )
 
+    def block_finish(
+        self,
+        action: RuntimeAction,
+        blockers: list[str],
+    ) -> RuntimeObservation:
+        self.start()
+        if action.kind != "finish":
+            raise ValueError("Only finish actions may use the completion gate.")
+        normalized_blockers = [str(item) for item in blockers if str(item).strip()]
+        summary = (
+            "Finish blocked until plan and acceptance evidence are complete: "
+            f"{', '.join(normalized_blockers)}."
+        )
+        observation = RuntimeObservation(
+            action_id=action.action_id,
+            action_kind=action.kind,
+            status="acceptance_incomplete",
+            summary=summary,
+            data={"blockers": normalized_blockers},
+        )
+        self.store.append_event(
+            self.run_id,
+            "finish_blocked",
+            action=action,
+            payload={
+                "action": action.to_dict(),
+                "observation": observation.to_dict(),
+            },
+        )
+        return observation
+
     def start(self) -> None:
         if self._started:
             return

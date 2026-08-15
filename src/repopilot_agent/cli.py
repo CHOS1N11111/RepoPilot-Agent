@@ -453,6 +453,17 @@ def _print_report(report) -> None:
                     print(f"  Open question +: {question}")
                 for question in step.state_update.get("resolve_open_questions") or []:
                     print(f"  Open question resolved: {question}")
+                for plan_update in step.state_update.get("plan_updates") or []:
+                    print(
+                        f"  Plan {plan_update.get('step_id', 'step')}: "
+                        f"{plan_update.get('status', 'pending')}"
+                    )
+                for acceptance_update in step.state_update.get("acceptance_updates") or []:
+                    evidence = acceptance_update.get("evidence_action_ids") or []
+                    print(
+                        f"  Acceptance {acceptance_update.get('criterion_id', 'criterion')}: "
+                        f"{'evidence ' + ', '.join(evidence) if evidence else 'pending'}"
+                    )
             if step.selected_paths:
                 print(f"  Selected: {', '.join(step.selected_paths)}")
             if step.finish_reason:
@@ -483,6 +494,29 @@ def _print_report(report) -> None:
             print(f"  Open questions: {'; '.join(open_questions)}")
         if report.agent_state.get("expected_evidence"):
             print(f"  Expected evidence: {report.agent_state['expected_evidence']}")
+        plan_state = report.agent_state.get("plan") or []
+        if plan_state:
+            print("  Plan state:")
+            for item in plan_state:
+                print(
+                    f"    - {item.get('step_id', 'step')} "
+                    f"[{item.get('status', 'pending')}]: {item.get('title', '')}"
+                )
+        acceptance_state = report.agent_state.get("acceptance_criteria") or []
+        if acceptance_state:
+            print("  Acceptance state:")
+            for item in acceptance_state:
+                requirement = "required" if item.get("required", True) else "optional"
+                print(
+                    f"    - {item.get('criterion_id', 'criterion')} "
+                    f"[{item.get('status', 'pending')}, {requirement}]: "
+                    f"{item.get('description', '')}"
+                )
+        print(
+            f"  Completion ready: {'yes' if report.agent_completion_ready else 'no'}"
+        )
+        if report.agent_completion_blockers:
+            print(f"  Completion blockers: {'; '.join(report.agent_completion_blockers)}")
         stop_reason = report.agent_stop_reason or report.agent_state.get("stop_reason")
         if stop_reason:
             print(f"  Stop reason: {stop_reason}")

@@ -8,7 +8,9 @@ from .base import LLMError
 from .json_utils import parse_json_object
 from ..models import (
     AGENT_DECISION_VERSION,
+    AgentAcceptanceUpdate,
     AgentDecision,
+    AgentPlanUpdate,
     AgentStateUpdate,
     FileChangeProposal,
     FileEditProposal,
@@ -38,16 +40,23 @@ AGENT_DECISION_KEYS = {
     "finish_reason",
     "user_question",
 }
-AGENT_STATE_UPDATE_KEYS = {
+AGENT_STATE_UPDATE_REQUIRED_KEYS = {
     "focus",
     "add_findings",
     "add_open_questions",
     "resolve_open_questions",
 }
+AGENT_STATE_UPDATE_KEYS = {
+    *AGENT_STATE_UPDATE_REQUIRED_KEYS,
+    "plan_updates",
+    "acceptance_updates",
+}
+ALLOWED_AGENT_PLAN_STATUSES = {"pending", "in_progress", "completed"}
 MAX_DECISION_TEXT_CHARS = 2_000
 MAX_STATE_ITEM_CHARS = 500
 MAX_STATE_UPDATE_ITEMS = 12
 MAX_DECISION_PATHS = 50
+MAX_STATE_IDENTIFIER_CHARS = 100
 
 
 def parse_plan_steps_json(response: str) -> list[PlanStep]:
@@ -113,7 +122,13 @@ def parse_agent_decision_json(response: str) -> AgentDecision:
     raw_state_update = data.get("state_update")
     if not isinstance(raw_state_update, dict):
         raise LLMError("Agent decision state_update must be an object.")
-    _require_exact_keys(raw_state_update, AGENT_STATE_UPDATE_KEYS, "Agent decision state_update")
+    _reject_unknown_keys(raw_state_update, AGENT_STATE_UPDATE_KEYS, "Agent decision state_update")
+    missing_state_keys = AGENT_STATE_UPDATE_REQUIRED_KEYS - set(raw_state_update)
+    if missing_state_keys:
+        raise LLMError(
+            "Agent decision state_update is missing required field(s): "
+            f"{', '.join(sorted(missing_state_keys))}."
+        )
     state_update = AgentStateUpdate(
         focus=_optional_bounded_string(
             raw_state_update,
@@ -126,6 +141,10 @@ def parse_agent_decision_json(response: str) -> AgentDecision:
         resolve_open_questions=_bounded_string_list(
             raw_state_update,
             "resolve_open_questions",
+        ),
+        plan_updates=_parse_agent_plan_updates(raw_state_update.get("plan_updates", [])),
+        acceptance_updates=_parse_agent_acceptance_updates(
+            raw_state_update.get("acceptance_updates", [])
         ),
     )
     added_questions = {
@@ -157,6 +176,184 @@ def parse_agent_decision_json(response: str) -> AgentDecision:
         finish_reason=finish_reason,
         user_question=user_question,
     )
+
+
+def _parse_agent_plan_updates(value: object) -> list[AgentPlanUpdate]:
+    if not isinstance(value, list):
+        raise LLMError("Agent plan_updates must be a list.")
+    if len(value) > MAX_STATE_UPDATE_ITEMS:
+        raise LLMError(
+            f"Agent plan_updates cannot contain more than {MAX_STATE_UPDATE_ITEMS} items."
+        )
+    updates: list[AgentPlanUpdate] = []
+    seen: set[str] = set()
+    for raw_update in value:
+        if not isinstance(raw_update, dict):
+            raise LLMError("Each Agent plan update must be an object.")
+        _require_exact_keys(
+            raw_update,
+            {"step_id", "title", "detail", "status", "evidence_action_ids"},
+            "Agent plan update",
+        )
+        step_id = _required_identifier(raw_update, "step_id", "Agent plan update")
+        key = step_id.casefold()
+        if key in seen:
+            raise LLMError(f"Agent plan update step_id is duplicated: {step_id}.")
+        seen.add(key)
+        status = raw_update.get("status")
+        if status not in ALLOWED_AGENT_PLAN_STATUSES:
+            raise LLMError(
+                "Agent plan update status must be pending, in_progress, or completed."
+            )
+        evidence_action_ids = _bounded_identifier_list(
+            raw_update.get("evidence_action_ids"),
+            "Agent plan update evidence_action_ids",
+        )
+        if status == "completed" and not evidence_action_ids:
+            raise LLMError(
+                "Completed Agent plan updates require at least one evidence action id."
+            )
+        if status != "completed" and evidence_action_ids:
+            raise LLMError(
+                "Only completed Agent plan updates may include evidence action ids."
+            )
+        updates.append(
+            AgentPlanUpdate(
+                step_id=step_id,
+                title=_required_bounded_string(
+                    raw_update,
+                    "title",
+                    MAX_STATE_ITEM_CHARS,
+                    "Agent plan update",
+                ),
+                detail=_required_bounded_string(
+                    raw_update,
+                    "detail",
+                    MAX_STATE_ITEM_CHARS,
+                    "Agent plan update",
+                ),
+                status=str(status),
+                evidence_action_ids=evidence_action_ids,
+            )
+        )
+    return updates
+
+
+def _parse_agent_acceptance_updates(value: object) -> list[AgentAcceptanceUpdate]:
+    if not isinstance(value, list):
+        raise LLMError("Agent acceptance_updates must be a list.")
+    if len(value) > MAX_STATE_UPDATE_ITEMS:
+        raise LLMError(
+            f"Agent acceptance_updates cannot contain more than {MAX_STATE_UPDATE_ITEMS} items."
+        )
+    updates: list[AgentAcceptanceUpdate] = []
+    seen: set[str] = set()
+    for raw_update in value:
+        if not isinstance(raw_update, dict):
+            raise LLMError("Each Agent acceptance update must be an object.")
+        _require_exact_keys(
+            raw_update,
+            {
+                "criterion_id",
+                "kind",
+                "description",
+                "required",
+                "evidence_action_ids",
+                "evidence_summary",
+            },
+            "Agent acceptance update",
+        )
+        criterion_id = _required_identifier(
+            raw_update,
+            "criterion_id",
+            "Agent acceptance update",
+        )
+        key = criterion_id.casefold()
+        if key in seen:
+            raise LLMError(
+                f"Agent acceptance update criterion_id is duplicated: {criterion_id}."
+            )
+        seen.add(key)
+        required = raw_update.get("required")
+        if not isinstance(required, bool):
+            raise LLMError("Agent acceptance update required must be a boolean.")
+        evidence_action_ids = _bounded_identifier_list(
+            raw_update.get("evidence_action_ids"),
+            "Agent acceptance update evidence_action_ids",
+        )
+        evidence_summary = _optional_bounded_string(
+            raw_update,
+            "evidence_summary",
+            MAX_STATE_ITEM_CHARS,
+            "Agent acceptance update",
+        )
+        if evidence_action_ids and not evidence_summary:
+            raise LLMError(
+                "Agent acceptance evidence requires a non-empty evidence_summary."
+            )
+        if evidence_summary and not evidence_action_ids:
+            raise LLMError(
+                "Agent acceptance evidence_summary requires evidence action ids."
+            )
+        updates.append(
+            AgentAcceptanceUpdate(
+                criterion_id=criterion_id,
+                kind=_required_bounded_string(
+                    raw_update,
+                    "kind",
+                    MAX_STATE_IDENTIFIER_CHARS,
+                    "Agent acceptance update",
+                ),
+                description=_required_bounded_string(
+                    raw_update,
+                    "description",
+                    MAX_STATE_ITEM_CHARS,
+                    "Agent acceptance update",
+                ),
+                required=required,
+                evidence_action_ids=evidence_action_ids,
+                evidence_summary=evidence_summary,
+            )
+        )
+    return updates
+
+
+def _required_identifier(value: dict, key: str, label: str) -> str:
+    identifier = _required_bounded_string(
+        value,
+        key,
+        MAX_STATE_IDENTIFIER_CHARS,
+        label,
+    )
+    if not all(character.isalnum() or character in "_.-" for character in identifier):
+        raise LLMError(f"{label} {key} contains unsupported characters.")
+    return identifier
+
+
+def _bounded_identifier_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise LLMError(f"{label} must be a list.")
+    if len(value) > MAX_STATE_UPDATE_ITEMS:
+        raise LLMError(
+            f"{label} cannot contain more than {MAX_STATE_UPDATE_ITEMS} items."
+        )
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise LLMError(f"{label} must contain non-empty strings.")
+        identifier = item.strip()
+        if len(identifier) > MAX_STATE_IDENTIFIER_CHARS:
+            raise LLMError(
+                f"{label} items cannot exceed {MAX_STATE_IDENTIFIER_CHARS} characters."
+            )
+        if not all(character.isalnum() or character in "_.-" for character in identifier):
+            raise LLMError(f"{label} contains an unsupported action id.")
+        key = identifier.casefold()
+        if key not in seen:
+            result.append(identifier)
+            seen.add(key)
+    return result
 
 
 def parse_agent_action_json(response: str) -> AgentDecision:
