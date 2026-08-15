@@ -4,6 +4,7 @@ Use these documents according to what you are trying to do:
 
 | Document | Purpose |
 | --- | --- |
+| [简体中文 README](README.zh-CN.md) | Read the concise project overview and quick start in Simplified Chinese. |
 | [Tutorial](tutorial.md) | Install RepoPilot, configure an LLM, use the CLI and Web UI, run sandboxed tasks, review diffs, validate changes, and troubleshoot failures. |
 | [Architecture](architecture.md) | Understand the Agent loop, repository context, virtual patches, approval boundary, worktree execution, recovery, validation, persistence, and safety model. |
 | [Evaluation Guide](../evals/README.md) | Run deterministic or LLM-backed evaluations and add reproducible cases. |

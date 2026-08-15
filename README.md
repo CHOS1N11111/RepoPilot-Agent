@@ -6,6 +6,8 @@
 ![Workflow](https://img.shields.io/badge/Workflow-Human--in--the--loop-176B87)
 ![Status](https://img.shields.io/badge/Status-Local%20MVP-18794E)
 
+English | [简体中文](docs/README.zh-CN.md)
+
 RepoPilot Agent is a local, approval-first coding agent that turns repository tasks and GitHub issues into reviewable code-change proposals. It understands repository structure, plans with deterministic rules or an OpenAI-compatible LLM, previews exact diffs, applies only approved files, validates the result, and keeps Git delivery under user control.
 
 [Quick Start](#quick-start) | [Tutorial](docs/tutorial.md) | [Architecture](docs/architecture.md) | [Evaluations](evals/README.md) | [Contributing](CONTRIBUTING.md)
