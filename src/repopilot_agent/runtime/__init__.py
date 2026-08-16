@@ -36,6 +36,7 @@ from .state import (
     apply_agent_state_update,
     create_agent_working_state,
     latest_agent_working_state,
+    prepare_post_write_acceptance,
     render_agent_working_state,
     stop_agent_working_state,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "apply_agent_state_update",
     "create_agent_working_state",
     "latest_agent_working_state",
+    "prepare_post_write_acceptance",
     "render_agent_working_state",
     "stop_agent_working_state",
 ]

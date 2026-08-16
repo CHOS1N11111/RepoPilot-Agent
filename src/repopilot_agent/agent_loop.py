@@ -86,6 +86,8 @@ def run_agent_loop(
     allow_user_questions: bool = True,
     allow_write_actions: bool = False,
     managed_worktree_root: str | Path | None = None,
+    resume_existing_state: bool = False,
+    prior_steps: list[AgentStep] | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -94,6 +96,7 @@ def run_agent_loop(
     by_path = {repo_file.relative_path: repo_file for repo_file in files}
     write_actions_enabled = allow_write_actions and bool(by_path)
     steps: list[AgentStep] = []
+    context_steps = list(prior_steps or [])
     selected_paths: list[str] = []
     summary = ""
     stop_reason = ""
@@ -134,14 +137,26 @@ def run_agent_loop(
         files=files,
         repository_map=repository_map,
     )
-    working_state = create_agent_working_state(
+    restored_state = runtime.working_state if resume_existing_state else None
+    working_state = restored_state or create_agent_working_state(
         task,
         acceptance_criteria=acceptance_criteria,
     )
-    runtime.record_working_state(working_state)
+    if restored_state is None:
+        runtime.record_working_state(working_state)
+    else:
+        selected_paths = _merge_paths([], working_state.selected_paths, by_path)
+        for path in selected_paths:
+            runtime.context.select_path(path)
+    starting_iteration = working_state.iteration
+    initial_tool_calls = sum(
+        1 for event in runtime.events if event.event_type == "action_started"
+    )
 
     try:
-        for step_number in range(1, max_steps + 1):
+        for local_step_number in range(1, max_steps + 1):
+            step_number = starting_iteration + local_step_number
+            step_ceiling = starting_iteration + max_steps
             map_context = (
                 render_repository_map(
                     repository_map,
@@ -154,7 +169,7 @@ def run_agent_loop(
             context_packet = build_agent_context_packet(
                 working_state,
                 initial_hits,
-                steps,
+                [*context_steps, *steps],
                 repository_map_context=map_context,
                 memory_context=memory_context,
                 current_diff=(
@@ -165,17 +180,18 @@ def run_agent_loop(
                 acceptance_criteria=acceptance_criteria,
                 remaining_budget=_remaining_execution_budget(
                     loop_budget,
-                    step_number,
+                    local_step_number,
                     max_steps,
                     runtime.events,
                     loop_started_at,
+                    initial_tool_calls,
                 ),
             )
             decision = _choose_next_decision(
                 task,
                 context_packet,
                 step_number,
-                max_steps,
+                step_ceiling,
                 llm_client,
                 traces,
                 allow_user_questions,
@@ -684,9 +700,14 @@ def _remaining_execution_budget(
     max_steps: int,
     events: list[RuntimeEvent],
     started_at: float,
+    initial_tool_calls: int = 0,
 ) -> dict[str, int]:
     completed_steps = max(step_number - 1, 0)
-    tool_calls = sum(1 for event in events if event.event_type == "action_started")
+    tool_calls = max(
+        sum(1 for event in events if event.event_type == "action_started")
+        - initial_tool_calls,
+        0,
+    )
     usage = ExecutionUsage(
         agent_steps=completed_steps,
         tool_calls=tool_calls,

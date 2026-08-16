@@ -27,6 +27,7 @@ from .virtual_patch import VirtualPatchOverlay
 
 MAX_FILE_CHARS = 12_000
 MAX_DIFF_CHARS = 24_000
+MAX_COMMAND_OUTPUT_CHARS = 12_000
 MAX_SEARCH_RESULTS = 8
 
 
@@ -270,6 +271,11 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
             else None
         )
         data = result.to_dict()
+        data["changed_files"] = (
+            [patch.path]
+            if result.applied and (before_exists != after_exists or before_content != after_content)
+            else []
+        )
         data["diff"], data["diff_truncated"] = _clip(result.diff, MAX_DIFF_CHARS)
         resulting_diff, resulting_truncated = _clip(
             _safe_current_diff(context.repo_path, result.diff),
@@ -299,13 +305,40 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
         if not results:
             raise RuntimeToolError("Validation runner returned no result.")
         result = results[0]
+        stdout, stdout_truncated = _clip(
+            result.stdout,
+            MAX_COMMAND_OUTPUT_CHARS,
+        )
+        stderr, stderr_truncated = _clip(
+            result.stderr,
+            MAX_COMMAND_OUTPUT_CHARS,
+        )
+        passed = result.allowed and result.exit_code == 0
+        if passed:
+            summary = f"Validation passed with exit code 0: {command}"
+        elif not result.allowed:
+            summary = f"Validation command was rejected by the runner allowlist: {command}"
+        else:
+            summary = (
+                f"Validation failed with exit code "
+                f"{result.exit_code if result.exit_code is not None else 'unknown'}: {command}"
+            )
+        excerpt = _single_line(stderr or stdout, 280)
+        if excerpt and not passed:
+            summary = f"{summary}. Evidence: {excerpt}"
         return RuntimeToolResult(
-            summary=(
-                f"Command completed with exit code {result.exit_code}."
-                if result.allowed
-                else "Command was rejected by the validation allowlist."
-            ),
-            data=asdict(result),
+            summary=summary,
+            data={
+                "command": result.command,
+                "allowed": result.allowed,
+                "exit_code": result.exit_code,
+                "passed": passed,
+                "stdout": stdout,
+                "stdout_truncated": stdout_truncated,
+                "stderr": stderr,
+                "stderr_truncated": stderr_truncated,
+            },
+            status="completed" if passed else "verification_failed",
         )
 
     if action.kind == "finish":
@@ -467,3 +500,10 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
         return text, False
     marker = "\n[...truncated by RepoPilot runtime...]"
     return text[: limit - len(marker)] + marker, True
+
+
+def _single_line(text: str, limit: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(limit - 3, 0)] + "..."

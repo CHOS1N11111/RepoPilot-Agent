@@ -392,9 +392,26 @@ RepoPilot also has a lower-level durable approval protocol for typed runtime sid
 
 Approval grants are persisted in the ordered runtime event stream and expire after 15 minutes by default. A changed payload, changed file baseline, stale checkpoint, expired grant, or broader path or command requires a fresh approval.
 
-This runtime record is separate from the proposal checkboxes described below. The current CLI and Web iterative Agent still keep write and command actions disabled; normal proposal application continues to use the server-stored `proposal_id` and per-file approval flow.
+This runtime record is separate from the proposal checkboxes described below. Normal CLI Agent runs remain non-writing. Sandboxed Web Task Runs may request an exact write and then exact validation commands; the compatible proposal application path continues to use the server-stored `proposal_id` and per-file approval flow.
 
 ## Step 9: Apply Approved Changes
+
+### Sandboxed Agent path
+
+For a complete sandboxed Task Run:
+
+1. Configure a validation command before starting the task if automated evidence is required.
+2. Review and approve the Agent's exact write. RepoPilot writes only the managed worktree and inspects the resulting Git diff.
+3. Review the new `validate` action under `Pending Runtime Approval`.
+4. Click `Run Exact Validation` only when its command and command allowlist are correct.
+5. Repeat the approval for each configured command. One approval never authorizes another command.
+6. Inspect `Agent Validation Cycle` for exit codes, bounded stdout/stderr, truncation markers, and evidence ids.
+
+After a failed command or after all commands pass, RepoPilot gives those observations back to the same Agent run. Within its remaining budget, the controller can inspect more context, prepare another exact write, request user input, or finish. Failed output is useful evidence, but it never marks the command's acceptance criterion as passed.
+
+The browser sends the current LLM settings with the approval request so continuation can use a request-scoped client. API keys are not written to the task record. If no LLM client or budget remains, the run stops at `review_pending` with all evidence preserved.
+
+### Server-stored proposal path
 
 When the proposal looks correct:
 
@@ -600,10 +617,11 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 4. Click `Start Sandboxed Task`.
 5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
 6. At `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
-7. If Summary shows `Pending Runtime Approval`, inspect the exact action and click `Approve Exact Write` or `Reject`. This path writes only the managed worktree, observes the resulting diff, and stops at `review_pending`; post-write validation is a later controller milestone.
-8. If the run produced the compatible server-stored proposal flow instead, select approved files and click `Apply Proposal`; that existing path runs its configured validation commands.
-9. Leave `Auto-generate repairs` enabled for the compatible proposal path to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
-10. Inspect the final working Diff. Local branch creation remains available only after a fully completed task, not at `review_pending`.
+7. If Summary shows a write under `Pending Runtime Approval`, inspect it and click `Approve Exact Write` or `Reject`. An approved write changes only the managed worktree and records its resulting diff.
+8. If a configured command then appears, inspect it and click `Run Exact Validation` or `Reject`. Each command gets a separate approval and bounded result.
+9. If the run produced the compatible server-stored proposal flow instead, select approved files and click `Apply Proposal`; that existing path runs its configured validation commands.
+10. Leave `Auto-generate repairs` enabled for the compatible proposal path to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
+11. Inspect the final working Diff. Local branch creation remains available only after a fully completed task, not at `review_pending`.
 
 Each task receives its own detached managed worktree. RepoPilot automatically selects that path in the repository controls, so proposal application, validation, rollback, Git inspection, and diff display all target the sandbox rather than the source worktree.
 
@@ -611,7 +629,7 @@ Task runs are saved in the source repository's `.repopilot/memory.sqlite3`. Repo
 
 The advanced task settings include four execution limits: Agent steps, tool calls, validation commands, and elapsed seconds. Agent exploration consumes step and tool-call capacity. Applying an approved file and running a validation command also consume tool-call capacity. RepoPilot checks the remaining command and tool budget before writing, records elapsed usage, and preserves the proposal without applying it when the configured capacity is insufficient.
 
-Acceptance criteria are generated from the task, proposal file scope, and validation commands. In the compatible proposal path, the Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded. The unified Runtime write path intentionally uses `review_pending` after write and diff observation because its validation loop has not been integrated yet.
+Acceptance criteria are generated from the task, proposal file scope, and validation commands. The Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. In the Runtime path, Working State v5 binds every generated validation criterion to one exact command and its observation action id. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded.
 
 Existing UTF-8 proposal files are converted from full replacement content into exact-text structured hunks. Each patch carries the file's proposal-time SHA-256. If the file changes before approval, RepoPilot rejects the patch instead of overwriting the newer content. If a later file conflicts during a multi-file apply, earlier writes from that apply attempt are restored from the captured snapshots.
 

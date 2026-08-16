@@ -13,6 +13,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .agent_validation import (
+    AgentValidationError,
+    AgentValidationResult,
+    continue_agent_after_validation,
+    execute_pending_agent_validation,
+    reject_pending_agent_validation,
+    request_agent_validation,
+)
 from .agent_write import (
     AgentWriteError,
     execute_pending_agent_write,
@@ -34,7 +42,7 @@ from .github_tools import create_github_pull_request, inspect_github_repository
 from .llm.base import LLMError, LLMMessage
 from .llm.openai_compatible import OpenAICompatibleClient
 from .memory import MemoryStore, default_memory_path, ensure_local_state_ignored
-from .models import FileEditProposal
+from .models import FileEditProposal, ValidationResult
 from .patch_apply import ApplyResult, apply_file_edits, capture_file_snapshots, revert_file_snapshots
 from .repo_source import resolve_repository_reference, sync_repository_reference
 from .repair_loop import (
@@ -52,7 +60,11 @@ from .repair_loop import (
     validation_feedback_fingerprint,
 )
 from .recovery import TaskRunRecoveryReadiness, inspect_task_run_recovery
-from .runtime import SQLiteRuntimeStore
+from .runtime import (
+    SQLiteRuntimeStore,
+    agent_completion_blockers,
+    agent_completion_ready,
+)
 from .safety import SafetyCheckError
 from .task_runs import (
     ACTIVE_TASK_RUN_STATUSES,
@@ -96,6 +108,7 @@ from .workflow import run_workflow
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 MAX_REPAIR_ATTEMPTS_LIMIT = 5
+MAX_AGENT_WRITE_HISTORY = 20
 
 _SESSION_PUBLIC_KEYS = (
     "parent_proposal_id",
@@ -1591,6 +1604,16 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.CONFLICT,
             )
             return
+        action_kind = str(request.get("action_kind") or "")
+        if action_kind == "validate":
+            self._handle_runtime_validation_grant(task_run, payload, request)
+            return
+        if action_kind not in {"apply_patch", "edit_file"}:
+            self._send_json(
+                {"error": f"Unsupported pending runtime action: {action_kind or '(empty)'}."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         current_budget = execution_budget_state(
             task_run.execution_budget,
             task_run.execution_usage,
@@ -1630,6 +1653,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 payload_hash=str(payload.get("payload_hash") or ""),
                 file_scope=file_scope,
                 command_allowlist=command_allowlist,
+                validation_commands=task_run.validation_commands,
             )
         except (AgentWriteError, ValueError, WorktreeSandboxError) as exc:
             self._send_json(
@@ -1644,8 +1668,14 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             store.list_events(task_run.run_id)
         )
         task_result["agent_state"] = result.working_state
-        task_result["agent_write_result"] = result.to_dict()
-        task_result["agent_resulting_diff"] = result.to_dict()["resulting_diff"]
+        serialized_write = result.to_dict()
+        task_result["agent_write_result"] = serialized_write
+        task_result["agent_resulting_diff"] = serialized_write["resulting_diff"]
+        if result.status != "approval_required":
+            task_result["agent_write_history"] = _append_agent_write_history(
+                task_result.get("agent_write_history"),
+                serialized_write,
+            )
         task_run.execution_usage = task_run.execution_usage.add(
             tool_calls=2 if result.diff_observation else 1,
             elapsed_ms=max(int((time.monotonic() - started_at) * 1000), 0),
@@ -1671,27 +1701,501 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 "review_runtime_action",
             )
         else:
-            task_result["agent_pending_approval"] = {}
-            task_result["agent_stop_reason"] = "write_complete"
-            update_task_run(
-                task_run,
-                "review_pending",
-                "Approved Agent write completed in the managed worktree; post-write validation has not run yet.",
-                result=task_result,
-                error=None,
+            task_run.acceptance_criteria = criteria_from_records(
+                result.working_state.get("acceptance_criteria")
             )
-            record_task_run_checkpoint(
-                task_run,
-                "runtime_write_complete",
-                "The exact approved write completed and the Runtime observed its Git diff.",
-                "review_diff",
-            )
+            validation_commands = _dedupe_commands(task_run.validation_commands)
+            task_result["agent_validation_cycle"] = {
+                "cycle_id": result.action_id,
+                "commands": validation_commands,
+                "next_index": 0,
+                "results": [],
+            }
+            if validation_commands:
+                try:
+                    validation_request = request_agent_validation(
+                        task_run.source_repo,
+                        task_run.sandbox_path,
+                        task_run.task,
+                        task_run.run_id,
+                        store,
+                        cycle_id=result.action_id,
+                        command_index=0,
+                        command_count=len(validation_commands),
+                        command=validation_commands[0],
+                    )
+                except (AgentValidationError, ValueError, WorktreeSandboxError) as exc:
+                    task_result["agent_pending_approval"] = {}
+                    task_result["agent_stop_reason"] = "validation_setup_failed"
+                    task_result["agent_validation_error"] = str(exc)
+                    update_task_run(
+                        task_run,
+                        "review_pending",
+                        "The approved write completed, but its validation approval "
+                        "could not be prepared.",
+                        result=task_result,
+                        error=None,
+                    )
+                    record_task_run_checkpoint(
+                        task_run,
+                        "runtime_validation_setup_failed",
+                        str(exc),
+                        "inspect_failure",
+                    )
+                else:
+                    task_result["agent_pending_approval"] = (
+                        validation_request.pending_approval
+                    )
+                    task_result["agent_state"] = validation_request.working_state
+                    task_result["agent_stop_reason"] = "approval_required"
+                    task_result["agent_events"] = _public_runtime_events(
+                        store.list_events(task_run.run_id)
+                    )
+                    update_task_run(
+                        task_run,
+                        "awaiting_approval",
+                        "The approved write is ready for exact validation approval (1 of "
+                        f"{len(validation_commands)}).",
+                        result=task_result,
+                        error=None,
+                    )
+                    record_task_run_checkpoint(
+                        task_run,
+                        "runtime_validation_ready",
+                        "The first configured validation command is waiting for exact approval.",
+                        "review_runtime_action",
+                    )
+            else:
+                task_result["agent_pending_approval"] = {}
+                task_result["agent_stop_reason"] = "validation_unavailable"
+                update_task_run(
+                    task_run,
+                    "review_pending",
+                    "Approved Agent write completed; no automated validation command is configured.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_write_complete",
+                    "The exact write completed, but automated validation is unavailable.",
+                    "review_diff",
+                )
         self._persist_task_run(task_run)
         self._send_json(
             {
                 "write_result": result.to_dict(),
                 "task_run": task_run.to_public_dict(),
             }
+        )
+
+    def _handle_runtime_validation_grant(
+        self,
+        task_run: TaskRun,
+        payload: dict[str, Any],
+        request: dict[str, Any],
+    ) -> None:
+        cycle = _task_validation_cycle(task_run)
+        if not cycle:
+            self._send_json(
+                {"error": "The task run has no active validation cycle."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        commands = cycle["commands"]
+        command_index = cycle["next_index"]
+        if command_index >= len(commands):
+            self._send_json(
+                {"error": "The validation cycle has no remaining command."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        command = commands[command_index]
+        pending_command = str(
+            (request.get("action") or {}).get("arguments", {}).get("command") or ""
+        ).strip()
+        if pending_command != command:
+            self._send_json(
+                {"error": "The pending validation command does not match the task cycle."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        current_budget = execution_budget_state(
+            task_run.execution_budget,
+            task_run.execution_usage,
+        )
+        remaining = current_budget["remaining"]
+        if (
+            current_budget["exhausted"]
+            or remaining["tool_calls"] < 1
+            or remaining["validation_commands"] < 1
+            or remaining["elapsed_ms"] <= 0
+        ):
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "Execution budget is insufficient for the approved validation command.",
+            )
+            self._persist_task_run(task_run)
+            self._send_json(
+                {
+                    "error": "Execution budget cannot cover the pending validation command.",
+                    "execution_budget": current_budget,
+                    "task_run": task_run.to_public_dict(),
+                },
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        started_at = time.monotonic()
+        store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
+        try:
+            result = execute_pending_agent_validation(
+                task_run.source_repo,
+                task_run.sandbox_path or "",
+                task_run.task,
+                task_run.run_id,
+                store,
+                cycle_id=cycle["cycle_id"],
+                command_index=command_index,
+                command_count=len(commands),
+                expected_command=command,
+                checkpoint=str(payload.get("checkpoint") or ""),
+                payload_hash=str(payload.get("payload_hash") or ""),
+                file_scope=_payload_string_list(payload, "file_scope"),
+                command_allowlist=_payload_string_list(
+                    payload,
+                    "command_allowlist",
+                ),
+            )
+        except (AgentValidationError, ValueError, WorktreeSandboxError) as exc:
+            self._send_json(
+                {"error": str(exc), "task_run": task_run.to_public_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        task_run.execution_usage = task_run.execution_usage.add(
+            tool_calls=1,
+            validation_commands=1,
+            elapsed_ms=max(int((time.monotonic() - started_at) * 1000), 0),
+        )
+        task_result = dict(task_run.result or {})
+        result_records = [
+            item
+            for item in cycle.get("results", [])
+            if isinstance(item, dict)
+        ]
+        result_records.append(result.to_dict())
+        cycle["results"] = result_records
+        cycle["next_index"] = command_index + 1
+        task_result["agent_validation_cycle"] = cycle
+        task_result["agent_validation_results"] = result_records
+        task_result["agent_state"] = result.working_state
+        task_result["agent_pending_approval"] = {}
+        task_result["agent_events"] = _public_runtime_events(
+            store.list_events(task_run.run_id)
+        )
+        validation = _validation_results_from_cycle(cycle)
+        task_result["validation"] = [asdict(item) for item in validation]
+        feedback = build_validation_feedback(
+            validation,
+            task=task_run.task,
+            repo_path=task_run.sandbox_path,
+        )
+        task_result["validation_feedback"] = asdict(feedback) if feedback else None
+        task_result["execution_budget"] = execution_budget_state(
+            task_run.execution_budget,
+            task_run.execution_usage,
+        )
+        task_run.acceptance_criteria = criteria_from_records(
+            result.working_state.get("acceptance_criteria")
+        )
+
+        if result.status == "passed" and cycle["next_index"] < len(commands):
+            next_index = cycle["next_index"]
+            try:
+                next_request = request_agent_validation(
+                    task_run.source_repo,
+                    task_run.sandbox_path or "",
+                    task_run.task,
+                    task_run.run_id,
+                    store,
+                    cycle_id=cycle["cycle_id"],
+                    command_index=next_index,
+                    command_count=len(commands),
+                    command=commands[next_index],
+                )
+            except (AgentValidationError, ValueError, WorktreeSandboxError) as exc:
+                task_result["agent_stop_reason"] = "validation_setup_failed"
+                task_result["agent_validation_error"] = str(exc)
+                update_task_run(
+                    task_run,
+                    "review_pending",
+                    "Validation evidence was saved, but the next exact command "
+                    "could not be prepared.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_validation_setup_failed",
+                    str(exc),
+                    "inspect_failure",
+                )
+            else:
+                task_result["agent_pending_approval"] = next_request.pending_approval
+                task_result["agent_state"] = next_request.working_state
+                task_result["agent_stop_reason"] = "approval_required"
+                task_result["agent_events"] = _public_runtime_events(
+                    store.list_events(task_run.run_id)
+                )
+                update_task_run(
+                    task_run,
+                    "awaiting_approval",
+                    f"Validation {command_index + 1} passed; command {next_index + 1} "
+                    f"of {len(commands)} is waiting for exact approval.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_validation_ready",
+                    f"Configured validation command {next_index + 1} is waiting for approval.",
+                    "review_runtime_action",
+                )
+        else:
+            self._continue_task_after_validation(
+                task_run,
+                task_result,
+                cycle,
+                payload,
+                store,
+                validation_passed=result.status == "passed",
+            )
+        self._persist_task_run(task_run)
+        self._send_json(
+            {
+                "validation_result": result.to_dict(),
+                "task_run": task_run.to_public_dict(),
+            }
+        )
+
+    def _continue_task_after_validation(
+        self,
+        task_run: TaskRun,
+        task_result: dict[str, Any],
+        cycle: dict[str, Any],
+        payload: dict[str, Any],
+        store: SQLiteRuntimeStore,
+        *,
+        validation_passed: bool,
+    ) -> None:
+        try:
+            remaining_budget = _remaining_agent_continuation_budget(task_run, payload)
+            llm_client = _runtime_continuation_llm_client(payload, task_run)
+        except (LLMError, ValueError) as exc:
+            remaining_budget = None
+            llm_client = None
+            task_result["agent_continuation_error"] = str(exc)
+        if llm_client is None or remaining_budget is None:
+            reason = (
+                "No request-scoped LLM client is available for the next decision."
+                if llm_client is None
+                else "The remaining execution budget cannot cover another Agent decision."
+            )
+            task_result["agent_stop_reason"] = (
+                "validation_passed" if validation_passed else "validation_failed"
+            )
+            update_task_run(
+                task_run,
+                "review_pending",
+                f"Validation {'passed' if validation_passed else 'failed'}; {reason}",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_validation_observed",
+                reason,
+                "review_validation",
+            )
+            return
+
+        traces = []
+        before_tool_calls = sum(
+            1
+            for event in store.list_events(task_run.run_id)
+            if event.event_type == "action_started"
+        )
+        continued_at = time.monotonic()
+        try:
+            validation_results = [
+                AgentValidationResult.from_dict(item)
+                for item in cycle.get("results", [])
+                if isinstance(item, dict)
+            ]
+            memory_context = None
+            if _payload_use_memory(payload):
+                memory_context = self._memory(task_run.source_repo).find_related_runs(
+                    task_run.task
+                )
+            continued = continue_agent_after_validation(
+                task_run.source_repo,
+                task_run.sandbox_path or "",
+                task_run.task,
+                task_run.run_id,
+                store,
+                llm_client,
+                validation_results,
+                max_steps=remaining_budget.max_agent_steps,
+                execution_budget=remaining_budget,
+                memory_context=memory_context,
+                traces=traces,
+            )
+        except (LLMError, AgentValidationError, ValueError, WorktreeSandboxError) as exc:
+            task_result["agent_continuation_error"] = str(exc)
+            task_result["agent_stop_reason"] = "continuation_failed"
+            update_task_run(
+                task_run,
+                "review_pending",
+                "Validation evidence was saved, but the next Agent decision failed.",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_continuation_failed",
+                str(exc),
+                "inspect_failure",
+            )
+            return
+
+        after_tool_calls = sum(
+            1
+            for event in store.list_events(task_run.run_id)
+            if event.event_type == "action_started"
+        )
+        task_run.execution_usage = task_run.execution_usage.add(
+            agent_steps=len(continued.steps),
+            tool_calls=max(after_tool_calls - before_tool_calls, 0),
+            elapsed_ms=max(int((time.monotonic() - continued_at) * 1000), 0),
+        )
+        task_result["agent_steps"] = [
+            *list(task_result.get("agent_steps") or []),
+            *[asdict(step) for step in continued.steps],
+        ]
+        task_result["llm_traces"] = [
+            *list(task_result.get("llm_traces") or []),
+            *[asdict(trace) for trace in traces],
+        ]
+        task_result["agent_events"] = _public_runtime_events(
+            store.list_events(task_run.run_id)
+        )
+        task_result["agent_state"] = continued.working_state.to_dict()
+        task_result["agent_stop_reason"] = continued.stop_reason
+        task_result["agent_pending_question"] = continued.pending_question
+        task_result["agent_pending_approval"] = continued.pending_approval
+        task_result["agent_completion_ready"] = agent_completion_ready(
+            continued.working_state
+        )
+        task_result["agent_completion_blockers"] = agent_completion_blockers(
+            continued.working_state
+        )
+        task_result["agent_proposed_edits"] = continued.proposed_edits
+        task_result["agent_proposed_diff"] = continued.proposed_diff
+        task_result["execution_budget"] = execution_budget_state(
+            task_run.execution_budget,
+            task_run.execution_usage,
+        )
+        task_run.acceptance_criteria = criteria_from_records(
+            continued.working_state.to_dict().get("acceptance_criteria")
+        )
+
+        if continued.pending_approval:
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "The Agent used validation evidence to prepare another exact managed action.",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_approval_ready",
+                "A post-validation Agent action is waiting for exact approval.",
+                "review_runtime_action",
+            )
+            return
+        if continued.stop_reason == "finished" and agent_completion_ready(
+            continued.working_state
+        ):
+            validation = _validation_results_from_cycle(cycle)
+            approved_paths = _approved_agent_write_paths(task_result)
+            try:
+                changed_files = [
+                    change.path
+                    for change in inspect_repository(task_run.sandbox_path or "").changes
+                ]
+            except (FileNotFoundError, RuntimeError):
+                changed_files = list(approved_paths)
+            completion = evaluate_completion(
+                task_run.acceptance_criteria,
+                changed_files=changed_files,
+                approved_paths=approved_paths,
+                validation=validation,
+                diff=str(task_result.get("agent_resulting_diff") or ""),
+            )
+            task_run.completion_evidence = completion
+            task_result["completion_evidence"] = completion.to_dict()
+            if completion.status == "passed":
+                update_task_run(
+                    task_run,
+                    "completed",
+                    "The Agent finished with passing validation and complete acceptance evidence.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_task_complete",
+                    completion.summary,
+                    "review_report",
+                )
+            else:
+                task_result["agent_stop_reason"] = "completion_evidence_incomplete"
+                update_task_run(
+                    task_run,
+                    "review_pending",
+                    "The Agent requested completion, but repository evidence did not pass.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_completion_blocked",
+                    completion.summary,
+                    "review_validation",
+                )
+            return
+
+        detail = (
+            "The Agent requested user input; answer continuation is not available until the user-interaction milestone."
+            if continued.pending_question
+            else "Review the validation evidence and current Agent state before continuing."
+        )
+        update_task_run(
+            task_run,
+            "review_pending",
+            detail,
+            result=task_result,
+            error=None,
+        )
+        record_task_run_checkpoint(
+            task_run,
+            "runtime_validation_observed",
+            detail,
+            "review_validation",
         )
 
     def _handle_runtime_approval_reject(self) -> None:
@@ -1709,6 +2213,16 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         if not task_run.sandbox_path:
             self._send_json(
                 {"error": "The task run has no managed worktree sandbox."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        action_kind = str(request.get("action_kind") or "")
+        if action_kind == "validate":
+            self._handle_runtime_validation_reject(task_run, payload, request)
+            return
+        if action_kind not in {"apply_patch", "edit_file"}:
+            self._send_json(
+                {"error": f"Unsupported pending runtime action: {action_kind or '(empty)'}."},
                 status=HTTPStatus.CONFLICT,
             )
             return
@@ -1751,6 +2265,74 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             "runtime_approval_rejected",
             "The user rejected the exact pending Runtime write action.",
             "review_report",
+        )
+        self._persist_task_run(task_run)
+        self._send_json(
+            {"rejection": rejected, "task_run": task_run.to_public_dict()}
+        )
+
+    def _handle_runtime_validation_reject(
+        self,
+        task_run: TaskRun,
+        payload: dict[str, Any],
+        request: dict[str, Any],
+    ) -> None:
+        cycle = _task_validation_cycle(task_run)
+        if not cycle or cycle["next_index"] >= len(cycle["commands"]):
+            self._send_json(
+                {"error": "The task run has no active validation command."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        expected_command = cycle["commands"][cycle["next_index"]]
+        pending_command = str(
+            (request.get("action") or {}).get("arguments", {}).get("command") or ""
+        ).strip()
+        if pending_command != expected_command:
+            self._send_json(
+                {"error": "The pending validation command does not match the task cycle."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        reason = str(payload.get("reason") or "Rejected by the user.").strip()
+        store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
+        try:
+            rejected = reject_pending_agent_validation(
+                task_run.source_repo,
+                task_run.sandbox_path or "",
+                task_run.task,
+                task_run.run_id,
+                store,
+                checkpoint=str(payload.get("checkpoint") or ""),
+                expected_command=expected_command,
+                reason=reason,
+            )
+        except (AgentValidationError, ValueError, WorktreeSandboxError) as exc:
+            self._send_json(
+                {"error": str(exc), "task_run": task_run.to_public_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        task_result = dict(task_run.result or {})
+        task_result["agent_events"] = _public_runtime_events(
+            store.list_events(task_run.run_id)
+        )
+        task_result["agent_state"] = rejected["working_state"]
+        task_result["agent_pending_approval"] = {}
+        task_result["agent_stop_reason"] = "approval_rejected"
+        task_result["agent_validation_rejection"] = rejected
+        update_task_run(
+            task_run,
+            "cancelled",
+            "The pending validation command was rejected; the managed worktree was preserved.",
+            result=task_result,
+            error=None,
+        )
+        record_task_run_checkpoint(
+            task_run,
+            "runtime_validation_rejected",
+            "The user rejected the exact pending validation command.",
+            "inspect_sandbox",
         )
         self._persist_task_run(task_run)
         self._send_json(
@@ -2801,6 +3383,223 @@ def _public_runtime_events(events: list[Any]) -> list[dict[str, Any]]:
             data["payload"] = payload
         public_events.append(data)
     return public_events
+
+
+def _dedupe_commands(commands: list[str] | tuple[str, ...]) -> list[str]:
+    normalized: list[str] = []
+    for raw_command in commands:
+        command = str(raw_command).strip()
+        if command and command not in normalized:
+            normalized.append(command)
+    return normalized
+
+
+def _append_agent_write_history(
+    existing: object,
+    write_result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    history = [dict(item) for item in existing or [] if isinstance(item, dict)]
+    observation = write_result.get("write_observation")
+    data = observation.get("data") if isinstance(observation, dict) else None
+    write_data = data if isinstance(data, dict) else {}
+    changed_files = _safe_record_paths(write_data.get("changed_files"))
+    evidence = write_data.get("write_evidence")
+    if not changed_files and isinstance(evidence, list):
+        changed_files = _safe_record_paths(
+            [
+                item.get("path")
+                for item in evidence
+                if isinstance(item, dict)
+                and (
+                    item.get("before_exists") != item.get("after_exists")
+                    or item.get("before_sha256") != item.get("after_sha256")
+                )
+            ]
+        )
+    approved_paths = _safe_record_paths(
+        [item.get("path") for item in evidence if isinstance(item, dict)]
+        if isinstance(evidence, list)
+        else changed_files
+    )
+    record = {
+        "action_id": str(write_result.get("action_id") or ""),
+        "status": str(write_result.get("status") or "completed"),
+        "changed_files": changed_files,
+        "approved_paths": approved_paths,
+    }
+    history = [
+        item
+        for item in history
+        if item.get("action_id") != record["action_id"]
+    ]
+    return [*history, record][-MAX_AGENT_WRITE_HISTORY:]
+
+
+def _approved_agent_write_paths(task_result: dict[str, Any]) -> list[str]:
+    history = task_result.get("agent_write_history")
+    paths: list[str] = []
+    if isinstance(history, list):
+        for item in history:
+            if isinstance(item, dict):
+                paths.extend(_safe_record_paths(item.get("approved_paths")))
+    if not paths:
+        latest = task_result.get("agent_write_result")
+        if isinstance(latest, dict):
+            observation = latest.get("write_observation")
+            data = observation.get("data") if isinstance(observation, dict) else None
+            if isinstance(data, dict):
+                paths.extend(_safe_record_paths(data.get("changed_files")))
+    return list(dict.fromkeys(paths))
+
+
+def _safe_record_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    paths: list[str] = []
+    for raw_path in value:
+        if not isinstance(raw_path, str):
+            continue
+        try:
+            path = _normalize_approved_path(raw_path)
+        except ValueError:
+            continue
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _task_validation_cycle(task_run: TaskRun) -> dict[str, Any]:
+    if not isinstance(task_run.result, dict):
+        return {}
+    raw_cycle = task_run.result.get("agent_validation_cycle")
+    if not isinstance(raw_cycle, dict):
+        return {}
+    cycle_id = str(raw_cycle.get("cycle_id") or "").strip()
+    raw_commands = raw_cycle.get("commands")
+    raw_results = raw_cycle.get("results")
+    next_index = raw_cycle.get("next_index")
+    if (
+        not cycle_id
+        or not isinstance(raw_commands, list)
+        or not all(isinstance(command, str) for command in raw_commands)
+        or not isinstance(raw_results, list)
+        or not all(isinstance(result, dict) for result in raw_results)
+        or not isinstance(next_index, int)
+        or isinstance(next_index, bool)
+    ):
+        return {}
+    commands = _dedupe_commands(raw_commands)
+    if (
+        not commands
+        or commands != raw_commands
+        or not 0 <= next_index <= len(commands)
+        or len(raw_results) != next_index
+    ):
+        return {}
+    for index, record in enumerate(raw_results):
+        try:
+            result = AgentValidationResult.from_dict(record)
+        except (TypeError, ValueError):
+            return {}
+        if (
+            result.cycle_id != cycle_id
+            or result.command_index != index
+            or result.command_count != len(commands)
+            or result.command != commands[index]
+            or result.status not in {"passed", "failed"}
+        ):
+            return {}
+    return {
+        "cycle_id": cycle_id,
+        "commands": commands,
+        "next_index": next_index,
+        "results": [dict(result) for result in raw_results],
+    }
+
+
+def _validation_results_from_cycle(
+    cycle: dict[str, Any],
+) -> list[ValidationResult]:
+    results: list[ValidationResult] = []
+    for record in cycle.get("results", []):
+        if not isinstance(record, dict):
+            continue
+        observation = record.get("observation")
+        data = observation.get("data") if isinstance(observation, dict) else None
+        if not isinstance(data, dict):
+            continue
+        exit_code = data.get("exit_code")
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+            exit_code = None
+        results.append(
+            ValidationResult(
+                command=str(record.get("command") or data.get("command") or ""),
+                allowed=data.get("allowed") is True,
+                exit_code=exit_code,
+                stdout=str(data.get("stdout") or ""),
+                stderr=str(data.get("stderr") or ""),
+            )
+        )
+    return results
+
+
+def _remaining_agent_continuation_budget(
+    task_run: TaskRun,
+    payload: dict[str, Any],
+) -> ExecutionBudget | None:
+    budget_state = execution_budget_state(
+        task_run.execution_budget,
+        task_run.execution_usage,
+    )
+    remaining = budget_state["remaining"]
+    if (
+        budget_state["exhausted"]
+        or remaining["agent_steps"] <= 0
+        or remaining["tool_calls"] <= 0
+        or remaining["elapsed_ms"] <= 0
+    ):
+        return None
+    requested_steps = _payload_agent_max_steps(payload)
+    return ExecutionBudget(
+        max_agent_steps=min(requested_steps, remaining["agent_steps"]),
+        max_tool_calls=remaining["tool_calls"],
+        max_validation_commands=max(remaining["validation_commands"], 1),
+        max_elapsed_seconds=max((remaining["elapsed_ms"] + 999) // 1000, 1),
+    )
+
+
+def _runtime_continuation_llm_client(
+    payload: dict[str, Any],
+    task_run: TaskRun,
+) -> OpenAICompatibleClient | None:
+    profile = task_run.execution_profile
+    use_llm = _payload_bool(
+        payload.get("use_llm"),
+        default=profile.use_llm if profile else False,
+    )
+    if not use_llm:
+        return None
+    json_mode = (
+        _payload_json_mode(payload)
+        if "json_mode" in payload
+        else profile.json_mode if profile else None
+    )
+    timeout_seconds = (
+        _payload_llm_timeout_seconds(payload)
+        if payload.get("timeout_seconds") not in {None, ""}
+        else profile.llm_timeout_seconds if profile else None
+    )
+    return OpenAICompatibleClient(
+        api_key=str(payload.get("api_key") or "") or None,
+        base_url=str(payload.get("base_url") or "") or None,
+        model=(
+            str(payload.get("model") or "").strip()
+            or (profile.model if profile else "")
+            or None
+        ),
+        json_mode=json_mode,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _pending_runtime_approval(task_run: TaskRun) -> dict[str, Any]:

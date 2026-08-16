@@ -195,6 +195,32 @@ class RuntimePolicy:
             worktree_root=str(worktree_root or "").strip(),
         )
 
+    @classmethod
+    def managed_validation(
+        cls,
+        *,
+        allowed_commands: list[str] | tuple[str, ...],
+        worktree_root: str = "",
+    ) -> "RuntimePolicy":
+        normalized_commands = tuple(
+            dict.fromkeys(
+                command.strip()
+                for command in allowed_commands
+                if command.strip()
+            )
+        )
+        if not normalized_commands:
+            raise ValueError(
+                "Managed-validation policy requires at least one exact command."
+            )
+        return cls(
+            allowed_actions=READ_ONLY_ACTIONS | {"validate"},
+            allowed_edit_paths=(),
+            allowed_commands=normalized_commands,
+            requires_managed_worktree=True,
+            worktree_root=str(worktree_root or "").strip(),
+        )
+
     def evaluate(
         self,
         action: RuntimeAction,

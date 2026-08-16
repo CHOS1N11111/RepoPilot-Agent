@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from repopilot_agent.execution import AcceptanceCriterion
 from repopilot_agent.memory import MemoryStore
 from repopilot_agent.models import (
     AgentAcceptanceUpdate,
@@ -28,11 +29,151 @@ from repopilot_agent.runtime import (
     apply_agent_state_update,
     create_agent_working_state,
     latest_agent_working_state,
+    prepare_post_write_acceptance,
     stop_agent_working_state,
 )
 
 
 class AgentWorkingStateTests(unittest.TestCase):
+    def test_validation_acceptance_is_bound_to_exact_successful_command(self) -> None:
+        command = "python -m unittest tests.test_parser"
+        state = create_agent_working_state(
+            "fix parser",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    criterion_id="validation_1",
+                    kind="validation",
+                    description=f"Validation passes: {command}",
+                    evidence_ref=command,
+                )
+            ],
+        )
+        wrong_command = "python -m unittest tests.test_other"
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(
+                kind="validate",
+                arguments={"command": wrong_command},
+                action_id="validate-wrong",
+            ),
+            RuntimeObservation(
+                action_id="validate-wrong",
+                action_kind="validate",
+                status="completed",
+                summary="Other validation passed.",
+                data={"command": wrong_command, "passed": True, "exit_code": 0},
+            ),
+            selected_paths=[],
+        )
+
+        self.assertEqual(state.acceptance_criteria[0].status, "pending")
+        with self.assertRaises(ValueError):
+            apply_agent_state_update(
+                state,
+                AgentStateUpdate(
+                    acceptance_updates=[
+                        AgentAcceptanceUpdate(
+                            criterion_id="validation_1",
+                            kind="validation",
+                            description=f"Validation passes: {command}",
+                            required=True,
+                            evidence_action_ids=["validate-wrong"],
+                            evidence_summary="A different command passed.",
+                        )
+                    ]
+                ),
+            )
+
+        failed = advance_agent_working_state(
+            state,
+            RuntimeAction(
+                kind="validate",
+                arguments={"command": command},
+                action_id="validate-failed",
+            ),
+            RuntimeObservation(
+                action_id="validate-failed",
+                action_kind="validate",
+                status="verification_failed",
+                summary="Parser validation failed.",
+                data={"command": command, "passed": False, "exit_code": 1},
+            ),
+            selected_paths=[],
+        )
+        self.assertEqual(failed.acceptance_criteria[0].status, "failed")
+        self.assertIn("acceptance:validation_1", agent_completion_blockers(failed))
+
+        passed = advance_agent_working_state(
+            failed,
+            RuntimeAction(
+                kind="validate",
+                arguments={"command": command},
+                action_id="validate-passed",
+            ),
+            RuntimeObservation(
+                action_id="validate-passed",
+                action_kind="validate",
+                status="completed",
+                summary="Parser validation passed.",
+                data={"command": command, "passed": True, "exit_code": 0},
+            ),
+            selected_paths=[],
+        )
+        criterion = passed.acceptance_criteria[0]
+        self.assertEqual(criterion.status, "passed")
+        self.assertEqual(criterion.evidence_action_ids, ["validate-passed"])
+        self.assertEqual(criterion.evidence_ref, command)
+
+    def test_post_write_acceptance_resets_exact_validation_cycle(self) -> None:
+        command = "python -m unittest discover -s tests"
+        state = create_agent_working_state("update parser")
+        state = advance_agent_working_state(
+            state,
+            RuntimeAction(
+                kind="apply_patch",
+                arguments={"path": "src/parser.py"},
+                action_id="write-1",
+            ),
+            RuntimeObservation(
+                action_id="write-1",
+                action_kind="apply_patch",
+                status="applied",
+                summary="Applied parser patch.",
+                data={"applied": True, "changed_files": ["src/parser.py"]},
+            ),
+            selected_paths=["src/parser.py"],
+        )
+
+        prepared = prepare_post_write_acceptance(
+            state,
+            write_action_id="write-1",
+            changed_paths=["src/parser.py"],
+            validation_commands=[command, command],
+        )
+        by_id = {item.criterion_id: item for item in prepared.acceptance_criteria}
+
+        self.assertEqual(by_id["task_change"].status, "passed")
+        self.assertEqual(by_id["approval_scope"].status, "passed")
+        self.assertEqual(by_id["validation_1"].status, "pending")
+        self.assertEqual(by_id["validation_1"].evidence_ref, command)
+        self.assertNotIn("validation_2", by_id)
+        self.assertIn("acceptance:validation_1", agent_completion_blockers(prepared))
+
+        many_commands = [f"python -m unittest test_{index}" for index in range(16)]
+        prepared_many = prepare_post_write_acceptance(
+            state,
+            write_action_id="write-1",
+            changed_paths=["src/parser.py"],
+            validation_commands=many_commands,
+        )
+        many_by_id = {
+            item.criterion_id: item
+            for item in prepared_many.acceptance_criteria
+        }
+        self.assertIn("task_change", many_by_id)
+        self.assertIn("approval_scope", many_by_id)
+        self.assertEqual(many_by_id["validation_16"].evidence_ref, many_commands[-1])
+
     def test_state_progress_is_bounded_and_excludes_unsafe_paths(self) -> None:
         state = create_agent_working_state("x" * 3_000)
         for iteration in range(MAX_RECENT_OBSERVATIONS + 3):

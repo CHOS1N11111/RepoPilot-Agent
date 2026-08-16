@@ -46,6 +46,7 @@ src/repopilot_agent/
   agent_context.py       bounded and redacted iterative context packets
   agent_loop.py          LLM decision loop adapter
   agent_write.py         exact approved-write continuation and diff observation
+  agent_validation.py    exact validation approval and controller continuation
   structured_patch.py    exact-text patch checks and guarded writes
   patch_proposer.py      deterministic and LLM patch proposals
   patch_apply.py         protected file application and rollback snapshots
@@ -145,7 +146,7 @@ The runtime persists ordered decision, authorization, action, observation, confl
 
 ## Working State And Evidence
 
-Working State v4 is a compact controller snapshot, not a transcript. It contains:
+Working State v5 is a compact controller snapshot, not a transcript. It contains:
 
 - Objective, focus, phase, status, iteration, and stop reason.
 - Selected repository paths.
@@ -154,6 +155,7 @@ Working State v4 is a compact controller snapshot, not a transcript. It contains
 - Required and optional acceptance criteria.
 - Expected evidence and the eight newest bounded observations with action ids.
 - Virtual-edit path, hash, revision, hunk-count, conflict, and inspection metadata.
+- Exact validation commands, pass/fail status, and the action evidence bound to each command.
 
 Plan completion and acceptance success must cite prior completed evidence-producing action ids. Search candidates, future expectations, model findings, virtual proposals, user questions, and `finish` are not sufficient evidence. Required acceptance criteria cannot be downgraded by a later model response.
 
@@ -217,7 +219,7 @@ Normal local iterative Agent runs remain non-writing. A sandboxed Task Run uses 
 
 ### Sandboxed Agent Write Loop
 
-Task Runs may opt into `apply_patch` and `edit_file` decisions because they execute in a detached managed worktree. Runtime construction verifies that the target is a non-primary worktree registered by Git and located under RepoPilot's configured managed root. The policy contains an exact allowlist of scanned repository paths and does not expose command or validation actions at this milestone.
+Task Runs may opt into `apply_patch` and `edit_file` decisions because they execute in a detached managed worktree. Runtime construction verifies that the target is a non-primary worktree registered by Git and located under RepoPilot's configured managed root. Write decisions use an exact allowlist of scanned repository paths. Validation is exposed later through a narrower read-only policy that adds `validate` for only the configured exact commands.
 
 The controller accepts a write decision only when it reproduces the latest inspected virtual proposal for the same file. It rechecks the disk baseline, previews the requested content, and compares the resulting SHA-256 with the virtual revision hash. A mismatch becomes an `action_conflict`; it never creates an approval request.
 
@@ -230,8 +232,12 @@ An exact match follows this sequence:
 5. The write observation records file existence plus before/after SHA-256 values.
 6. Complete rollback content is stored in a separate `rollback_snapshot_recorded` runtime event under RepoPilot's ignored local state.
 7. Runtime executes a read-only `inspect_diff`, appends both observations to Working State, and stops at `write_complete`.
+8. Working State v5 replaces generated change/safety criteria with evidence from that write and creates one command-bound criterion for each configured validation command.
+9. Runtime prepares the first exact `validate` approval request. Each command requires its own checkpoint, payload hash, and echoed command allowlist.
+10. Approved command output is UTF-8 decoded, bounded, and stored with exit code and truncation metadata. A failed command records evidence but leaves its criterion failed.
+11. After failure or after all commands pass, RepoPilot resumes the same run and Working State. The controller receives the validation observations and may inspect, propose another revision, ask for input, or finish within the remaining budget.
 
-The Task Run then enters `review_pending`: the resulting diff is ready for inspection, but post-write validation has not run and completion is not claimed. Integrating approved validation decisions into this same controller is the next workflow milestone. The approved-write continuation is deliberately limited to the one persisted pending action; it is not generic process-restart recovery.
+When no validation command is configured, no request-scoped LLM is available, continuation fails, or execution budget is exhausted, the Task Run enters `review_pending` with the write and validation evidence preserved. The approval continuation is deliberately limited to persisted pending actions; it is not generic process-restart recovery.
 
 ## Worktree Sandboxes And Task Runs
 
@@ -253,7 +259,9 @@ After successful validation, an explicitly confirmed delivery action can attach 
 
 ## Validation, Repair, And Completion
 
-Validation commands are recommended from changed file types and likely source/test pairs, then filtered through an allowlist. Documentation-only proposals receive manual review guidance instead of arbitrary commands.
+Validation commands are recommended from changed file types and likely source/test pairs, then filtered through an allowlist. Documentation-only proposals receive manual review guidance instead of arbitrary commands. In the Agent write path, configured commands are deduplicated, bound to Working State criteria, and executed one at a time only after exact approval.
+
+Every validation observation contains the exact command, allowlist decision, exit code, pass flag, bounded stdout/stderr, and separate truncation flags. A command passes acceptance only when a completed observation for that exact command has exit code zero. Another command's success cannot satisfy it.
 
 Failed validation creates bounded feedback with exit status, extracted signals, suspected paths, short output excerpts, and repair steps. An LLM-backed sandboxed run may generate another proposal, but each repair remains behind human approval.
 

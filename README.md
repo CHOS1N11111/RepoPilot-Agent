@@ -18,6 +18,7 @@ RepoPilot Agent is a local, approval-first coding agent that turns repository ta
 - Runs a typed multi-step Agent loop with bounded context, persistent events, evidence-backed plans, and inspectable LLM traces.
 - Prepares SHA-256-guarded virtual patches, then lets sandboxed Task Runs request an exact approval-gated write.
 - Persists expiring exact-action approval grants bound to payload hashes, current diffs, checkpoints, and file or command scope.
+- Runs configured validation one exact approved command at a time and returns bounded output to the same Agent controller.
 - Stores proposals server-side and applies only the files explicitly approved by the user.
 - Executes complete tasks inside managed Git worktrees with validation, bounded repair proposals, checkpoints, and restart recovery.
 - Reads GitHub issues, pull requests, reviews, comments, changed files, and CI/check status.
@@ -32,12 +33,12 @@ flowchart LR
     D --> E{Exact human approval}
     E -->|Approve| F[Managed worktree write]
     E -->|Revise| C
-    F --> G[Diff review and validation]
+    F --> G[Diff review and exact validation approval]
     G -->|Fail| C
     G -->|Pass| H[Local branch and PR draft]
 ```
 
-Normal local Agent runs remain non-writing. In a sandboxed Task Run, an Agent write must exactly reproduce the latest inspected virtual revision, pauses for explicit approval, and can modify only the registered managed worktree. RepoPilot never commits or pushes task changes automatically.
+Normal local Agent runs remain non-writing. In a sandboxed Task Run, writes must reproduce the latest inspected virtual revision, and every write or validation command pauses for exact approval. RepoPilot never commits or pushes task changes automatically.
 
 ## Quick Start
 
@@ -82,7 +83,7 @@ The local Web UI provides:
 - Local path or GitHub URL repository selection and synchronization.
 - LLM model, endpoint, API key, timeout, JSON compatibility, and connection testing.
 - Agent steps, Working State, context budgets, LLM input/output traces, and runtime events.
-- Proposed changes, exact Runtime or per-file approval, cumulative diffs, write hashes, validation feedback, and rollback evidence.
+- Proposed changes, exact Runtime or per-file approval, cumulative diffs, write hashes, approval-gated validation cycles, and rollback evidence.
 - Sandboxed task progress, pause/resume/cancel controls, recovery readiness, and local branch delivery.
 - GitHub issue, pull request, review, comment, and CI/check inspection.
 
@@ -122,6 +123,7 @@ Provider-side JSON mode is enabled by default and automatically retried without 
 - LLM-selected writes are enabled only in registered managed worktrees and must match an inspected virtual revision.
 - Exact patches use SHA-256 preconditions and reject stale or ambiguous changes.
 - Validation commands pass through an allowlist.
+- Failed validation is recorded as bounded evidence but cannot satisfy a required acceptance criterion.
 - Sensitive paths, repository escapes, and unsafe sandbox removal are blocked.
 - Managed task worktrees isolate approved changes from the source branch.
 - API keys are request-scoped, redacted from diagnostics, and never stored in local history.

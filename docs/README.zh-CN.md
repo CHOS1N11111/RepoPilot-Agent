@@ -18,6 +18,7 @@ RepoPilot Agent 是一个在本地运行、以人工审批为先的编程 Agent�
 - 运行带类型约束的多步骤 Agent 循环，支持上下文预算、持久化事件、证据驱动计划和可检查的 LLM Trace。
 - 生成带 SHA-256 保护的虚拟补丁，并允许沙箱 Task Run 请求精确、需审批的写入。
 - 持久化有时效的精确 action 审批凭证，并绑定 payload 哈希、当前 Diff、checkpoint 以及文件或命令范围。
+- 逐条审批并执行配置的验证命令，将有界输出交回同一个 Agent controller 继续决策。
 - 在服务端保存修改方案，并且只应用用户明确批准的文件。
 - 在受管理的 Git Worktree 中执行完整任务，支持验证、有限次数的修复方案、检查点和重启恢复。
 - 读取 GitHub Issue、Pull Request、Review、评论、变更文件以及 CI/Check 状态。
@@ -37,7 +38,7 @@ flowchart LR
     G -->|通过| H[本地分支与 PR 草稿]
 ```
 
-普通本地 Agent 运行保持只读。在沙箱 Task Run 中，Agent 写入必须与最近检查过的虚拟版本完全一致，经过明确审批后也只能修改已登记的受管理 Worktree。RepoPilot 不会自动提交或推送任务改动。
+普通本地 Agent 运行保持只读。在沙箱 Task Run 中，Agent 写入必须与最近检查过的虚拟版本完全一致；每次写入和每条验证命令都要经过精确审批。RepoPilot 不会自动提交或推送任务改动。
 
 ## 快速开始
 

@@ -34,6 +34,22 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(results[0].exit_code, 0)
         self.assertIn("\ufffd", results[0].stdout)
 
+    def test_shell_control_operators_are_rejected_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "must-not-exist.txt"
+            command = (
+                "python -m unittest && python -c "
+                f'"from pathlib import Path; Path(r\'{marker}\').touch()"'
+            )
+
+            result = run_validation(root, [command])[0]
+
+        self.assertFalse(result.allowed)
+        self.assertIsNone(result.exit_code)
+        self.assertFalse(marker.exists())
+        self.assertIn("validation allowlist", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

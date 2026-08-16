@@ -203,6 +203,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
             "rejectRuntimeWrite",
             "runtimeApprovalStatus",
             "runtimeWriteResult",
+            "agentValidationCycle",
         ]:
             self.assertIn(f'id="{element_id}"', self.index_html)
         for endpoint in [
@@ -215,8 +216,15 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("payload_hash: request.payload_hash", self.app_js)
         self.assertIn("file_scope: request.file_scope || []", self.app_js)
         self.assertIn("function renderRuntimeWriteResult", self.app_js)
+        self.assertIn("function renderAgentValidationCycle", self.app_js)
         self.assertIn("Before ${escapeHtml(entry.before_sha256", self.app_js)
         self.assertIn("Rollback snapshot", self.app_js)
+        self.assertIn("Run Exact Validation", self.app_js)
+        self.assertIn('request.action_kind === "validate"', self.app_js)
+        self.assertIn("...buildLlmPayload(),", self.app_js)
+        self.assertIn("Bounded command output", self.app_js)
+        self.assertIn("report.agent_validation_cycle", self.app_js)
+        self.assertIn("taskRun.updated_at", self.app_js)
 
     def test_summary_exposes_repository_map_metrics_and_entries(self) -> None:
         self.assertIn('id="symbolsIndexed"', self.index_html)

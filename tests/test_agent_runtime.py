@@ -207,6 +207,65 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertEqual(command_result.status, "completed")
             self.assertEqual(command_result.data["exit_code"], 0)
 
+    def test_managed_validation_policy_is_exact_and_does_not_enable_generic_commands(self) -> None:
+        command = "python -m unittest discover"
+        policy = RuntimePolicy.managed_validation(allowed_commands=[command])
+
+        validate = RuntimeAction(
+            kind="validate",
+            arguments={"command": command},
+            action_id="validate-managed",
+        )
+        run_command = RuntimeAction(
+            kind="run_command",
+            arguments={"command": command},
+            action_id="command-managed",
+        )
+        edit = RuntimeAction(
+            kind="edit_file",
+            arguments={"path": "notes.txt", "new_content": "changed\n"},
+            action_id="edit-managed",
+        )
+
+        self.assertEqual(policy.evaluate(validate)[0], "approval")
+        self.assertEqual(policy.evaluate(validate, approval_granted=True)[0], "allow")
+        self.assertEqual(policy.evaluate(run_command)[0], "deny")
+        self.assertEqual(policy.evaluate(edit)[0], "deny")
+        with self.assertRaises(ValueError):
+            RuntimePolicy.managed_validation(allowed_commands=[])
+
+    def test_failed_validation_is_bounded_verification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "test_failure.py").write_text(
+                "import unittest\n\n"
+                "class FailureTests(unittest.TestCase):\n"
+                "    def test_failure(self):\n"
+                "        print('x' * 13000)\n"
+                "        self.fail('expected failure')\n",
+                encoding="utf-8",
+            )
+            command = "python -m unittest test_failure"
+            runtime = AgentRuntime(
+                tmp,
+                "validate failure",
+                policy=RuntimePolicy.sandboxed(allowed_commands=[command]),
+            )
+            action = RuntimeAction(
+                kind="validate",
+                arguments={"command": command},
+                action_id="validate-failure",
+            )
+            waiting = runtime.execute(action)
+            grant_observation(runtime, waiting)
+            result = runtime.execute(action)
+
+            self.assertEqual(result.status, "verification_failed")
+            self.assertFalse(result.data["passed"])
+            self.assertEqual(result.data["exit_code"], 1)
+            self.assertTrue(result.data["stdout_truncated"])
+            self.assertLessEqual(len(result.data["stdout"]), 12_000)
+            self.assertIn("expected failure", result.data["stderr"])
+
     def test_git_status_diff_and_user_input_tools_return_structured_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

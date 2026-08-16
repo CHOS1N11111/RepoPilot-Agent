@@ -11,7 +11,7 @@ from ..models import AgentStateUpdate
 from .models import RuntimeAction, RuntimeEvent, RuntimeObservation
 
 
-AGENT_WORKING_STATE_VERSION = 4
+AGENT_WORKING_STATE_VERSION = 5
 MAX_RECENT_OBSERVATIONS = 8
 MAX_OBJECTIVE_CHARS = 2_000
 MAX_OBSERVATION_SUMMARY_CHARS = 500
@@ -20,9 +20,10 @@ MAX_STATE_FINDINGS = 20
 MAX_STATE_QUESTIONS = 12
 MAX_STATE_ITEM_CHARS = 500
 MAX_AGENT_PLAN_ITEMS = 12
-MAX_AGENT_ACCEPTANCE_CRITERIA = 12
+MAX_AGENT_ACCEPTANCE_CRITERIA = 20
 MAX_AGENT_PROPOSED_EDITS = 12
 MAX_EVIDENCE_ACTION_IDS = 8
+MAX_VALIDATION_COMMAND_CHARS = 1_000
 SUCCESSFUL_EVIDENCE_STATUSES = frozenset({"completed", "applied", "no_change"})
 EVIDENCE_ACTION_KINDS = frozenset(
     {
@@ -45,6 +46,7 @@ class AgentStateObservation:
     action_kind: str
     status: str
     summary: str
+    evidence_ref: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -71,6 +73,7 @@ class AgentAcceptanceState:
     status: str
     evidence_action_ids: list[str]
     evidence_summary: str
+    evidence_ref: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -176,11 +179,17 @@ def advance_agent_working_state(
             action_kind=_bounded_text(action.kind, 100),
             status=_bounded_text(observation.status, 100),
             summary=_bounded_text(observation.summary, MAX_OBSERVATION_SUMMARY_CHARS),
+            evidence_ref=_action_evidence_ref(action),
         ),
     ][-MAX_RECENT_OBSERVATIONS:]
     phase, status, stop_reason = _transition(action, observation)
     proposed_edits = _advance_proposed_edits(
         updated_state.proposed_edits,
+        action,
+        observation,
+    )
+    acceptance = _advance_validation_acceptance(
+        updated_state.acceptance_criteria,
         action,
         observation,
     )
@@ -192,6 +201,7 @@ def advance_agent_working_state(
         iteration=iteration,
         selected_paths=_normalize_paths(selected_paths),
         expected_evidence=_bounded_text(expected_evidence, MAX_STATE_ITEM_CHARS),
+        acceptance_criteria=acceptance,
         proposed_edits=proposed_edits,
         recent_observations=recent,
         stop_reason=stop_reason,
@@ -264,6 +274,10 @@ def agent_working_state_from_record(
                         item.get("summary"),
                         MAX_OBSERVATION_SUMMARY_CHARS,
                     ),
+                    evidence_ref=_bounded_text(
+                        item.get("evidence_ref"),
+                        MAX_VALIDATION_COMMAND_CHARS,
+                    ),
                 )
             )
     return AgentWorkingState(
@@ -327,6 +341,7 @@ def render_agent_working_state(state: AgentWorkingState) -> str:
     observations = "\n".join(
         f"- #{item.iteration} {item.action_id} {item.action_kind} "
         f"[{item.status}]: {item.summary}"
+        + (f" Evidence ref: {item.evidence_ref}." if item.evidence_ref else "")
         for item in state.recent_observations
     ) or "- none"
     plan = "\n".join(
@@ -341,6 +356,7 @@ def render_agent_working_state(state: AgentWorkingState) -> str:
     acceptance = "\n".join(
         f"- {item.criterion_id} [{item.status}, "
         f"{'required' if item.required else 'optional'}]: {item.description}"
+        + (f" Target: {item.evidence_ref}." if item.evidence_ref else "")
         + (
             f" Evidence: {', '.join(item.evidence_action_ids)}; {item.evidence_summary}."
             if item.evidence_action_ids
@@ -445,6 +461,99 @@ def agent_completion_ready(state: AgentWorkingState) -> bool:
     return not agent_completion_blockers(state)
 
 
+def prepare_post_write_acceptance(
+    state: AgentWorkingState,
+    *,
+    write_action_id: str,
+    changed_paths: list[str] | tuple[str, ...],
+    validation_commands: list[str] | tuple[str, ...],
+) -> AgentWorkingState:
+    """Bind change, scope, and validation acceptance to one approved write."""
+
+    evidence_ids = _validated_evidence_ids(state, [write_action_id])
+    paths = _normalize_paths(list(changed_paths))
+    commands: list[str] = []
+    for raw_command in validation_commands:
+        command = str(raw_command).strip()
+        if not command or command in commands:
+            continue
+        if len(command) > MAX_VALIDATION_COMMAND_CHARS:
+            raise ValueError(
+                "Validation command exceeds the Working State evidence limit."
+            )
+        commands.append(command)
+
+    generated_ids = {
+        "task_change",
+        "approval_scope",
+        "manual_validation",
+        *{f"validation_{index}" for index in range(1, MAX_AGENT_ACCEPTANCE_CRITERIA + 1)},
+    }
+    criteria = [
+        item
+        for item in state.acceptance_criteria
+        if item.criterion_id not in generated_ids and item.kind != "validation"
+    ]
+    changed_summary = (
+        f"Approved Agent write changed: {', '.join(paths)}."
+        if paths
+        else "The approved Agent write did not change repository content."
+    )
+    criteria.extend(
+        [
+            AgentAcceptanceState(
+                criterion_id="task_change",
+                kind="change",
+                description=f"An approved repository change addresses: {state.objective}",
+                required=True,
+                status="passed" if paths else "failed",
+                evidence_action_ids=evidence_ids,
+                evidence_summary=changed_summary,
+            ),
+            AgentAcceptanceState(
+                criterion_id="approval_scope",
+                kind="safety",
+                description="Every changed file remains inside the exact human-approved scope.",
+                required=True,
+                status="passed",
+                evidence_action_ids=evidence_ids,
+                evidence_summary="The Runtime executed the exact persisted file scope.",
+            ),
+        ]
+    )
+    for index, command in enumerate(commands, start=1):
+        criteria.append(
+            AgentAcceptanceState(
+                criterion_id=f"validation_{index}",
+                kind="validation",
+                description=f"Validation passes: {command}",
+                required=True,
+                status="pending",
+                evidence_action_ids=[],
+                evidence_summary="",
+                evidence_ref=command,
+            )
+        )
+    if not commands:
+        criteria.append(
+            AgentAcceptanceState(
+                criterion_id="manual_validation",
+                kind="manual",
+                description="No automated validation command was configured; inspect the diff manually.",
+                required=False,
+                status="pending",
+                evidence_action_ids=[],
+                evidence_summary="",
+            )
+        )
+    return replace(
+        state,
+        version=AGENT_WORKING_STATE_VERSION,
+        acceptance_criteria=criteria[-MAX_AGENT_ACCEPTANCE_CRITERIA:],
+        updated_at=_now(),
+    )
+
+
 def _apply_plan_updates(state: AgentWorkingState, updates: list[Any]) -> list[AgentPlanItem]:
     plan = list(state.plan)
     positions = {item.step_id.casefold(): index for index, item in enumerate(plan)}
@@ -506,7 +615,14 @@ def _apply_acceptance_updates(
                 if evidence_ids
                 else existing.evidence_summary if existing else ""
             ),
+            evidence_ref=(existing.evidence_ref if existing else ""),
         )
+        if item.kind == "validation" and evidence_ids:
+            _require_matching_validation_evidence(
+                state,
+                evidence_ids,
+                item.evidence_ref,
+            )
         if key in positions:
             criteria[positions[key]] = item
         elif item.criterion_id:
@@ -538,6 +654,75 @@ def _validated_evidence_ids(state: AgentWorkingState, action_ids: list[str]) -> 
     return result[:MAX_EVIDENCE_ACTION_IDS]
 
 
+def _require_matching_validation_evidence(
+    state: AgentWorkingState,
+    action_ids: list[str],
+    evidence_ref: str,
+) -> None:
+    if not evidence_ref:
+        raise ValueError("Validation acceptance requires an exact command evidence_ref.")
+    observations = {
+        item.action_id.casefold(): item
+        for item in state.recent_observations
+    }
+    for action_id in action_ids:
+        observation = observations.get(action_id.casefold())
+        if (
+            observation is None
+            or observation.action_kind != "validate"
+            or observation.status != "completed"
+            or observation.evidence_ref != evidence_ref
+        ):
+            raise ValueError(
+                "Validation acceptance evidence must be a successful validate "
+                f"observation for the exact command: {evidence_ref}"
+            )
+
+
+def _advance_validation_acceptance(
+    current: list[AgentAcceptanceState],
+    action: RuntimeAction,
+    observation: RuntimeObservation,
+) -> list[AgentAcceptanceState]:
+    if action.kind != "validate":
+        return current
+    command = _action_evidence_ref(action)
+    if not command:
+        return current
+    observed_command = str(observation.data.get("command") or "").strip()
+    passed = bool(
+        observation.status == "completed"
+        and observation.data.get("passed") is True
+        and observed_command == command
+    )
+    result: list[AgentAcceptanceState] = []
+    for item in current:
+        if item.kind != "validation" or item.evidence_ref != command:
+            result.append(item)
+            continue
+        result.append(
+            replace(
+                item,
+                status="passed" if passed else "failed",
+                evidence_action_ids=[action.action_id],
+                evidence_summary=_bounded_text(
+                    observation.summary,
+                    MAX_STATE_ITEM_CHARS,
+                ),
+            )
+        )
+    return result
+
+
+def _action_evidence_ref(action: RuntimeAction) -> str:
+    if action.kind not in {"validate", "run_command"}:
+        return ""
+    return _bounded_text(
+        str(action.arguments.get("command") or "").strip(),
+        MAX_VALIDATION_COMMAND_CHARS,
+    )
+
+
 def _initial_acceptance_state(
     criteria: list[Any] | None,
     objective: str,
@@ -557,11 +742,13 @@ def _initial_acceptance_state(
             kind = raw.get("kind")
             description = raw.get("description")
             required = raw.get("required", True)
+            evidence_ref = raw.get("evidence_ref", "")
         else:
             criterion_id = getattr(raw, "criterion_id", "")
             kind = getattr(raw, "kind", "analysis")
             description = getattr(raw, "description", "")
             required = getattr(raw, "required", True)
+            evidence_ref = getattr(raw, "evidence_ref", "") or ""
         normalized_id = _bounded_identifier(criterion_id)
         normalized_description = _bounded_text(description, MAX_STATE_ITEM_CHARS)
         if not normalized_id or not normalized_description:
@@ -575,6 +762,10 @@ def _initial_acceptance_state(
                 status="pending",
                 evidence_action_ids=[],
                 evidence_summary="",
+                evidence_ref=_bounded_text(
+                    evidence_ref,
+                    MAX_VALIDATION_COMMAND_CHARS,
+                ),
             )
         )
     return result
@@ -738,16 +929,29 @@ def _acceptance_from_record(value: object) -> list[AgentAcceptanceState]:
             raw.get("evidence_summary"),
             MAX_STATE_ITEM_CHARS,
         )
-        passed = status == "passed" and bool(evidence_action_ids) and bool(evidence_summary)
+        evidence_backed = bool(evidence_action_ids) and bool(evidence_summary)
+        normalized_status = (
+            status
+            if status in {"passed", "failed"} and evidence_backed
+            else "pending"
+        )
         result.append(
             AgentAcceptanceState(
                 criterion_id=criterion_id,
                 kind=_bounded_text(raw.get("kind"), 100) or "analysis",
                 description=description,
                 required=bool(raw.get("required", True)),
-                status="passed" if passed else "pending",
-                evidence_action_ids=evidence_action_ids if passed else [],
-                evidence_summary=evidence_summary if passed else "",
+                status=normalized_status,
+                evidence_action_ids=(
+                    evidence_action_ids if normalized_status != "pending" else []
+                ),
+                evidence_summary=(
+                    evidence_summary if normalized_status != "pending" else ""
+                ),
+                evidence_ref=_bounded_text(
+                    raw.get("evidence_ref"),
+                    MAX_VALIDATION_COMMAND_CHARS,
+                ),
             )
         )
     return result

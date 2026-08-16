@@ -291,18 +291,29 @@ function currentRuntimeApproval() {
 async function approveRuntimeWrite() {
   const request = currentRuntimeApproval();
   if (!request || !state.taskRun?.can_approve_runtime) {
-    setStatus("No exact managed-worktree write is waiting for approval.");
+    setStatus("No exact managed Runtime action is waiting for approval.");
     return;
   }
-  const scope = (request.file_scope || []).join(", ") || request.action_kind || "action";
+  const isValidation = request.action_kind === "validate";
+  const command = request.action?.arguments?.command || (request.command_allowlist || [])[0] || "";
+  const scope = isValidation
+    ? command
+    : (request.file_scope || []).join(", ") || request.action_kind || "action";
+  const confirmation = isValidation
+    ? `Run this exact validation command inside the managed task worktree?\n\n${scope}`
+    : `Approve the exact ${request.action_kind || "write"} action for ${scope}? Only the managed task worktree will be modified.`;
   const confirmed = window.confirm(
-    `Approve the exact ${request.action_kind || "write"} action for ${scope}? Only the managed task worktree will be modified.`
+    confirmation
   );
   if (!confirmed) return;
-  setStatus("Executing the exact approved Runtime write...");
+  setStatus(isValidation ? "Running the exact approved validation command..." : "Executing the exact approved Runtime write...");
   try {
     const data = await postJson("/api/task-runs/runtime-approval/grant", {
       ...taskRunControlPayload(),
+      ...buildLlmPayload(),
+      use_llm: $("useLlm").checked,
+      use_memory: !$("disableMemory").checked,
+      agent_max_steps: $("agentMaxSteps").value.trim(),
       checkpoint: request.checkpoint,
       payload_hash: request.payload_hash,
       file_scope: request.file_scope || [],
@@ -314,9 +325,10 @@ async function approveRuntimeWrite() {
     }
     state.taskRunRenderedProposalId = null;
     updateTaskRun(data.task_run);
-    const resultingDiff = data.write_result?.resulting_diff || "No resulting diff.";
-    $("diffOutput").textContent = resultingDiff;
-    setStatus(data.task_run?.message || "Approved Runtime write completed.");
+    if (data.write_result) {
+      $("diffOutput").textContent = data.write_result.resulting_diff || "No resulting diff.";
+    }
+    setStatus(data.task_run?.message || "Approved Runtime action completed.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -325,14 +337,17 @@ async function approveRuntimeWrite() {
 async function rejectRuntimeWrite() {
   const request = currentRuntimeApproval();
   if (!request || !state.taskRun?.can_approve_runtime) {
-    setStatus("No exact managed-worktree write is waiting for rejection.");
+    setStatus("No exact managed Runtime action is waiting for rejection.");
     return;
   }
+  const isValidation = request.action_kind === "validate";
   const confirmed = window.confirm(
-    "Reject this exact Runtime write? The managed worktree will remain unchanged."
+    isValidation
+      ? "Reject this exact validation command? It will not run, and the current managed worktree will be preserved."
+      : "Reject this exact Runtime write? The managed worktree will remain unchanged."
   );
   if (!confirmed) return;
-  setStatus("Rejecting the pending Runtime write...");
+  setStatus(isValidation ? "Rejecting the pending validation command..." : "Rejecting the pending Runtime write...");
   try {
     const data = await postJson("/api/task-runs/runtime-approval/reject", {
       ...taskRunControlPayload(),
@@ -345,7 +360,7 @@ async function rejectRuntimeWrite() {
     }
     state.taskRunRenderedProposalId = null;
     updateTaskRun(data.task_run);
-    setStatus(data.task_run?.message || "Runtime write rejected.");
+    setStatus(data.task_run?.message || "Runtime action rejected.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -420,7 +435,7 @@ function updateTaskRun(taskRun) {
   }
   $("generateRepairProposal").disabled = !state.repairParentId;
   const reportKey = report
-    ? `${taskRun.proposal_id || "none"}:${taskRun.history_run_id || "analysis"}`
+    ? `${taskRun.proposal_id || "none"}:${taskRun.history_run_id || "analysis"}:${taskRun.updated_at || "unknown"}`
     : null;
   if (report && reportKey !== state.taskRunRenderedProposalId) {
     state.taskRunRenderedProposalId = reportKey;
@@ -707,10 +722,12 @@ function renderTaskRunPhases(taskRun) {
 
 function taskRunPhaseIndex(taskRun) {
   const status = taskRun.status === "paused" ? taskRun.resume_status : taskRun.status;
+  const runtimeActionKind = taskRun.result?.agent_pending_approval?.action_kind;
   if (["queued", "creating_sandbox"].includes(status)) return 0;
   if (status === "failed" && taskRun.repair_stop_reason) return 4;
   if (["exploring", "pausing", "cancelling", "interrupted", "failed"].includes(status)) return 1;
-  if (status === "awaiting_approval") return 2;
+  if (status === "awaiting_approval") return runtimeActionKind === "validate" ? 4 : 2;
+  if (status === "review_pending" && taskRun.result?.agent_validation_cycle) return 4;
   if (["applying", "review_pending"].includes(status)) return 3;
   if (["validating", "diagnosing", "replanning", "repair_pending"].includes(status)) return 4;
   return 5;
@@ -1320,6 +1337,10 @@ function renderReport(report, payload) {
   $("runtimeApproval").innerHTML = renderRuntimeApproval(runtimeApproval);
   updateRuntimeApprovalControls(runtimeApproval);
   $("runtimeWriteResult").innerHTML = renderRuntimeWriteResult(report.agent_write_result);
+  $("agentValidationCycle").innerHTML = renderAgentValidationCycle(
+    report.agent_validation_cycle,
+    report.agent_validation_results
+  );
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
   $("acceptanceCriteriaList").innerHTML = renderAcceptanceCriteria(
     report.acceptance_criteria || [],
@@ -1667,9 +1688,14 @@ function updateRuntimeApprovalControls(request = currentRuntimeApproval()) {
   const available = Boolean(request?.checkpoint && state.taskRun?.can_approve_runtime);
   $("approveRuntimeWrite").disabled = !available;
   $("rejectRuntimeWrite").disabled = !available;
+  $("approveRuntimeWrite").textContent = request?.action_kind === "validate"
+    ? "Run Exact Validation"
+    : "Approve Exact Write";
   $("runtimeApprovalStatus").textContent = available
-    ? "Review the exact action and diff before approving or rejecting it."
-    : "No managed-worktree write is waiting.";
+    ? request.action_kind === "validate"
+      ? "Review the exact command before allowing it to run in the managed worktree."
+      : "Review the exact action and diff before approving or rejecting it."
+    : "No managed Runtime action is waiting.";
 }
 
 function renderRuntimeWriteResult(result) {
@@ -1693,6 +1719,37 @@ function renderRuntimeWriteResult(result) {
       <details open><summary>Resulting Git diff</summary><pre>${escapeHtml(diff || "No diff.")}</pre></details>
     </div>
   `;
+}
+
+function renderAgentValidationCycle(cycle, savedResults = []) {
+  if (!cycle || !Array.isArray(cycle.commands) || cycle.commands.length === 0) {
+    return item("No approval-gated Agent validation cycle has started.");
+  }
+  const results = Array.isArray(cycle.results) && cycle.results.length
+    ? cycle.results
+    : Array.isArray(savedResults) ? savedResults : [];
+  const rows = cycle.commands.map((command, index) => {
+    const result = results.find((entry) => Number(entry?.command_index) === index);
+    const validation = result?.validation || result?.observation?.data || {};
+    const status = result?.status || (index === cycle.next_index ? "awaiting approval" : "pending");
+    const statusClass = status === "passed" ? "ok" : status === "failed" ? "danger" : "warn";
+    const output = [
+      validation.stdout ? `stdout\n${validation.stdout}` : "",
+      validation.stderr ? `stderr\n${validation.stderr}` : "",
+    ].filter(Boolean).join("\n\n");
+    const truncation = validation.stdout_truncated || validation.stderr_truncated
+      ? " | bounded output truncated"
+      : "";
+    return `<div class="item">
+      <div class="item-title">${index + 1}. <code>${escapeHtml(command)}</code> <span class="tag ${statusClass}">${escapeHtml(status)}</span></div>
+      ${result ? `<p><small>Exit ${escapeHtml(validation.exit_code ?? "n/a")}${escapeHtml(truncation)} | Evidence ${escapeHtml(result.observation?.action_id || "recorded")}</small></p>` : ""}
+      ${output ? `<details><summary>Bounded command output</summary><pre>${escapeHtml(output)}</pre></details>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="item">
+    <div class="item-title">Cycle ${escapeHtml(cycle.cycle_id || "unknown")}</div>
+    <p>${escapeHtml(Math.min(Number(cycle.next_index) || 0, cycle.commands.length))} of ${escapeHtml(cycle.commands.length)} command(s) observed.</p>
+  </div>${rows}`;
 }
 
 function pendingApprovalFromEvents(events = []) {

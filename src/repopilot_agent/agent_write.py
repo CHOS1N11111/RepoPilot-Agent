@@ -15,6 +15,7 @@ from .runtime import (
     RuntimePolicy,
     advance_agent_working_state,
     create_agent_working_state,
+    prepare_post_write_acceptance,
     stop_agent_working_state,
 )
 
@@ -64,6 +65,7 @@ def execute_pending_agent_write(
     payload_hash: str,
     file_scope: list[str] | tuple[str, ...],
     command_allowlist: list[str] | tuple[str, ...],
+    validation_commands: list[str] | tuple[str, ...] = (),
     worktree_root: str | Path | None = None,
 ) -> AgentWriteResult:
     """Grant and execute exactly one persisted pending write, then inspect its diff."""
@@ -134,6 +136,12 @@ def execute_pending_agent_write(
         write_observation,
         selected_paths=selected_paths,
         expected_evidence="Before/after hashes and the resulting managed-worktree diff.",
+    )
+    state = prepare_post_write_acceptance(
+        state,
+        write_action_id=action.action_id,
+        changed_paths=list(write_observation.data.get("changed_files") or []),
+        validation_commands=validation_commands,
     )
     runtime.record_working_state(state)
 

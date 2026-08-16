@@ -15,6 +15,7 @@ from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.models import MemoryContextItem, SearchHit
 from repopilot_agent.patch_proposer import propose_patch_with_optional_llm
 from repopilot_agent.planner import create_plan_with_optional_llm
+from repopilot_agent.runtime import AGENT_WORKING_STATE_VERSION
 from repopilot_agent.workflow import run_workflow
 
 
@@ -458,7 +459,10 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.agent_pending_question, "")
         self.assertTrue(report.agent_completion_ready)
         self.assertEqual(report.agent_completion_blockers, [])
-        self.assertEqual(report.agent_state["version"], 4)
+        self.assertEqual(
+            report.agent_state["version"],
+            AGENT_WORKING_STATE_VERSION,
+        )
         self.assertEqual(report.agent_state["proposed_edits"], [])
         self.assertEqual(report.agent_proposed_edits, [])
         self.assertEqual(report.agent_proposed_diff, "")

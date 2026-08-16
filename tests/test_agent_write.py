@@ -181,6 +181,15 @@ class AgentWriteLoopTests(unittest.TestCase):
                     evidence["after_sha256"],
                     hashlib.sha256("def value():\n    return 2\n".encode("utf-8")).hexdigest(),
                 )
+                self.assertEqual(
+                    completed.write_observation.data["changed_files"],
+                    ["main.py"],
+                )
+                acceptance = {
+                    item["criterion_id"]: item
+                    for item in completed.working_state["acceptance_criteria"]
+                }
+                self.assertEqual(acceptance["task_change"]["status"], "passed")
                 self.assertEqual(completed.rollback_snapshot_paths, ["main.py"])
                 self.assertIn("+    return 2", completed.diff_observation.data["diff"])
                 self.assertEqual(completed.working_state["proposed_edits"], [])

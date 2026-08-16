@@ -14,8 +14,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from repopilot_agent.agent_loop import run_agent_loop, select_agent_hits
 from repopilot_agent.execution import AcceptanceCriterion, ExecutionBudget
 from repopilot_agent.llm.base import LLMMessage
-from repopilot_agent.models import MemoryContextItem, RepoFile, SearchHit
-from repopilot_agent.runtime import RuntimeObservation, STOPPING_OBSERVATION_STATUSES
+from repopilot_agent.models import AgentStep, MemoryContextItem, RepoFile, SearchHit
+from repopilot_agent.runtime import (
+    InMemoryRuntimeStore,
+    RuntimeObservation,
+    STOPPING_OBSERVATION_STATUSES,
+)
 
 
 def decision(
@@ -65,6 +69,112 @@ class FakeLLMClient:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_agent_loop_continues_existing_state_with_unique_action_ids(self) -> None:
+        content = "def parse(value):\n    return value\n"
+        files = [
+            RepoFile(
+                path=Path("main.py"),
+                relative_path="main.py",
+                size_bytes=len(content.encode("utf-8")),
+                language="python",
+                content=content,
+            )
+        ]
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text(content, encoding="utf-8")
+            first = run_agent_loop(
+                "inspect parser",
+                root,
+                files,
+                [],
+                FakeLLMClient(
+                    [
+                        decision(
+                            "search_files",
+                            {"query": "parse"},
+                            "Locate parser candidates.",
+                            "Candidate parser paths.",
+                        )
+                    ]
+                ),
+                max_steps=1,
+                runtime_run_id="continued-agent",
+                runtime_store=store,
+            )
+            continuation_client = FakeLLMClient(
+                [
+                    decision(
+                        "read_file",
+                        {"path": "main.py"},
+                        "Read the parser after validation.",
+                        "Current parser content.",
+                    ),
+                    decision(
+                        "finish",
+                        {"selected_paths": ["main.py"]},
+                        "The validated parser is understood.",
+                        "A completion observation.",
+                        finish_reason="Parser inspection is complete.",
+                        plan_updates=[
+                            {
+                                "step_id": "investigate_repository",
+                                "title": "Investigate repository evidence",
+                                "detail": "Read the parser implementation.",
+                                "status": "completed",
+                                "evidence_action_ids": ["explore-2"],
+                            }
+                        ],
+                        acceptance_updates=[
+                            {
+                                "criterion_id": "analysis_complete",
+                                "kind": "analysis",
+                                "description": "Repository evidence addresses the parser task.",
+                                "required": True,
+                                "evidence_action_ids": ["explore-2"],
+                                "evidence_summary": "main.py was read after validation.",
+                            }
+                        ],
+                    ),
+                ]
+            )
+            continued = run_agent_loop(
+                "inspect parser",
+                root,
+                files,
+                [],
+                continuation_client,
+                max_steps=2,
+                runtime_run_id="continued-agent",
+                runtime_store=store,
+                resume_existing_state=True,
+                prior_steps=[
+                    AgentStep(
+                        order=1,
+                        action="validate",
+                        thought="Run the approved validation.",
+                        tool_input="python -m unittest",
+                        observation="VALIDATION-EVIDENCE: all parser tests passed.",
+                    )
+                ],
+            )
+
+        self.assertEqual(first.working_state.iteration, 1)
+        self.assertEqual([step.order for step in continued.steps], [2, 3])
+        self.assertEqual(continued.stop_reason, "finished")
+        self.assertEqual(continued.working_state.iteration, 3)
+        self.assertIn(
+            "VALIDATION-EVIDENCE",
+            continuation_client.calls[0][1].content,
+        )
+        decision_ids = [
+            event.action_id
+            for event in store.list_events("continued-agent")
+            if event.event_type == "decision_recorded"
+        ]
+        self.assertEqual(decision_ids, ["explore-1", "explore-2", "explore-3"])
+
     def test_empty_repository_keeps_opt_in_write_loop_read_only(self) -> None:
         client = FakeLLMClient(
             [
