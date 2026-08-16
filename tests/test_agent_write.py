@@ -15,6 +15,10 @@ from repopilot_agent.agent_loop import run_agent_loop
 from repopilot_agent.agent_write import execute_pending_agent_write
 from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.models import RepoFile
+from repopilot_agent.repair_loop import (
+    STOP_REPEATED_PROPOSAL,
+    agent_write_proposal_fingerprint,
+)
 from repopilot_agent.runtime import InMemoryRuntimeStore
 from repopilot_agent.worktree_sandbox import (
     create_worktree_sandbox,
@@ -202,6 +206,81 @@ class AgentWriteLoopTests(unittest.TestCase):
                     snapshot_events[0].payload["snapshots"][0]["original_content"],
                     original,
                 )
+            finally:
+                if sandbox_path.exists():
+                    remove_worktree_sandbox(
+                        source,
+                        sandbox_path,
+                        force=True,
+                        worktree_root=managed,
+                    )
+
+    def test_repeated_repair_write_is_blocked_before_approval(self) -> None:
+        original = "def value():\n    return 1\n"
+        expected_sha256 = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        patch_arguments = {
+            "path": "main.py",
+            "expected_sha256": expected_sha256,
+            "hunks": [{"old_text": "return 1", "new_text": "return 2"}],
+        }
+        fingerprint = agent_write_proposal_fingerprint(
+            {"kind": "apply_patch", "arguments": patch_arguments}
+        )
+        responses = [
+            decision("read_file", {"path": "main.py"}),
+            decision("propose_patch", patch_arguments),
+            decision("inspect_proposed_diff", {}),
+            decision("apply_patch", patch_arguments),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            managed = root / "managed"
+            initialize_repository(source, original)
+            sandbox = create_worktree_sandbox(
+                source,
+                name="duplicate-repair",
+                worktree_root=managed,
+            )
+            sandbox_path = Path(sandbox.path)
+            files = [
+                RepoFile(
+                    path=sandbox_path / "main.py",
+                    relative_path="main.py",
+                    size_bytes=len(original.encode("utf-8")),
+                    language="python",
+                    content=original,
+                )
+            ]
+            store = InMemoryRuntimeStore()
+            try:
+                result = run_agent_loop(
+                    "repair value",
+                    sandbox_path,
+                    files,
+                    [],
+                    FakeLLMClient(responses),
+                    max_steps=4,
+                    runtime_run_id="duplicate-repair-run",
+                    runtime_store=store,
+                    allow_write_actions=True,
+                    managed_worktree_root=managed,
+                    repair_context="Do not repeat the prior repair.",
+                    blocked_repair_proposal_fingerprints={fingerprint},
+                )
+
+                self.assertEqual(result.stop_reason, STOP_REPEATED_PROPOSAL)
+                self.assertEqual(result.repair_write_fingerprint, fingerprint)
+                self.assertEqual(result.repair_write_paths, ["main.py"])
+                self.assertEqual(result.pending_approval, {})
+                self.assertEqual(
+                    (sandbox_path / "main.py").read_text(encoding="utf-8"),
+                    original,
+                )
+                event_types = [event.event_type for event in store.list_events(result.runtime_run_id)]
+                self.assertIn("action_conflict", event_types)
+                self.assertNotIn("approval_required", event_types)
             finally:
                 if sandbox_path.exists():
                     remove_worktree_sandbox(

@@ -20,6 +20,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from repopilot_agent.execution import ExecutionBudget
 from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.memory import MemoryStore, default_memory_path
+from repopilot_agent.repair_loop import (
+    STOP_EXECUTION_BUDGET,
+    STOP_NO_PROPOSAL,
+    STOP_REPEATED_FAILURE,
+)
 from repopilot_agent.runtime import AgentRuntime, RuntimeAction, RuntimePolicy, SQLiteRuntimeStore
 from repopilot_agent.task_runs import clear_task_runs, create_task_run, update_task_run
 from repopilot_agent.web_server import RepoPilotRequestHandler
@@ -275,6 +280,8 @@ class RuntimeApprovalWebApiTests(unittest.TestCase):
             )
             self.assertEqual(task_run["status"], "cancelled")
             self.assertEqual(rejected["rejection"]["command"], command)
+            self.assertEqual(task_run["repair_stop_reason"], "approval_rejected")
+            self.assertEqual(task_run["repair_history"][0]["status"], "stopped")
             self.assertEqual(action_count_after, action_count_before)
             self.assertEqual(
                 (fixture["sandbox"] / "notes.txt").read_text(encoding="utf-8"),
@@ -324,13 +331,183 @@ class RuntimeApprovalWebApiTests(unittest.TestCase):
 
             task_run = data["task_run"]
             self.assertEqual(data["validation_result"]["status"], "failed")
-            self.assertEqual(task_run["status"], "review_pending")
+            self.assertEqual(task_run["status"], "failed")
             self.assertEqual(task_run["result"]["agent_steps"][-1]["action"], "read_file")
             self.assertEqual(task_run["result"]["agent_run_id"], task_run["run_id"])
+            self.assertEqual(task_run["repair_stop_reason"], STOP_NO_PROPOSAL)
+            self.assertEqual(
+                [item["attempt"] for item in task_run["repair_history"]],
+                [0, 1],
+            )
             self.assertIn(command, client.calls[0][1].content)
             self.assertIn("Passed: no", client.calls[0][1].content)
             self.assertIn("FAILED", client.calls[0][1].content)
+            self.assertIn("Mode: unified post-validation repair", client.calls[0][1].content)
             self.assertNotIn("request-only-secret", json.dumps(task_run))
+
+    def test_repair_write_requires_approval_and_same_failure_stops_loop(self) -> None:
+        command = "python -m unittest -q test_sample"
+        with self._pending_task([command], validation_passes=False) as fixture:
+            write_request = fixture["approval"]
+            first_write = self._post(
+                fixture["server"],
+                "/api/task-runs/runtime-approval/grant",
+                {
+                    "run_id": fixture["task_run"].run_id,
+                    "source_repo": str(fixture["source"]),
+                    "checkpoint": write_request["checkpoint"],
+                    "payload_hash": write_request["payload_hash"],
+                    "file_scope": write_request["file_scope"],
+                    "command_allowlist": write_request["command_allowlist"],
+                },
+            )
+            first_validation = first_write["task_run"]["result"][
+                "agent_pending_approval"
+            ]
+            after_sha256 = hashlib.sha256(b"after\n").hexdigest()
+            repair_arguments = {
+                "path": "notes.txt",
+                "expected_sha256": after_sha256,
+                "hunks": [{"old_text": "after", "new_text": "repair"}],
+            }
+            client = FakeLLMClient(
+                [
+                    agent_decision("read_file", {"path": "notes.txt"}),
+                    agent_decision("propose_patch", repair_arguments),
+                    agent_decision("inspect_proposed_diff", {}),
+                    agent_decision("apply_patch", repair_arguments),
+                ]
+            )
+
+            with patch(
+                "repopilot_agent.web_server._runtime_continuation_llm_client",
+                return_value=client,
+            ):
+                proposed = self._post(
+                    fixture["server"],
+                    "/api/task-runs/runtime-approval/grant",
+                    {
+                        "run_id": fixture["task_run"].run_id,
+                        "source_repo": str(fixture["source"]),
+                        "checkpoint": first_validation["checkpoint"],
+                        "payload_hash": first_validation["payload_hash"],
+                        "file_scope": first_validation["file_scope"],
+                        "command_allowlist": first_validation["command_allowlist"],
+                        "use_llm": True,
+                        "agent_max_steps": 4,
+                    },
+                )
+
+            waiting = proposed["task_run"]
+            repair_request = waiting["result"]["agent_pending_approval"]
+            self.assertEqual(waiting["status"], "awaiting_approval")
+            self.assertEqual(repair_request["action_kind"], "apply_patch")
+            self.assertEqual(waiting["result"]["agent_repair_pending_attempt"], 1)
+            self.assertEqual(waiting["repair_history"][-1]["status"], "proposal_ready")
+            self.assertEqual(
+                (fixture["sandbox"] / "notes.txt").read_text(encoding="utf-8"),
+                "after\n",
+            )
+
+            repair_write = self._post(
+                fixture["server"],
+                "/api/task-runs/runtime-approval/grant",
+                {
+                    "run_id": fixture["task_run"].run_id,
+                    "source_repo": str(fixture["source"]),
+                    "checkpoint": repair_request["checkpoint"],
+                    "payload_hash": repair_request["payload_hash"],
+                    "file_scope": repair_request["file_scope"],
+                    "command_allowlist": repair_request["command_allowlist"],
+                },
+            )
+            second_validation = repair_write["task_run"]["result"][
+                "agent_pending_approval"
+            ]
+            self.assertEqual(
+                repair_write["task_run"]["result"]["agent_validation_cycle"][
+                    "repair_attempt"
+                ],
+                1,
+            )
+
+            with patch(
+                "repopilot_agent.web_server._runtime_continuation_llm_client"
+            ) as continuation:
+                stopped = self._post(
+                    fixture["server"],
+                    "/api/task-runs/runtime-approval/grant",
+                    {
+                        "run_id": fixture["task_run"].run_id,
+                        "source_repo": str(fixture["source"]),
+                        "checkpoint": second_validation["checkpoint"],
+                        "payload_hash": second_validation["payload_hash"],
+                        "file_scope": second_validation["file_scope"],
+                        "command_allowlist": second_validation["command_allowlist"],
+                        "use_llm": True,
+                    },
+                )
+                continuation.assert_not_called()
+
+            task_run = stopped["task_run"]
+            self.assertEqual(task_run["status"], "failed")
+            self.assertEqual(task_run["repair_stop_reason"], STOP_REPEATED_FAILURE)
+            self.assertEqual(task_run["repair_history"][-1]["status"], "stopped")
+            self.assertEqual(
+                (fixture["sandbox"] / "notes.txt").read_text(encoding="utf-8"),
+                "repair\n",
+            )
+            event_types = [
+                event["event_type"] for event in task_run["result"]["agent_events"]
+            ]
+            self.assertGreaterEqual(event_types.count("repair_progress_updated"), 3)
+
+    def test_failed_validation_stops_before_llm_when_budget_is_exhausted(self) -> None:
+        command = "python -m unittest -q test_sample"
+        with self._pending_task([command], validation_passes=False) as fixture:
+            write_request = fixture["approval"]
+            first_write = self._post(
+                fixture["server"],
+                "/api/task-runs/runtime-approval/grant",
+                {
+                    "run_id": fixture["task_run"].run_id,
+                    "source_repo": str(fixture["source"]),
+                    "checkpoint": write_request["checkpoint"],
+                    "payload_hash": write_request["payload_hash"],
+                    "file_scope": write_request["file_scope"],
+                    "command_allowlist": write_request["command_allowlist"],
+                },
+            )
+            validation_request = first_write["task_run"]["result"][
+                "agent_pending_approval"
+            ]
+            fixture["task_run"].execution_budget = ExecutionBudget(max_tool_calls=3)
+
+            with patch(
+                "repopilot_agent.web_server._runtime_continuation_llm_client"
+            ) as continuation:
+                stopped = self._post(
+                    fixture["server"],
+                    "/api/task-runs/runtime-approval/grant",
+                    {
+                        "run_id": fixture["task_run"].run_id,
+                        "source_repo": str(fixture["source"]),
+                        "checkpoint": validation_request["checkpoint"],
+                        "payload_hash": validation_request["payload_hash"],
+                        "file_scope": validation_request["file_scope"],
+                        "command_allowlist": validation_request["command_allowlist"],
+                        "use_llm": True,
+                    },
+                )
+                continuation.assert_not_called()
+
+            task_run = stopped["task_run"]
+            self.assertEqual(task_run["status"], "failed")
+            self.assertEqual(task_run["repair_stop_reason"], STOP_EXECUTION_BUDGET)
+            self.assertEqual(
+                task_run["result"]["agent_stop_reason"],
+                STOP_EXECUTION_BUDGET,
+            )
 
     def _pending_task(
         self,
@@ -470,12 +647,16 @@ class FakeLLMClient:
 
 
 def read_file_decision(path: str) -> str:
+    return agent_decision("read_file", {"path": path})
+
+
+def agent_decision(kind: str, arguments: dict) -> str:
     return json.dumps(
         {
             "version": 2,
-            "rationale": "Inspect the implementation after failed validation.",
-            "action": {"kind": "read_file", "arguments": {"path": path}},
-            "expected_evidence": "Current implementation content.",
+            "rationale": f"Use {kind} after failed validation.",
+            "action": {"kind": kind, "arguments": arguments},
+            "expected_evidence": f"Typed evidence from {kind}.",
             "state_update": {
                 "focus": "Diagnose failed validation.",
                 "add_findings": [],

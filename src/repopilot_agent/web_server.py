@@ -21,6 +21,15 @@ from .agent_validation import (
     reject_pending_agent_validation,
     request_agent_validation,
 )
+from .agent_repair import (
+    AgentRepairTransition,
+    blocked_agent_repair_fingerprints,
+    observe_agent_repair_proposal,
+    observe_agent_validation,
+    observe_agent_write,
+    render_agent_repair_context,
+    stop_agent_repair,
+)
 from .agent_write import (
     AgentWriteError,
     execute_pending_agent_write,
@@ -50,6 +59,7 @@ from .repair_loop import (
     STOP_NO_PROPOSAL,
     STOP_NO_REPOSITORY_CHANGE,
     STOP_REPAIR_BUDGET,
+    STOP_REPEATED_PROPOSAL,
     RepairAttemptRecord,
     RepairLoopStopped,
     latest_failure_fingerprint,
@@ -64,6 +74,8 @@ from .runtime import (
     SQLiteRuntimeStore,
     agent_completion_blockers,
     agent_completion_ready,
+    agent_working_state_from_record,
+    stop_agent_working_state,
 )
 from .safety import SafetyCheckError
 from .task_runs import (
@@ -1639,6 +1651,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 status=HTTPStatus.CONFLICT,
             )
             return
+        task_result = dict(task_run.result or {})
+        repair_attempt = _pending_agent_repair_attempt(task_result)
         started_at = time.monotonic()
         try:
             file_scope = _payload_string_list(payload, "file_scope")
@@ -1662,7 +1676,6 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        task_result = dict(task_run.result or {})
         store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
         task_result["agent_events"] = _public_runtime_events(
             store.list_events(task_run.run_id)
@@ -1684,6 +1697,47 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_run.execution_budget,
             task_run.execution_usage,
         )
+        if result.status != "approval_required":
+            write_transition = observe_agent_write(
+                task_run.repair_history,
+                attempt=repair_attempt,
+                max_attempts=_task_run_max_repair_attempts(task_run),
+                changed_paths=list(
+                    result.write_observation.data.get("changed_files") or []
+                ),
+            )
+            if repair_attempt > 0 or write_transition.stop_reason:
+                _apply_agent_repair_transition(
+                    task_run,
+                    task_result,
+                    write_transition,
+                    store,
+                )
+            if write_transition.stop_reason:
+                task_result["agent_pending_approval"] = {}
+                task_result["agent_stop_reason"] = write_transition.stop_reason
+                task_result.pop("agent_repair_pending_attempt", None)
+                update_task_run(
+                    task_run,
+                    "failed",
+                    write_transition.message,
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_repair_stopped",
+                    write_transition.message,
+                    "inspect_failure",
+                )
+                self._persist_task_run(task_run)
+                self._send_json(
+                    {
+                        "write_result": result.to_dict(),
+                        "task_run": task_run.to_public_dict(),
+                    }
+                )
+                return
         if result.status == "approval_required":
             fresh_request = result.write_observation.data.get("approval_request") or {}
             task_result["agent_pending_approval"] = fresh_request
@@ -1705,11 +1759,13 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 result.working_state.get("acceptance_criteria")
             )
             validation_commands = _dedupe_commands(task_run.validation_commands)
+            task_result.pop("agent_repair_pending_attempt", None)
             task_result["agent_validation_cycle"] = {
                 "cycle_id": result.action_id,
                 "commands": validation_commands,
                 "next_index": 0,
                 "results": [],
+                "repair_attempt": repair_attempt,
             }
             if validation_commands:
                 try:
@@ -1991,19 +2047,77 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         *,
         validation_passed: bool,
     ) -> None:
+        validation = _validation_results_from_cycle(cycle)
+        repair_transition = observe_agent_validation(
+            task_run.repair_history,
+            attempt=cycle["repair_attempt"],
+            max_attempts=_task_run_max_repair_attempts(task_run),
+            validation=validation,
+            summary=(
+                "All approved validation commands passed."
+                if validation_passed
+                else "Approved validation failed; bounded evidence was returned to the Agent."
+            ),
+        )
+        _apply_agent_repair_transition(
+            task_run,
+            task_result,
+            repair_transition,
+            store,
+        )
+        if repair_transition.stop_reason:
+            _finish_stopped_agent_repair(
+                task_run,
+                task_result,
+                repair_transition,
+            )
+            return
+
+        continuation_config_error = ""
         try:
             remaining_budget = _remaining_agent_continuation_budget(task_run, payload)
-            llm_client = _runtime_continuation_llm_client(payload, task_run)
-        except (LLMError, ValueError) as exc:
+        except ValueError as exc:
             remaining_budget = None
-            llm_client = None
-            task_result["agent_continuation_error"] = str(exc)
+            continuation_config_error = str(exc)
+            task_result["agent_continuation_error"] = continuation_config_error
+        llm_client = None
+        if remaining_budget is not None:
+            try:
+                llm_client = _runtime_continuation_llm_client(payload, task_run)
+            except (LLMError, ValueError) as exc:
+                continuation_config_error = str(exc)
+                task_result["agent_continuation_error"] = continuation_config_error
         if llm_client is None or remaining_budget is None:
-            reason = (
-                "No request-scoped LLM client is available for the next decision."
-                if llm_client is None
-                else "The remaining execution budget cannot cover another Agent decision."
-            )
+            if (
+                repair_transition.repair_required
+                and remaining_budget is None
+                and not continuation_config_error
+            ):
+                stopped = stop_agent_repair(
+                    repair_transition.history,
+                    attempt=repair_transition.next_attempt or repair_transition.attempt,
+                    max_attempts=repair_transition.max_attempts,
+                    reason=STOP_EXECUTION_BUDGET,
+                    message=(
+                        "Validation failed, but the remaining execution budget cannot cover "
+                        "another Agent repair decision."
+                    ),
+                    trigger_failure_fingerprint=(
+                        repair_transition.trigger_failure_fingerprint
+                    ),
+                )
+                _apply_agent_repair_transition(task_run, task_result, stopped, store)
+                _finish_stopped_agent_repair(task_run, task_result, stopped)
+                return
+            if continuation_config_error:
+                reason = (
+                    "Agent continuation configuration is invalid: "
+                    f"{continuation_config_error}"
+                )
+            elif llm_client is None:
+                reason = "No request-scoped LLM client is available for the next decision."
+            else:
+                reason = "The remaining execution budget cannot cover another Agent decision."
             task_result["agent_stop_reason"] = (
                 "validation_passed" if validation_passed else "validation_failed"
             )
@@ -2052,6 +2166,16 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 execution_budget=remaining_budget,
                 memory_context=memory_context,
                 traces=traces,
+                repair_context=(
+                    render_agent_repair_context(repair_transition)
+                    if repair_transition.repair_required
+                    else ""
+                ),
+                blocked_repair_proposal_fingerprints=(
+                    blocked_agent_repair_fingerprints(repair_transition.history)
+                    if repair_transition.repair_required
+                    else None
+                ),
             )
         except (LLMError, AgentValidationError, ValueError, WorktreeSandboxError) as exc:
             task_result["agent_continuation_error"] = str(exc)
@@ -2111,6 +2235,81 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         task_run.acceptance_criteria = criteria_from_records(
             continued.working_state.to_dict().get("acceptance_criteria")
         )
+
+        if repair_transition.repair_required:
+            pending_kind = str(continued.pending_approval.get("action_kind") or "")
+            repeated_proposal = continued.stop_reason == STOP_REPEATED_PROPOSAL
+            if pending_kind in {"apply_patch", "edit_file"} or repeated_proposal:
+                next_attempt = repair_transition.next_attempt
+                if next_attempt is None or not continued.repair_write_fingerprint:
+                    proposal_transition = stop_agent_repair(
+                        repair_transition.history,
+                        attempt=next_attempt or repair_transition.attempt,
+                        max_attempts=repair_transition.max_attempts,
+                        reason=STOP_NO_PROPOSAL,
+                        message=(
+                            "The Agent reached a repair write decision without a valid material "
+                            "proposal fingerprint."
+                        ),
+                        trigger_failure_fingerprint=(
+                            repair_transition.trigger_failure_fingerprint
+                        ),
+                    )
+                else:
+                    proposal_transition = observe_agent_repair_proposal(
+                        repair_transition.history,
+                        attempt=next_attempt,
+                        max_attempts=repair_transition.max_attempts,
+                        trigger_failure_fingerprint=(
+                            repair_transition.trigger_failure_fingerprint
+                        ),
+                        proposal_fingerprint=continued.repair_write_fingerprint,
+                        proposal_paths=continued.repair_write_paths,
+                        summary=continued.summary or "Agent repair proposal prepared.",
+                    )
+                _apply_agent_repair_transition(
+                    task_run,
+                    task_result,
+                    proposal_transition,
+                    store,
+                )
+                if proposal_transition.stop_reason:
+                    task_result["agent_pending_approval"] = {}
+                    task_result["agent_stop_reason"] = proposal_transition.stop_reason
+                    _finish_stopped_agent_repair(
+                        task_run,
+                        task_result,
+                        proposal_transition,
+                    )
+                    return
+                task_result["agent_repair_pending_attempt"] = proposal_transition.attempt
+                _sync_agent_repair_result(task_run, task_result)
+            elif not continued.pending_question:
+                budget_state = execution_budget_state(
+                    task_run.execution_budget,
+                    task_run.execution_usage,
+                )
+                exhausted = budget_state["exhausted"] or (
+                    budget_state["remaining"]["agent_steps"] <= 0
+                    or budget_state["remaining"]["tool_calls"] <= 0
+                )
+                stopped = stop_agent_repair(
+                    repair_transition.history,
+                    attempt=repair_transition.next_attempt or repair_transition.attempt,
+                    max_attempts=repair_transition.max_attempts,
+                    reason=STOP_EXECUTION_BUDGET if exhausted else STOP_NO_PROPOSAL,
+                    message=(
+                        "The execution budget ended before the Agent produced a new repair patch."
+                        if exhausted
+                        else "The Agent continuation produced no apply-ready repair action."
+                    ),
+                    trigger_failure_fingerprint=(
+                        repair_transition.trigger_failure_fingerprint
+                    ),
+                )
+                _apply_agent_repair_transition(task_run, task_result, stopped, store)
+                _finish_stopped_agent_repair(task_run, task_result, stopped)
+                return
 
         if continued.pending_approval:
             update_task_run(
@@ -2253,6 +2452,25 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         task_result["agent_pending_approval"] = {}
         task_result["agent_stop_reason"] = "approval_rejected"
         task_result["agent_write_result"] = rejected
+        repair_attempt = _pending_agent_repair_attempt(task_result)
+        task_result.pop("agent_repair_pending_attempt", None)
+        if repair_attempt > 0:
+            rejected_transition = stop_agent_repair(
+                task_run.repair_history,
+                attempt=repair_attempt,
+                max_attempts=_task_run_max_repair_attempts(task_run),
+                reason="approval_rejected",
+                message="The user rejected the exact pending Agent repair write.",
+                trigger_failure_fingerprint=latest_failure_fingerprint(
+                    task_run.repair_history
+                ),
+            )
+            _apply_agent_repair_transition(
+                task_run,
+                task_result,
+                rejected_transition,
+                store,
+            )
         update_task_run(
             task_run,
             "cancelled",
@@ -2321,6 +2539,22 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         task_result["agent_pending_approval"] = {}
         task_result["agent_stop_reason"] = "approval_rejected"
         task_result["agent_validation_rejection"] = rejected
+        rejected_transition = stop_agent_repair(
+            task_run.repair_history,
+            attempt=cycle["repair_attempt"],
+            max_attempts=_task_run_max_repair_attempts(task_run),
+            reason="approval_rejected",
+            message="The user rejected the exact pending Agent validation command.",
+            trigger_failure_fingerprint=latest_failure_fingerprint(
+                task_run.repair_history
+            ),
+        )
+        _apply_agent_repair_transition(
+            task_run,
+            task_result,
+            rejected_transition,
+            store,
+        )
         update_task_run(
             task_run,
             "cancelled",
@@ -2612,6 +2846,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             data["timeline"] = [asdict(event) for event in timeline]
             if proposal_session:
                 _add_session_public_fields(data, proposal_session)
+            elif runtime_approval:
+                _sync_agent_repair_result(task_run, data)
             history_run_id = self._memory(task_run.source_repo).create_run(
                 repo_path=report.repo_path,
                 task=task_run.task,
@@ -3435,6 +3671,119 @@ def _append_agent_write_history(
     return [*history, record][-MAX_AGENT_WRITE_HISTORY:]
 
 
+def _task_run_max_repair_attempts(task_run: TaskRun) -> int:
+    if task_run.execution_profile is None:
+        return DEFAULT_MAX_REPAIR_ATTEMPTS
+    return min(
+        max(task_run.execution_profile.max_repair_attempts, 0),
+        MAX_REPAIR_ATTEMPTS_LIMIT,
+    )
+
+
+def _pending_agent_repair_attempt(task_result: dict[str, Any]) -> int:
+    value = task_result.get("agent_repair_pending_attempt", 0)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return 0
+    return value
+
+
+def _apply_agent_repair_transition(
+    task_run: TaskRun,
+    task_result: dict[str, Any],
+    transition: AgentRepairTransition,
+    store: SQLiteRuntimeStore,
+) -> None:
+    task_run.repair_history = list(transition.history)
+    task_run.repair_stop_reason = transition.stop_reason
+    task_run.repair_stop_message = transition.message if transition.stop_reason else ""
+    task_result["agent_repair"] = transition.to_dict()
+    if transition.stop_reason:
+        state = agent_working_state_from_record(
+            task_result.get("agent_state"),
+            default_objective=task_run.task,
+        )
+        if state is not None and state.stop_reason != transition.stop_reason:
+            state = stop_agent_working_state(state, transition.stop_reason)
+            task_result["agent_state"] = state.to_dict()
+            store.append_event(
+                task_run.run_id,
+                "working_state_updated",
+                payload={"working_state": state.to_dict()},
+            )
+    store.append_event(
+        task_run.run_id,
+        "repair_progress_updated",
+        payload={"repair": transition.to_dict()},
+    )
+    _sync_agent_repair_result(task_run, task_result)
+    task_result["agent_events"] = _public_runtime_events(
+        store.list_events(task_run.run_id)
+    )
+
+
+def _finish_stopped_agent_repair(
+    task_run: TaskRun,
+    task_result: dict[str, Any],
+    transition: AgentRepairTransition,
+) -> None:
+    task_result["agent_pending_approval"] = {}
+    task_result["agent_stop_reason"] = transition.stop_reason
+    task_result.pop("agent_repair_pending_attempt", None)
+    _sync_agent_repair_result(task_run, task_result)
+    update_task_run(
+        task_run,
+        "failed",
+        transition.message,
+        result=task_result,
+        error=None,
+    )
+    record_task_run_checkpoint(
+        task_run,
+        "runtime_repair_stopped",
+        transition.message,
+        "inspect_failure",
+    )
+
+
+def _sync_agent_repair_result(
+    task_run: TaskRun,
+    task_result: dict[str, Any],
+) -> None:
+    maximum = _task_run_max_repair_attempts(task_run)
+    pending = _pending_agent_repair_attempt(task_result)
+    recorded_attempts = [item.attempt for item in task_run.repair_history]
+    current = max([pending, *recorded_attempts], default=0)
+    remaining = max(maximum - current, 0)
+    latest = max(task_run.repair_history, key=lambda item: item.attempt, default=None)
+    repair_needed = bool(latest and latest.status == "validation_failed")
+    task_result.update(
+        {
+            "repair_attempt": current,
+            "max_repair_attempts": maximum,
+            "repair_budget_remaining": remaining,
+            "next_repair_attempt": (
+                current + 1
+                if repair_needed
+                and not task_run.repair_stop_reason
+                and remaining > 0
+                and pending == 0
+                else None
+            ),
+            "repair_budget_exhausted": bool(
+                task_run.repair_stop_reason == STOP_REPAIR_BUDGET
+                or (repair_needed and remaining <= 0)
+            ),
+            "repair_history": [
+                item.to_dict() for item in task_run.repair_history
+            ],
+            "repair_stop_reason": task_run.repair_stop_reason,
+            "repair_stop_message": task_run.repair_stop_message,
+            "auto_repair_enabled": task_run.auto_repair_enabled,
+            "agent_repair_mode": "unified_controller",
+        }
+    )
+
+
 def _approved_agent_write_paths(task_result: dict[str, Any]) -> list[str]:
     history = task_result.get("agent_write_history")
     paths: list[str] = []
@@ -3478,6 +3827,7 @@ def _task_validation_cycle(task_run: TaskRun) -> dict[str, Any]:
     raw_commands = raw_cycle.get("commands")
     raw_results = raw_cycle.get("results")
     next_index = raw_cycle.get("next_index")
+    repair_attempt = raw_cycle.get("repair_attempt", 0)
     if (
         not cycle_id
         or not isinstance(raw_commands, list)
@@ -3486,6 +3836,9 @@ def _task_validation_cycle(task_run: TaskRun) -> dict[str, Any]:
         or not all(isinstance(result, dict) for result in raw_results)
         or not isinstance(next_index, int)
         or isinstance(next_index, bool)
+        or not isinstance(repair_attempt, int)
+        or isinstance(repair_attempt, bool)
+        or repair_attempt < 0
     ):
         return {}
     commands = _dedupe_commands(raw_commands)
@@ -3514,6 +3867,7 @@ def _task_validation_cycle(task_run: TaskRun) -> dict[str, Any]:
         "commands": commands,
         "next_index": next_index,
         "results": [dict(result) for result in raw_results],
+        "repair_attempt": repair_attempt,
     }
 
 

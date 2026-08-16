@@ -407,9 +407,9 @@ For a complete sandboxed Task Run:
 5. Repeat the approval for each configured command. One approval never authorizes another command.
 6. Inspect `Agent Validation Cycle` for exit codes, bounded stdout/stderr, truncation markers, and evidence ids.
 
-After a failed command or after all commands pass, RepoPilot gives those observations back to the same Agent run. Within its remaining budget, the controller can inspect more context, prepare another exact write, request user input, or finish. Failed output is useful evidence, but it never marks the command's acceptance criterion as passed.
+After a failed command or after all commands pass, RepoPilot gives those observations back to the same Agent run. Within its remaining budget, the controller can inspect more context, prepare another exact write, request user input, or finish. The Repair Loop panel labels the original validation as `Baseline validation` (attempt 0) and later writes as repair attempts. Failed output is useful evidence, but it never marks the command's acceptance criterion as passed.
 
-The browser sends the current LLM settings with the approval request so continuation can use a request-scoped client. API keys are not written to the task record. If no LLM client or budget remains, the run stops at `review_pending` with all evidence preserved.
+The browser sends the current LLM settings with the approval request so continuation can use a request-scoped client. API keys are not written to the task record. If no LLM client is available, the run stops at `review_pending` with all evidence preserved. If execution or repair capacity is exhausted during a required repair, the run stops with the corresponding typed budget reason.
 
 ### Server-stored proposal path
 
@@ -448,7 +448,22 @@ If validation fails, RepoPilot builds bounded validation feedback:
 - Repair steps.
 - A generated repair task.
 
-In the web UI:
+### Sandboxed iterative Agent path
+
+When a sandboxed iterative Agent write fails validation:
+
+1. Read `Validation Feedback`, `Agent Validation Cycle`, and the baseline entry in `Repair Loop`.
+2. RepoPilot returns the bounded failure evidence, current fingerprint, prior outcomes, and remaining repair budget to the same controller.
+3. The controller may inspect files and prepare a materially new virtual revision through several LLM calls.
+4. A new write appears under `Pending Runtime Approval`; inspect its exact Diff before approving it.
+5. Approve the repair write only when its path, payload hash, and Diff are correct.
+6. Approve the next exact validation command separately.
+
+RepoPilot never auto-approves a repair. A repeated proposed write is blocked before it creates another approval request. The loop also stops with a visible reason for the same validation failure after a repair, no repository change, no apply-ready repair, or exhausted repair/execution budgets.
+
+### Server-stored proposal path
+
+For a compatible server-stored proposal:
 
 1. Read the Validation Feedback panel.
 2. Check the displayed repair budget, such as `next attempt 1/2`.
@@ -459,7 +474,7 @@ In the web UI:
 
 Repair proposals inherit the original proposal's retry budget. If a repair proposal is applied and validation fails again, RepoPilot can generate the next repair attempt until the configured budget is exhausted. Once exhausted, the failure analysis remains visible, but `Generate Repair Proposal` is disabled and the API rejects further repair generation for that proposal.
 
-This keeps the repair loop explicit, bounded, and human-approved.
+Both paths keep repair explicit, bounded, and human-approved. The iterative path uses the same Runtime controller and event trajectory; the compatible path retains `Generate Repair Proposal` and its server-stored proposal ids.
 
 ## Step 11: Inspect Git State
 

@@ -82,6 +82,10 @@ class AgentContextTests(unittest.TestCase):
                 "validation_commands": 4,
                 "elapsed_ms": 10_000,
             },
+            repair_context=(
+                "Repair attempt 1 of 2 after fingerprint abc123. "
+                "OPENAI_API_KEY=sk-repair-context-secret"
+            ),
         )
 
         self.assertLessEqual(len(packet.text), AGENT_CONTEXT_BUDGET.max_chars)
@@ -90,6 +94,7 @@ class AgentContextTests(unittest.TestCase):
             [
                 "working_state",
                 "remaining_budget",
+                "repair_control",
                 "acceptance_criteria",
                 "pinned_memory",
                 "repository_map",
@@ -100,6 +105,7 @@ class AgentContextTests(unittest.TestCase):
             ],
         )
         self.assertIn("previous parser fix", packet.text)
+        self.assertIn("Repair attempt 1 of 2", packet.text)
         self.assertNotIn("ordinary related run", packet.text)
         self.assertIn("Implementation plan:", packet.text)
         self.assertIn("investigate_repository [in_progress]", packet.text)
@@ -110,6 +116,7 @@ class AgentContextTests(unittest.TestCase):
         self.assertIn("Newest parser observation", packet.text)
         self.assertIn("[REDACTED]", packet.text)
         self.assertNotIn("sk-live-secret", packet.text)
+        self.assertNotIn("sk-repair-context-secret", packet.text)
         self.assertIn("current_diff", packet.summary)
 
     def test_total_budget_preserves_priority_and_omits_lower_sections(self) -> None:
@@ -117,6 +124,7 @@ class AgentContextTests(unittest.TestCase):
             max_chars=180,
             working_state_chars=80,
             remaining_budget_chars=80,
+            repair_control_chars=80,
             acceptance_criteria_chars=80,
             pinned_memory_chars=80,
             repository_map_chars=80,

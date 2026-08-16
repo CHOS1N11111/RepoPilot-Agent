@@ -45,6 +45,7 @@ src/repopilot_agent/
   repository_map.py      symbols, dependencies, and source/test relations
   agent_context.py       bounded and redacted iterative context packets
   agent_loop.py          LLM decision loop adapter
+  agent_repair.py        unified repair transitions and stop decisions
   agent_write.py         exact approved-write continuation and diff observation
   agent_validation.py    exact validation approval and controller continuation
   structured_patch.py    exact-text patch checks and guarded writes
@@ -235,9 +236,10 @@ An exact match follows this sequence:
 8. Working State v5 replaces generated change/safety criteria with evidence from that write and creates one command-bound criterion for each configured validation command.
 9. Runtime prepares the first exact `validate` approval request. Each command requires its own checkpoint, payload hash, and echoed command allowlist.
 10. Approved command output is UTF-8 decoded, bounded, and stored with exit code and truncation metadata. A failed command records evidence but leaves its criterion failed.
-11. After failure or after all commands pass, RepoPilot resumes the same run and Working State. The controller receives the validation observations and may inspect, propose another revision, ask for input, or finish within the remaining budget.
+11. After failure or after all commands pass, RepoPilot resumes the same run and Working State. The controller receives the validation observations plus bounded repair state and may inspect, propose another revision, ask for input, or finish within the remaining budget.
+12. A materially new repair write stops at the same exact approval boundary. A repeated repair action is fingerprinted and blocked before another approval request is created.
 
-When no validation command is configured, no request-scoped LLM is available, continuation fails, or execution budget is exhausted, the Task Run enters `review_pending` with the write and validation evidence preserved. The approval continuation is deliberately limited to persisted pending actions; it is not generic process-restart recovery.
+When no validation command is configured, no request-scoped LLM is available, or continuation fails, the Task Run enters `review_pending` with the write and validation evidence preserved. Exhausted repair or execution budgets and deterministic no-progress conditions stop with a typed reason. The approval continuation is deliberately limited to persisted pending actions; it is not generic process-restart recovery.
 
 ## Worktree Sandboxes And Task Runs
 
@@ -263,9 +265,11 @@ Validation commands are recommended from changed file types and likely source/te
 
 Every validation observation contains the exact command, allowlist decision, exit code, pass flag, bounded stdout/stderr, and separate truncation flags. A command passes acceptance only when a completed observation for that exact command has exit code zero. Another command's success cannot satisfy it.
 
-Failed validation creates bounded feedback with exit status, extracted signals, suspected paths, short output excerpts, and repair steps. An LLM-backed sandboxed run may generate another proposal, but each repair remains behind human approval.
+Failed validation creates bounded feedback with exit status, extracted signals, suspected paths, short output excerpts, and repair steps. In a write-capable iterative Task Run, the original post-write validation is repair attempt 0. A failure opens attempt 1 only when both repair and execution budgets remain. The same controller receives the failure fingerprint, prior outcomes, and remaining attempts in a dedicated bounded context section.
 
-Repair progress fingerprints normalized failures and proposed file contents. The loop stops when it detects repeated failures, repeated proposals, no-op changes, missing apply-ready edits, or exhausted repair/execution budgets.
+Repair progress fingerprints normalized failures and the material content of Agent write actions independently of action ids and baseline hashes. Before executing a write decision, the controller compares it with prior repair proposals. A repeated proposal becomes an `action_conflict` and stops without creating an approval request. Every new proposal still requires the normal exact human grant.
+
+After an approved repair write, the next validation cycle carries that repair attempt number. The loop stops on the same normalized failure as its trigger, a repeated proposal, an approved no-op write, a continuation with no apply-ready repair, or exhausted repair/execution budgets. `repair_progress_updated` events and the Task Run repair history preserve each transition for the trajectory and Web UI. The compatible server-stored proposal repair endpoint remains available but is not used by this unified iterative path.
 
 A task reaches `completed` only when completion evidence confirms that:
 

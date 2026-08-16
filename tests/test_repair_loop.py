@@ -12,6 +12,7 @@ from repopilot_agent.models import FileEditProposal, ValidationResult
 from repopilot_agent.repair_loop import (
     STOP_REPEATED_FAILURE,
     STOP_REPEATED_PROPOSAL,
+    agent_write_proposal_fingerprint,
     latest_failure_fingerprint,
     proposal_changes_repository,
     record_repair_proposal,
@@ -20,6 +21,7 @@ from repopilot_agent.repair_loop import (
     repair_proposal_fingerprint,
     validation_failure_fingerprint,
 )
+from repopilot_agent.runtime import RuntimeAction
 
 
 def failed_validation(output: str = "AssertionError: expected true in 0.42s") -> list[ValidationResult]:
@@ -44,6 +46,17 @@ class RepairLoopContractTests(unittest.TestCase):
             validation_failure_fingerprint(second),
         )
 
+    def test_allowed_validation_without_exit_code_is_still_a_failure(self) -> None:
+        result = ValidationResult(
+            command="python -m unittest test_auth",
+            allowed=True,
+            exit_code=None,
+            stdout="",
+            stderr="Command did not return an exit code.",
+        )
+
+        self.assertTrue(validation_failure_fingerprint([result]))
+
     def test_proposal_fingerprint_is_order_independent_and_content_sensitive(self) -> None:
         first = [
             FileEditProposal("a.txt", "new a\n", "A"),
@@ -54,6 +67,42 @@ class RepairLoopContractTests(unittest.TestCase):
 
         self.assertEqual(repair_proposal_fingerprint(first), repair_proposal_fingerprint(reordered))
         self.assertNotEqual(repair_proposal_fingerprint(first), repair_proposal_fingerprint(changed))
+
+    def test_agent_write_fingerprint_ignores_runtime_identity(self) -> None:
+        arguments = {
+            "path": "auth.py",
+            "expected_sha256": "a" * 64,
+            "hunks": [{"old_text": "return False", "new_text": "return True"}],
+        }
+        first = RuntimeAction(
+            "apply_patch",
+            arguments,
+            action_id="repair-one",
+            idempotency_key="first",
+        )
+        repeated = RuntimeAction(
+            "apply_patch",
+            {**arguments, "expected_sha256": "b" * 64},
+            action_id="repair-two",
+            idempotency_key="second",
+        )
+        changed = RuntimeAction(
+            "apply_patch",
+            {
+                **arguments,
+                "hunks": [{"old_text": "return False", "new_text": "return None"}],
+            },
+            action_id="repair-three",
+        )
+
+        self.assertEqual(
+            agent_write_proposal_fingerprint(first),
+            agent_write_proposal_fingerprint(repeated),
+        )
+        self.assertNotEqual(
+            agent_write_proposal_fingerprint(first),
+            agent_write_proposal_fingerprint(changed),
+        )
 
     def test_proposal_change_detection_compares_current_repository_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

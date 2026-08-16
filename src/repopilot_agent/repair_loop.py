@@ -56,7 +56,7 @@ class RepairDecision:
 def validation_failure_fingerprint(validation: list[ValidationResult]) -> str:
     failures: list[dict[str, Any]] = []
     for result in validation:
-        if result.allowed and result.exit_code in (0, None):
+        if result.allowed and result.exit_code == 0:
             continue
         failures.append(
             {
@@ -85,6 +85,56 @@ def repair_proposal_fingerprint(edits: list[FileEditProposal]) -> str:
     ]
     content.sort(key=lambda item: item["path"])
     return _fingerprint(content)
+
+
+def agent_write_proposal_fingerprint(action: object) -> str:
+    """Fingerprint the material content of one Agent write decision."""
+
+    if isinstance(action, dict):
+        kind = str(action.get("kind") or "")
+        arguments = action.get("arguments")
+    else:
+        kind = str(getattr(action, "kind", "") or "")
+        arguments = getattr(action, "arguments", None)
+    if kind not in {"apply_patch", "edit_file"} or not isinstance(arguments, dict):
+        return ""
+    path = _normalize_path(str(arguments.get("path") or ""))
+    if not path:
+        return ""
+    if kind == "edit_file":
+        content = arguments.get("new_content")
+        if not isinstance(content, str):
+            return ""
+        material: dict[str, Any] = {
+            "path": path,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+    else:
+        raw_hunks = arguments.get("hunks")
+        if not isinstance(raw_hunks, list) or not raw_hunks:
+            return ""
+        hunks: list[dict[str, Any]] = []
+        for raw_hunk in raw_hunks:
+            if not isinstance(raw_hunk, dict):
+                return ""
+            old_text = raw_hunk.get("old_text")
+            new_text = raw_hunk.get("new_text")
+            if not isinstance(old_text, str) or not isinstance(new_text, str):
+                return ""
+            occurrence = raw_hunk.get("occurrence")
+            hunks.append(
+                {
+                    "old_sha256": hashlib.sha256(old_text.encode("utf-8")).hexdigest(),
+                    "new_sha256": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+                    "occurrence": (
+                        occurrence
+                        if isinstance(occurrence, int) and not isinstance(occurrence, bool)
+                        else None
+                    ),
+                }
+            )
+        material = {"path": path, "hunks": hunks}
+    return _fingerprint(material)
 
 
 def validation_feedback_fingerprint(feedback: ValidationFeedback | None) -> str:
@@ -181,6 +231,49 @@ def record_repair_proposal(
     summary: str,
 ) -> tuple[list[RepairAttemptRecord], RepairDecision]:
     fingerprint = repair_proposal_fingerprint(edits)
+    return _record_repair_proposal(
+        history,
+        attempt=attempt,
+        trigger_failure_fingerprint=trigger_failure_fingerprint,
+        proposal_fingerprint=fingerprint,
+        proposal_paths=[edit.path for edit in edits],
+        summary=summary,
+    )
+
+
+def record_agent_repair_proposal(
+    history: list[RepairAttemptRecord],
+    *,
+    attempt: int,
+    trigger_failure_fingerprint: str,
+    proposal_fingerprint: str,
+    proposal_paths: list[str],
+    summary: str,
+) -> tuple[list[RepairAttemptRecord], RepairDecision]:
+    return _record_repair_proposal(
+        history,
+        attempt=attempt,
+        trigger_failure_fingerprint=trigger_failure_fingerprint,
+        proposal_fingerprint=proposal_fingerprint,
+        proposal_paths=proposal_paths,
+        summary=summary,
+    )
+
+
+def repair_proposal_fingerprints(history: list[RepairAttemptRecord]) -> set[str]:
+    return {item.proposal_fingerprint for item in history if item.proposal_fingerprint}
+
+
+def _record_repair_proposal(
+    history: list[RepairAttemptRecord],
+    *,
+    attempt: int,
+    trigger_failure_fingerprint: str,
+    proposal_fingerprint: str,
+    proposal_paths: list[str],
+    summary: str,
+) -> tuple[list[RepairAttemptRecord], RepairDecision]:
+    fingerprint = proposal_fingerprint.strip().lower()
     prior_fingerprints = {
         item.proposal_fingerprint
         for item in history
@@ -193,7 +286,7 @@ def record_repair_proposal(
         trigger_failure_fingerprint=trigger_failure_fingerprint,
         proposal_fingerprint=fingerprint,
         summary=summary.strip() or "Repair proposal generated.",
-        proposal_paths=sorted({_normalize_path(edit.path) for edit in edits}),
+        proposal_paths=sorted({_normalize_path(path) for path in proposal_paths if path.strip()}),
     )
     updated = _upsert(history, record)
     if repeated:
@@ -218,11 +311,17 @@ def mark_repair_attempt_stopped(
     *,
     attempt: int,
     summary: str,
+    trigger_failure_fingerprint: str = "",
 ) -> list[RepairAttemptRecord]:
     existing = _record_for_attempt(history, attempt)
     record = replace(
         existing or RepairAttemptRecord(attempt=attempt, status="stopped"),
         status="stopped",
+        trigger_failure_fingerprint=(
+            existing.trigger_failure_fingerprint
+            if existing and existing.trigger_failure_fingerprint
+            else trigger_failure_fingerprint
+        ),
         summary=summary.strip(),
     )
     return _upsert(history, record)

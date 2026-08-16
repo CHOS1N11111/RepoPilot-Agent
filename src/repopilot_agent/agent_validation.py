@@ -298,6 +298,8 @@ def continue_agent_after_validation(
     memory_context: list[MemoryContextItem] | None = None,
     worktree_root: str | Path | None = None,
     traces: list[LLMCallTrace] | None = None,
+    repair_context: str = "",
+    blocked_repair_proposal_fingerprints: set[str] | None = None,
 ) -> AgentLoopResult:
     """Continue the existing controller with bounded validation evidence."""
 
@@ -348,6 +350,8 @@ def continue_agent_after_validation(
         managed_worktree_root=worktree_root,
         resume_existing_state=True,
         prior_steps=prior_steps,
+        repair_context=repair_context,
+        blocked_repair_proposal_fingerprints=blocked_repair_proposal_fingerprints,
     )
 
 

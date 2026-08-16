@@ -511,7 +511,10 @@ function renderTaskRun(taskRun) {
   );
   $("taskRunBudget").innerHTML = renderExecutionBudget(taskRun.execution_budget);
   $("taskRunEvidence").innerHTML = renderCompletionEvidence(taskRun.completion_evidence);
-  $("taskRunRepairLoop").innerHTML = renderRepairLoop(taskRun);
+  $("taskRunRepairLoop").innerHTML = renderRepairLoop({
+    ...(taskRun.result || {}),
+    ...taskRun,
+  });
   const events = taskRun.events || [];
   $("taskRunEvents").innerHTML = events.length
     ? events
@@ -1931,9 +1934,11 @@ function renderRepairBudget(repairState = {}) {
 
 function renderRepairLoop(repairState = {}) {
   const history = repairState.repair_history || [];
-  const automation = repairState.auto_repair_enabled
-    ? '<span class="tag ok">automatic generation enabled</span>'
-    : '<span class="tag">manual generation</span>';
+  const automation = repairState.agent_repair_mode === "unified_controller"
+    ? '<span class="tag ok">same-controller repair</span>'
+    : repairState.auto_repair_enabled
+      ? '<span class="tag ok">automatic generation enabled</span>'
+      : '<span class="tag">manual generation</span>';
   const stopped = repairState.repair_stop_reason
     ? `<div class="item">
         <div class="item-title">Loop stopped <span class="tag danger">${escapeHtml(repairState.repair_stop_reason)}</span></div>
@@ -1948,8 +1953,11 @@ function renderRepairLoop(repairState = {}) {
     const statusClass = attempt.status === "completed"
       ? "ok"
       : attempt.status === "stopped" || attempt.status === "validation_failed" ? "danger" : "warn";
+    const attemptLabel = Number(attempt.attempt) === 0
+      ? "Baseline validation"
+      : `Repair attempt ${attempt.attempt}`;
     return `<div class="item">
-      <div class="item-title">Repair attempt ${escapeHtml(attempt.attempt)}
+      <div class="item-title">${escapeHtml(attemptLabel)}
         <span class="tag ${statusClass}">${escapeHtml(attempt.status || "unknown")}</span>
       </div>
       <p>${escapeHtml(attempt.summary || "No summary recorded.")}</p>

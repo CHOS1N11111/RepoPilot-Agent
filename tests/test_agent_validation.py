@@ -201,6 +201,7 @@ class AgentValidationTests(unittest.TestCase):
                     max_elapsed_seconds=60,
                 ),
                 worktree_root=fixture.managed,
+                repair_context="Repair attempt 1 of 2 after failed validation.",
             )
 
             self.assertEqual(continued.steps[0].action, "read_file")
@@ -213,6 +214,7 @@ class AgentValidationTests(unittest.TestCase):
             self.assertIn(fixture.command, prompt)
             self.assertIn("Passed: no", prompt)
             self.assertIn("FAILED", prompt)
+            self.assertIn("Repair attempt 1 of 2", prompt)
             decision_ids = [
                 event.action_id
                 for event in fixture.store.list_events(fixture.run_id)

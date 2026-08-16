@@ -30,6 +30,7 @@ from .models import (
     RepoFile,
     SearchHit,
 )
+from .repair_loop import STOP_REPEATED_PROPOSAL, agent_write_proposal_fingerprint
 from .repository_map import RepositoryMap, render_repository_map
 from .runtime import (
     AgentRuntime,
@@ -66,6 +67,8 @@ class AgentLoopResult:
     pending_approval: dict = field(default_factory=dict)
     proposed_edits: list[dict] = field(default_factory=list)
     proposed_diff: str = ""
+    repair_write_fingerprint: str = ""
+    repair_write_paths: list[str] = field(default_factory=list)
 
 
 def run_agent_loop(
@@ -88,6 +91,8 @@ def run_agent_loop(
     managed_worktree_root: str | Path | None = None,
     resume_existing_state: bool = False,
     prior_steps: list[AgentStep] | None = None,
+    repair_context: str = "",
+    blocked_repair_proposal_fingerprints: set[str] | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -101,6 +106,8 @@ def run_agent_loop(
     summary = ""
     stop_reason = ""
     pending_question = ""
+    repair_write_fingerprint = ""
+    repair_write_paths: list[str] = []
     loop_started_at = time.monotonic()
     loop_budget = execution_budget or ExecutionBudget(
         max_agent_steps=max_steps,
@@ -186,6 +193,7 @@ def run_agent_loop(
                     loop_started_at,
                     initial_tool_calls,
                 ),
+                repair_context=repair_context,
             )
             decision = _choose_next_decision(
                 task,
@@ -216,6 +224,16 @@ def run_agent_loop(
                 if write_actions_enabled and runtime_action.kind in AGENT_WRITE_ACTIONS
                 else None
             )
+            repeated_repair_proposal = False
+            if write_actions_enabled and runtime_action.kind in AGENT_WRITE_ACTIONS:
+                repair_write_fingerprint = agent_write_proposal_fingerprint(runtime_action)
+                path = str(runtime_action.arguments.get("path") or "").replace("\\", "/")
+                repair_write_paths = [path] if path else []
+                repeated_repair_proposal = bool(
+                    repair_write_fingerprint
+                    and repair_write_fingerprint
+                    in (blocked_repair_proposal_fingerprints or set())
+                )
             if completion_blockers:
                 runtime_observation = runtime.block_finish(
                     runtime_action,
@@ -227,6 +245,15 @@ def run_agent_loop(
                     runtime_action,
                     reason,
                     data=conflict_data,
+                )
+            elif repeated_repair_proposal:
+                runtime_observation = runtime.block_action_conflict(
+                    runtime_action,
+                    "The proposed repair matches an earlier Agent repair and was blocked without creating another approval request.",
+                    data={
+                        "kind": STOP_REPEATED_PROPOSAL,
+                        "proposal_fingerprint": repair_write_fingerprint,
+                    },
                 )
             else:
                 runtime_observation = runtime.execute(runtime_action)
@@ -255,6 +282,10 @@ def run_agent_loop(
                 user_question=decision.user_question,
             )
             steps.append(agent_step)
+            if repeated_repair_proposal:
+                stop_reason = STOP_REPEATED_PROPOSAL
+                summary = runtime_observation.summary
+                break
             if runtime_observation.status in STOPPING_OBSERVATION_STATUSES:
                 stop_reason = runtime_observation.status
                 summary = runtime_observation.error or runtime_observation.summary
@@ -308,6 +339,8 @@ def run_agent_loop(
         pending_approval=runtime.pending_approval,
         proposed_edits=runtime.proposed_edits,
         proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
+        repair_write_fingerprint=repair_write_fingerprint,
+        repair_write_paths=repair_write_paths,
     )
 
 
