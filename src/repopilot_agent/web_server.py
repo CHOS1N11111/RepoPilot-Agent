@@ -71,6 +71,8 @@ from .repair_loop import (
 )
 from .recovery import TaskRunRecoveryReadiness, inspect_task_run_recovery
 from .runtime import (
+    AgentRuntime,
+    RuntimePolicy,
     SQLiteRuntimeStore,
     agent_completion_blockers,
     agent_completion_ready,
@@ -2631,6 +2633,71 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             readiness = self._inspect_task_run_recovery(task_run, current_profile)
             if not readiness.ready:
                 raise TaskRunError(readiness.summary)
+            runtime_recovery = readiness.runtime_recovery or {}
+            if bool(runtime_recovery.get("requires_confirmation")):
+                pending = runtime_recovery.get("pending_action")
+                if not isinstance(pending, dict):
+                    raise TaskRunError("The Runtime recovery action record is invalid.")
+                if not task_run.sandbox_path:
+                    raise TaskRunError(
+                        "The ambiguous Runtime action has no preserved sandbox to inspect."
+                    )
+                recovery_runtime = AgentRuntime(
+                    task_run.sandbox_path,
+                    task_run.task,
+                    run_id=task_run.run_id,
+                    policy=RuntimePolicy.read_only(),
+                    store=SQLiteRuntimeStore(self._memory(task_run.source_repo)),
+                )
+                reconciled = recovery_runtime.prepare_recovery()
+                if reconciled.requires_confirmation:
+                    requested_action_id = str(
+                        payload.get("runtime_recovery_action_id") or ""
+                    ).strip()
+                    requested_token = str(
+                        payload.get("runtime_recovery_token") or ""
+                    ).strip()
+                    if not _payload_bool(
+                        payload.get("confirm_ambiguous_action"),
+                        default=False,
+                    ):
+                        raise TaskRunError(
+                            "Exact confirmation is required for the ambiguous Runtime side effect."
+                        )
+                    recovery_runtime.confirm_ambiguous_side_effect(
+                        requested_action_id,
+                        requested_token,
+                    )
+                task_result = dict(task_run.result or {})
+                task_result["agent_events"] = _public_runtime_events(
+                    recovery_runtime.events
+                )
+                recovered_state = recovery_runtime.working_state
+                task_result["agent_state"] = (
+                    recovered_state.to_dict() if recovered_state else {}
+                )
+                task_result["agent_runtime_recovery"] = (
+                    recovery_runtime.recovery_plan.to_dict()
+                )
+                task_run.result = task_result
+                readiness = self._inspect_task_run_recovery(
+                    task_run,
+                    current_profile,
+                )
+                if not readiness.ready:
+                    raise TaskRunError(readiness.summary)
+            runtime_events = SQLiteRuntimeStore(
+                self._memory(task_run.source_repo)
+            ).list_events(task_run.run_id)
+            task_run.execution_usage = _reconcile_runtime_execution_usage(
+                task_run.execution_usage,
+                runtime_events,
+            )
+            if isinstance(task_run.result, dict):
+                task_run.result["execution_budget"] = execution_budget_state(
+                    task_run.execution_budget,
+                    task_run.execution_usage,
+                )
             prepare_task_run_resume(task_run, requested_checkpoint, confirmed=True)
             self._persist_task_run(task_run)
             if task_run.status not in {"awaiting_approval", "repair_pending"}:
@@ -2746,6 +2813,26 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             if _payload_use_memory(payload):
                 memory_context = self._memory(task_run.source_repo).find_related_runs(task_run.task)
             runtime_store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
+            iterative_agent = _payload_iterative_agent(payload)
+            workflow_budget = task_run.execution_budget
+            agent_max_steps = _payload_agent_max_steps(payload)
+            prior_execution_usage = task_run.execution_usage
+            if reuse_sandbox and iterative_agent:
+                prior_execution_usage = _reconcile_runtime_execution_usage(
+                    prior_execution_usage,
+                    runtime_store.list_events(task_run.run_id),
+                )
+                task_run.execution_usage = prior_execution_usage
+                remaining_budget = _remaining_agent_continuation_budget(
+                    task_run,
+                    payload,
+                )
+                if remaining_budget is None:
+                    raise TaskRunError(
+                        "Execution budget is exhausted; the Agent cannot resume another decision."
+                    )
+                workflow_budget = remaining_budget
+                agent_max_steps = remaining_budget.max_agent_steps
             report = run_workflow(
                 sandbox_path,
                 task_run.task,
@@ -2756,18 +2843,33 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 allow_llm_fallback=not bool(payload.get("no_llm_fallback")),
                 llm_json_mode=_payload_json_mode(payload),
                 llm_timeout_seconds=_payload_llm_timeout_seconds(payload),
-                iterative_agent=_payload_iterative_agent(payload),
-                agent_max_steps=_payload_agent_max_steps(payload),
+                iterative_agent=iterative_agent,
+                agent_max_steps=agent_max_steps,
                 use_memory=_payload_use_memory(payload),
                 memory_context=memory_context,
                 agent_run_id=task_run.run_id,
                 agent_event_store=runtime_store,
-                execution_budget=task_run.execution_budget,
+                execution_budget=workflow_budget,
                 allow_agent_writes=True,
+                resume_agent_runtime=reuse_sandbox,
             )
             task_run.acceptance_criteria = criteria_from_records(report.acceptance_criteria)
-            task_run.execution_usage = ExecutionUsage.from_dict(
+            current_execution_usage = ExecutionUsage.from_dict(
                 report.execution_budget.get("usage")
+            )
+            task_run.execution_usage = (
+                prior_execution_usage.add(
+                    agent_steps=current_execution_usage.agent_steps,
+                    tool_calls=current_execution_usage.tool_calls,
+                    validation_commands=current_execution_usage.validation_commands,
+                    elapsed_ms=current_execution_usage.elapsed_ms,
+                )
+                if reuse_sandbox
+                else current_execution_usage
+            )
+            report.execution_budget = execution_budget_state(
+                task_run.execution_budget,
+                task_run.execution_usage,
             )
             timeline = build_report_timeline(report)
             proposal = report.patch_proposal
@@ -2995,6 +3097,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             task_run,
             proposal_record,
             current_execution_profile,
+            SQLiteRuntimeStore(self._memory(task_run.source_repo)).list_events(
+                task_run.run_id
+            ),
         )
 
     def _handle_propose(self) -> None:
@@ -3919,6 +4024,32 @@ def _remaining_agent_continuation_budget(
         max_tool_calls=remaining["tool_calls"],
         max_validation_commands=max(remaining["validation_commands"], 1),
         max_elapsed_seconds=max((remaining["elapsed_ms"] + 999) // 1000, 1),
+    )
+
+
+def _reconcile_runtime_execution_usage(
+    usage: ExecutionUsage,
+    events: list[Any],
+) -> ExecutionUsage:
+    decision_count = sum(
+        1 for event in events if event.event_type == "decision_recorded"
+    )
+    started_events = [
+        event
+        for event in events
+        if event.event_type in {"action_started", "action_recovery_started"}
+    ]
+    validation_count = sum(
+        1
+        for event in started_events
+        if isinstance(event.payload.get("action"), dict)
+        and event.payload["action"].get("kind") == "validate"
+    )
+    return ExecutionUsage(
+        agent_steps=max(usage.agent_steps, decision_count),
+        tool_calls=max(usage.tool_calls, len(started_events)),
+        validation_commands=max(usage.validation_commands, validation_count),
+        elapsed_ms=usage.elapsed_ms,
     )
 
 

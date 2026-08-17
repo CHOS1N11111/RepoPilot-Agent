@@ -530,7 +530,7 @@ def build_task_run_resume_plan(task_run: TaskRun) -> TaskRunResumePlan:
     if checkpoint == RESUME_CHECKPOINT_SANDBOX:
         return TaskRunResumePlan(checkpoint, "queued", True, True, True, blocked_reason)
     if checkpoint == RESUME_CHECKPOINT_INSPECTION:
-        return TaskRunResumePlan(checkpoint, "queued", True, True, True, blocked_reason)
+        return TaskRunResumePlan(checkpoint, "queued", True, True, False, blocked_reason)
     return TaskRunResumePlan(
         checkpoint=RESUME_CHECKPOINT_BLOCKED,
         target_status=task_run.status,

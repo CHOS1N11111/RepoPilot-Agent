@@ -20,7 +20,7 @@ RepoPilot Agent is a local, approval-first coding agent that turns repository ta
 - Persists expiring exact-action approval grants bound to payload hashes, current diffs, checkpoints, and file or command scope.
 - Runs configured validation one exact approved command at a time and returns bounded output to the same Agent controller for bounded repair decisions.
 - Stores proposals server-side and applies only the files explicitly approved by the user.
-- Executes complete tasks inside managed Git worktrees with repair budgets, no-progress detection, checkpoints, and restart recovery.
+- Executes complete tasks inside managed Git worktrees with repair budgets, no-progress detection, checkpoints, and exact-action restart recovery.
 - Reads GitHub issues, pull requests, reviews, comments, changed files, and CI/check status.
 
 ## Workflow
@@ -84,7 +84,7 @@ The local Web UI provides:
 - LLM model, endpoint, API key, timeout, JSON compatibility, and connection testing.
 - Agent steps, Working State, context budgets, LLM input/output traces, and runtime events.
 - Proposed changes, exact Runtime or per-file approval, cumulative diffs, write hashes, approval-gated validation cycles, and rollback evidence.
-- Sandboxed task progress, pause/resume/cancel controls, recovery readiness, and local branch delivery.
+- Sandboxed task progress, pause/resume/cancel controls, exact-action recovery readiness, and local branch delivery.
 - GitHub issue, pull request, review, comment, and CI/check inspection.
 
 API keys entered in the browser are sent only to the local server for that request and are not persisted.
@@ -124,6 +124,7 @@ Provider-side JSON mode is enabled by default and automatically retried without 
 - Exact patches use SHA-256 preconditions and reject stale or ambiguous changes.
 - Validation commands pass through an allowlist.
 - Failed validation is recorded as bounded evidence but cannot satisfy a required acceptance criterion.
+- Interrupted read-only actions may be retried, but a started write or command with no terminal observation is never replayed automatically.
 - Sensitive paths, repository escapes, and unsafe sandbox removal are blocked.
 - Managed task worktrees isolate approved changes from the source branch.
 - API keys are request-scoped, redacted from diagnostics, and never stored in local history.

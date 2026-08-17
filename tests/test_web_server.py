@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from repopilot_agent.cli import main as cli_main
-from repopilot_agent.execution import ExecutionBudget
+from repopilot_agent.execution import ExecutionBudget, ExecutionUsage
 from repopilot_agent.execution_profile import create_execution_profile
 from repopilot_agent.git_tools import get_git_diff
 from repopilot_agent.llm.base import LLMClient, LLMMessage
@@ -43,6 +43,14 @@ from repopilot_agent.repair_loop import (
     record_repair_proposal,
     record_validation_outcome,
 )
+from repopilot_agent.runtime import (
+    AgentRuntime,
+    InMemoryRuntimeStore,
+    RuntimeAction,
+    RuntimePolicy,
+    SQLiteRuntimeStore,
+    create_agent_working_state,
+)
 from repopilot_agent.task_runs import (
     RESUME_CHECKPOINT_SANDBOX,
     clear_task_runs,
@@ -58,6 +66,7 @@ from repopilot_agent.web_server import (
     _payload_approved_paths,
     _payload_execution_budget,
     _payload_max_repair_attempts,
+    _reconcile_runtime_execution_usage,
     _remaining_repair_execution_budget,
     _validate_validation_budget,
     recover_interrupted_task_runs,
@@ -199,6 +208,53 @@ class ExecutionBudgetPayloadTests(unittest.TestCase):
             with self.assertRaises(RepairLoopStopped) as raised:
                 _remaining_repair_execution_budget(session, iterative_agent=True)
             self.assertEqual(raised.exception.reason, STOP_EXECUTION_BUDGET)
+
+    def test_runtime_events_reconcile_usage_missing_after_interruption(self) -> None:
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = AgentRuntime(
+                tmp,
+                "inspect and validate",
+                run_id="runtime-usage-floor",
+                store=store,
+            )
+            read_action = RuntimeAction(
+                kind="read_file",
+                arguments={"path": "README.md"},
+                action_id="explore-1",
+            )
+            validation_action = RuntimeAction(
+                kind="validate",
+                arguments={"command": "python -m unittest"},
+                action_id="explore-2",
+            )
+            runtime.record_decision(read_action, {"action": read_action.to_dict()})
+            store.append_event(
+                runtime.run_id,
+                "action_started",
+                action=read_action,
+                payload={"action": read_action.to_dict()},
+            )
+            runtime.record_decision(
+                validation_action,
+                {"action": validation_action.to_dict()},
+            )
+            store.append_event(
+                runtime.run_id,
+                "action_recovery_started",
+                action=validation_action,
+                payload={"action": validation_action.to_dict()},
+            )
+
+            reconciled = _reconcile_runtime_execution_usage(
+                ExecutionUsage(elapsed_ms=125),
+                runtime.events,
+            )
+
+        self.assertEqual(reconciled.agent_steps, 2)
+        self.assertEqual(reconciled.tool_calls, 2)
+        self.assertEqual(reconciled.validation_commands, 1)
+        self.assertEqual(reconciled.elapsed_ms, 125)
 
     def test_payload_approved_paths_rejects_unknown_or_unsafe_paths(self) -> None:
         cases = [
@@ -492,6 +548,153 @@ class WebServerTests(unittest.TestCase):
                 self.assertEqual(data["task_run"]["resume_count"], 0)
                 launch.assert_not_called()
                 self.assertEqual(store.get_task_run(task_run.run_id)["status"], "interrupted")
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+                clear_task_runs()
+
+    def test_task_run_resume_requires_exact_ambiguous_action_confirmation(self) -> None:
+        clear_task_runs()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepare_ready_pr_repository(root)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            target = root / "README.md"
+            original = target.read_text(encoding="utf-8")
+            task_run = create_task_run(root, "edit readme", [])
+            update_task_run(
+                task_run,
+                "applying",
+                "Applying an approved Runtime action.",
+                sandbox_path=str(root),
+                sandbox_head=head,
+            )
+            memory = MemoryStore(default_memory_path(root))
+            runtime_store = SQLiteRuntimeStore(memory)
+            runtime = AgentRuntime(
+                root,
+                task_run.task,
+                run_id=task_run.run_id,
+                store=runtime_store,
+                policy=RuntimePolicy.sandboxed(allowed_edit_paths=["README.md"]),
+            )
+            runtime.record_working_state(create_agent_working_state(task_run.task))
+            action = RuntimeAction(
+                kind="edit_file",
+                arguments={"path": "README.md", "new_content": "# Private replacement\n"},
+                action_id="interrupted-edit",
+                idempotency_key="interrupted-edit",
+            )
+            runtime_store.reserve(task_run.run_id, action)
+            runtime_store.append_event(
+                task_run.run_id,
+                "action_started",
+                action=action,
+                payload={"action": action.to_dict()},
+            )
+            mark_task_run_interrupted(task_run)
+            memory.save_task_run(task_run.to_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), RepoPilotRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                readiness_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/recovery/readiness",
+                    data=json.dumps(
+                        {"run_id": task_run.run_id, "source_repo": str(root)}
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(readiness_request, timeout=5) as response:
+                    readiness_data = json.loads(response.read().decode("utf-8"))
+                readiness = readiness_data["recovery_readiness"]
+                recovery = readiness["runtime_recovery"]
+                pending = recovery["pending_action"]
+
+                self.assertTrue(readiness["ready"])
+                self.assertTrue(recovery["requires_confirmation"])
+                self.assertEqual(pending["classification"], "ambiguous_side_effect")
+                self.assertEqual(pending["action_id"], "interrupted-edit")
+                self.assertNotIn("Private replacement", json.dumps(readiness_data))
+
+                missing_confirmation = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": "sandbox_inspection",
+                            "confirm_resume": True,
+                            "use_llm": False,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch:
+                    with self.assertRaises(HTTPError) as raised:
+                        urlopen(missing_confirmation, timeout=5)
+                error_data = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(raised.exception.code, 409)
+                self.assertIn("Exact confirmation", error_data["error"])
+                launch.assert_not_called()
+                self.assertEqual(target.read_text(encoding="utf-8"), original)
+
+                confirmed_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/task-runs/resume",
+                    data=json.dumps(
+                        {
+                            "run_id": task_run.run_id,
+                            "source_repo": str(root),
+                            "resume_checkpoint": "sandbox_inspection",
+                            "confirm_resume": True,
+                            "confirm_ambiguous_action": True,
+                            "runtime_recovery_action_id": pending["action_id"],
+                            "runtime_recovery_token": pending["confirmation_token"],
+                            "use_llm": False,
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with patch.object(RepoPilotRequestHandler, "_launch_task_run_worker") as launch:
+                    with urlopen(confirmed_request, timeout=5) as response:
+                        confirmed_data = json.loads(response.read().decode("utf-8"))
+
+                self.assertEqual(confirmed_data["task_run"]["status"], "queued")
+                self.assertEqual(
+                    confirmed_data["task_run"]["execution_budget"]["usage"][
+                        "tool_calls"
+                    ],
+                    1,
+                )
+                self.assertFalse(
+                    confirmed_data["recovery_readiness"]["runtime_recovery"][
+                        "requires_confirmation"
+                    ]
+                )
+                launch.assert_called_once()
+                self.assertTrue(launch.call_args.kwargs["reuse_sandbox"])
+                self.assertEqual(target.read_text(encoding="utf-8"), original)
+                events = memory.list_agent_runtime_events(task_run.run_id)
+                self.assertIn(
+                    "action_recovery_confirmed",
+                    [event["event_type"] for event in events],
+                )
+                stored = memory.get_task_run(task_run.run_id)
+                self.assertEqual(stored["execution_usage"]["tool_calls"], 1)
+                recovery_text = json.dumps(
+                    stored["result"]["agent_runtime_recovery"]
+                )
+                self.assertNotIn("Private replacement", recovery_text)
             finally:
                 server.shutdown()
                 thread.join(timeout=5)

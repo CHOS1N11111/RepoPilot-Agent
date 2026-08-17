@@ -220,7 +220,7 @@ class TaskRunStateTests(unittest.TestCase):
             self.assertEqual(plan.checkpoint, RESUME_CHECKPOINT_INSPECTION)
             self.assertTrue(plan.allowed)
             self.assertTrue(plan.reuse_sandbox)
-            self.assertTrue(plan.requires_clean_sandbox)
+            self.assertFalse(plan.requires_clean_sandbox)
 
     def test_interrupted_replanning_uses_inspection_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

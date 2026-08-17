@@ -58,6 +58,7 @@ def run_workflow(
     execution_budget: ExecutionBudget | None = None,
     allow_agent_writes: bool = False,
     managed_worktree_root: str | Path | None = None,
+    resume_agent_runtime: bool = False,
 ) -> WorkflowReport:
     started_at = time.monotonic()
     budget = execution_budget or ExecutionBudget(max_agent_steps=agent_max_steps)
@@ -81,6 +82,7 @@ def run_workflow(
     llm_creation_error: LLMError | None = None
     agent_result: AgentLoopResult | None = None
     agent_waiting_for_write = False
+    runtime_tool_call_offset = 0
     if use_llm:
         if llm_client is None:
             try:
@@ -104,6 +106,15 @@ def run_workflow(
                             runtime_store = SQLiteRuntimeStore(MemoryStore(default_memory_path(root)))
                         except (OSError, sqlite3.Error):
                             runtime_store = None
+                    if resume_agent_runtime and runtime_store is not None and agent_run_id:
+                        runtime_tool_call_offset = sum(
+                            1
+                            for event in runtime_store.list_events(agent_run_id)
+                            if event.event_type in {
+                                "action_started",
+                                "action_recovery_started",
+                            }
+                        )
                     agent_result = run_agent_loop(
                         task,
                         root,
@@ -122,6 +133,7 @@ def run_workflow(
                         allow_user_questions=False,
                         allow_write_actions=allow_agent_writes,
                         managed_worktree_root=managed_worktree_root,
+                        resume_existing_state=resume_agent_runtime,
                     )
                     agent_waiting_for_write = bool(
                         agent_result.pending_approval
@@ -212,8 +224,11 @@ def run_workflow(
         planned_validation = list(patch_proposal.validation_plan.commands)
     acceptance_criteria = build_acceptance_criteria(task, proposed_paths, planned_validation)
     runtime_tool_calls = sum(
-        1 for event in (agent_result.events if agent_result else []) if event.event_type == "action_started"
+        1
+        for event in (agent_result.events if agent_result else [])
+        if event.event_type in {"action_started", "action_recovery_started"}
     )
+    runtime_tool_calls = max(runtime_tool_calls - runtime_tool_call_offset, 0)
     usage = ExecutionUsage(
         agent_steps=len(agent_result.steps) if agent_result else 0,
         tool_calls=runtime_tool_calls,
@@ -248,6 +263,9 @@ def run_workflow(
         agent_stop_reason=agent_result.stop_reason if agent_result else "",
         agent_pending_question=agent_result.pending_question if agent_result else "",
         agent_pending_approval=agent_result.pending_approval if agent_result else {},
+        agent_runtime_recovery=(
+            agent_result.runtime_recovery if agent_result else {}
+        ),
         agent_completion_ready=(
             agent_completion_ready(agent_result.working_state)
             if agent_result and agent_result.working_state

@@ -65,6 +65,7 @@ src/repopilot_agent/
   runtime/
     approval.py          exact-action approval requests and expiring grants
     models.py            actions, observations, events, and policies
+    recovery.py          exact-action state reconstruction and resume plans
     tools.py             typed tool registry
     virtual_patch.py     run-scoped in-memory patch overlay
     state.py             versioned Agent Working State
@@ -143,7 +144,7 @@ Each action follows one lifecycle:
 decide -> record -> authorize -> execute -> observe -> update state -> repeat or stop
 ```
 
-The runtime persists ordered decision, authorization, action, observation, conflict, approval, recovery, replay, and stop events. Policy-denied and approval-required actions are never executed. Completed actions use idempotency records; interrupted reservations stop with `recovery_required` instead of being replayed blindly.
+The runtime persists ordered decision, authorization, action, observation, conflict, approval, recovery, replay, and stop events. Policy-denied and approval-required actions are never executed. Completed actions use idempotency records. On restart, RepoPilot reconstructs the last valid Working State, folds later durable observations, safely retries only read-only interruptions, and blocks ambiguous side effects for exact confirmation.
 
 ## Working State And Evidence
 
@@ -180,7 +181,7 @@ The overlay enforces path, UTF-8, target-size, hunk-count, hunk-size, occurrence
 
 Every proposal and inspection rechecks the real file baseline. After an external change, the Agent must re-read the file and use its new hash to reset the virtual baseline. Inspecting the proposed diff marks the latest revisions reviewed; another revision makes inspection necessary again.
 
-Complete virtual file contents are process-local. Working State and runtime observations preserve bounded metadata and diffs, but the overlay is not reconstructed automatically after a process restart.
+Complete virtual file contents are process-local. Working State and runtime observations preserve bounded metadata and diffs. During exact-action resume, RepoPilot deterministically replays only completed `propose_patch` actions for still-active proposal paths into an in-memory overlay; this does not write repository files.
 
 ## Proposal And Approval Boundary
 
@@ -214,7 +215,7 @@ The approving caller must echo the checkpoint, payload hash, file scope, and com
 
 Approval requests and grants are stored as ordered runtime events, so SQLite-backed runs retain them across process boundaries. Before execution, RepoPilot rebuilds the preview and verifies the current grant. It requires fresh approval when the action payload changes, a file baseline changes, the requested path or command expands, the checkpoint is stale, the request was rejected, or the grant expired. Successful authorization records `action_authorized` and `approval_consumed` before the side effect starts.
 
-Completed idempotent side effects can replay their stored observation without performing the operation again. Interrupted reservations still stop with `recovery_required`.
+Completed idempotent side effects replay their stored observation without performing the operation again. A completed action-table record can repair a missing terminal event. A read-only reservation with no terminal result is safe to retry; a started write or command with no terminal result is classified as an ambiguous side effect and is never replayed automatically.
 
 Normal local iterative Agent runs remain non-writing. A sandboxed Task Run uses the same grant protocol for LLM-selected writes; normal Web proposal application continues to support server-stored proposal ids and per-file approval.
 
@@ -239,7 +240,7 @@ An exact match follows this sequence:
 11. After failure or after all commands pass, RepoPilot resumes the same run and Working State. The controller receives the validation observations plus bounded repair state and may inspect, propose another revision, ask for input, or finish within the remaining budget.
 12. A materially new repair write stops at the same exact approval boundary. A repeated repair action is fingerprinted and blocked before another approval request is created.
 
-When no validation command is configured, no request-scoped LLM is available, or continuation fails, the Task Run enters `review_pending` with the write and validation evidence preserved. Exhausted repair or execution budgets and deterministic no-progress conditions stop with a typed reason. The approval continuation is deliberately limited to persisted pending actions; it is not generic process-restart recovery.
+When no validation command is configured, no request-scoped LLM is available, or continuation fails, the Task Run enters `review_pending` with the write and validation evidence preserved. Exhausted repair or execution budgets and deterministic no-progress conditions stop with a typed reason. Process restart recovery uses the same run id, event sequence, Working State, and next controller iteration.
 
 ## Worktree Sandboxes And Task Runs
 
@@ -255,7 +256,21 @@ Sandbox -> Explore -> Approval -> Apply -> Validate -> Complete
 
 Task runs execute in a background worker and expose progress, pause, resume, cancel, and recovery controls. Stable boundaries create checkpoints containing phase, status, next action, timestamps, sandbox/proposal references, and execution-budget usage.
 
-After a server restart, unfinished runs become `interrupted`. RepoPilot does not automatically resume an LLM call, tool, patch, command, or validation process. Read-only readiness checks verify the saved checkpoint, source or sandbox path, Git cleanliness, sandbox `HEAD`, proposal session, and non-sensitive execution-profile compatibility before manual resume.
+After a server restart, unfinished runs become `interrupted`. RepoPilot does not automatically resume an LLM call, patch, command, or validation process. Readiness checks verify the saved checkpoint, source or sandbox path, required Git cleanliness, sandbox `HEAD`, proposal session, non-sensitive execution-profile compatibility, and the exact Runtime action recovery plan before manual resume.
+
+### Exact-Action Durable Resume
+
+The recovery analyzer starts from the newest valid `working_state_updated` event and folds any later durable waiting or terminal observations. Invalid newer snapshots are ignored. Recent completed read-only observations are restored as controller context, selected paths and active virtual proposals are rebuilt, and the next LLM action id starts after the reconstructed iteration.
+
+The latest unresolved action receives one deterministic classification:
+
+- `not_started`: execute the exact persisted action; normal policy and approval checks still apply.
+- `awaiting_approval`: preserve the original request and checkpoint.
+- `interrupted_read_only`: retry the same read-only tool and complete its existing reservation.
+- `ambiguous_side_effect`: require an action-id and payload-bound recovery token before continuation.
+- `input_required`: remain blocked until the durable user interaction loop is implemented.
+
+Confirming an ambiguous side effect records `outcome_unknown` and `side_effect_replayed=false`. It does not infer success and does not rerun the action. The next controller decision receives an explicit requirement to inspect current repository evidence. Recovery summaries redact secrets and omit complete write content. A dirty sandbox is allowed at `sandbox_inspection` because the uncommitted diff may be the only evidence of an interrupted write; exploration checkpoints still require cleanliness.
 
 After successful validation, an explicitly confirmed delivery action can attach the sandbox to a local feature branch. It does not stage, commit, push, or open a pull request automatically.
 

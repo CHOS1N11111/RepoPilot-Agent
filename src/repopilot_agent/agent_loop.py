@@ -33,12 +33,18 @@ from .models import (
 from .repair_loop import STOP_REPEATED_PROPOSAL, agent_write_proposal_fingerprint
 from .repository_map import RepositoryMap, render_repository_map
 from .runtime import (
+    RECOVERY_AWAIT_APPROVAL,
+    RECOVERY_AWAIT_INPUT,
+    RECOVERY_CONFIRM_SIDE_EFFECT,
+    RECOVERY_STOPPED,
     AgentRuntime,
     AgentWorkingState,
     RuntimeAction,
     RuntimeEvent,
     RuntimeEventStore,
+    RuntimeObservation,
     RuntimePolicy,
+    RuntimeRecoveryPlan,
     STOPPING_OBSERVATION_STATUSES,
     advance_agent_working_state,
     agent_completion_blockers,
@@ -69,6 +75,7 @@ class AgentLoopResult:
     proposed_diff: str = ""
     repair_write_fingerprint: str = ""
     repair_write_paths: list[str] = field(default_factory=list)
+    runtime_recovery: dict = field(default_factory=dict)
 
 
 def run_agent_loop(
@@ -111,7 +118,7 @@ def run_agent_loop(
     loop_started_at = time.monotonic()
     loop_budget = execution_budget or ExecutionBudget(
         max_agent_steps=max_steps,
-        max_tool_calls=max_steps,
+        max_tool_calls=max_steps + int(resume_existing_state),
     )
     max_steps = min(
         max_steps,
@@ -144,7 +151,10 @@ def run_agent_loop(
         files=files,
         repository_map=repository_map,
     )
-    restored_state = runtime.working_state if resume_existing_state else None
+    initial_tool_calls = _runtime_tool_call_count(runtime.events)
+    recovery_tool_calls = 0
+    recovery_plan = runtime.prepare_recovery() if resume_existing_state else runtime.recovery_plan
+    restored_state = recovery_plan.working_state if resume_existing_state else None
     working_state = restored_state or create_agent_working_state(
         task,
         acceptance_criteria=acceptance_criteria,
@@ -155,10 +165,45 @@ def run_agent_loop(
         selected_paths = _merge_paths([], working_state.selected_paths, by_path)
         for path in selected_paths:
             runtime.context.select_path(path)
+        context_steps.extend(_recovery_context_steps(recovery_plan.replayed_observations))
+        recovered_observation = runtime.resume_recoverable_action()
+        if recovered_observation is not None:
+            recovery_plan = runtime.prepare_recovery()
+            working_state = recovery_plan.working_state
+            selected_paths = _merge_paths([], working_state.selected_paths, by_path)
+            context_steps.extend(_recovery_context_steps([recovered_observation.as_replayed()]))
+            if recovered_observation.status in STOPPING_OBSERVATION_STATUSES:
+                stop_reason = recovered_observation.status
+                summary = recovered_observation.error or recovered_observation.summary
+        if not stop_reason:
+            stop_reason, summary, pending_question = _recovery_wait_state(
+                recovery_plan,
+                runtime,
+            )
+        if stop_reason:
+            return AgentLoopResult(
+                steps=steps,
+                selected_paths=selected_paths,
+                summary=summary,
+                runtime_run_id=runtime.run_id,
+                events=runtime.events,
+                working_state=working_state,
+                stop_reason=stop_reason,
+                pending_question=pending_question,
+                pending_approval=runtime.pending_approval,
+                proposed_edits=runtime.proposed_edits,
+                proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
+                runtime_recovery=recovery_plan.to_dict(),
+            )
+        recovery_tool_calls = max(
+            _runtime_tool_call_count(runtime.events) - initial_tool_calls,
+            0,
+        )
+        max_steps = min(
+            max_steps,
+            max(loop_budget.max_tool_calls - recovery_tool_calls, 0),
+        )
     starting_iteration = working_state.iteration
-    initial_tool_calls = sum(
-        1 for event in runtime.events if event.event_type == "action_started"
-    )
 
     try:
         for local_step_number in range(1, max_steps + 1):
@@ -318,7 +363,11 @@ def run_agent_loop(
     if not stop_reason:
         stop_reason = "step_limit"
     if not summary:
-        summary = "Agent exploration reached the step limit; selected the best observed files."
+        summary = (
+            "The recovered action consumed the remaining tool-call budget."
+            if recovery_tool_calls and max_steps == 0
+            else "Agent exploration reached the step limit; selected the best observed files."
+        )
     if working_state.stop_reason != stop_reason or working_state.selected_paths != selected_paths:
         working_state = stop_agent_working_state(
             working_state,
@@ -341,6 +390,7 @@ def run_agent_loop(
         proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
         repair_write_fingerprint=repair_write_fingerprint,
         repair_write_paths=repair_write_paths,
+        runtime_recovery=runtime.recovery_plan.to_dict(),
     )
 
 
@@ -705,6 +755,63 @@ def _format_runtime_observation(observation) -> str:
     return observation.summary
 
 
+def _recovery_context_steps(
+    observations: list[RuntimeObservation] | tuple[RuntimeObservation, ...],
+) -> list[AgentStep]:
+    result: list[AgentStep] = []
+    seen: set[str] = set()
+    for observation in observations:
+        if observation.action_id in seen:
+            continue
+        seen.add(observation.action_id)
+        result.append(
+            AgentStep(
+                order=len(result) + 1,
+                action=observation.action_kind,
+                thought="Reuse the completed durable observation during exact-action resume.",
+                tool_input=_recovered_tool_input(observation),
+                observation=_format_runtime_observation(observation),
+                selected_paths=[],
+                expected_evidence="Durable observation replayed from the Runtime event stream.",
+            )
+        )
+    return result
+
+
+def _recovery_wait_state(
+    plan: RuntimeRecoveryPlan,
+    runtime: AgentRuntime,
+) -> tuple[str, str, str]:
+    if plan.next_step == RECOVERY_AWAIT_APPROVAL:
+        return "approval_required", plan.summary, ""
+    if plan.next_step == RECOVERY_AWAIT_INPUT:
+        question = ""
+        pending = plan.pending_action
+        if pending and pending.observation:
+            question = str(
+                pending.observation.data.get("question")
+                or pending.observation.summary
+                or ""
+            )
+        return "input_required", plan.summary, question
+    if plan.next_step == RECOVERY_CONFIRM_SIDE_EFFECT:
+        return "recovery_confirmation_required", plan.summary, ""
+    if plan.next_step == RECOVERY_STOPPED:
+        reason = plan.working_state.stop_reason or "finished"
+        return reason, plan.summary, ""
+    if runtime.pending_approval:
+        return "approval_required", "The exact Runtime approval remains pending.", ""
+    return "", "", ""
+
+
+def _recovered_tool_input(observation: RuntimeObservation) -> str:
+    for name in ("path", "query", "command"):
+        value = observation.data.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return observation.action_id
+
+
 def _runtime_tool_input(action: RuntimeAction) -> str:
     if action.kind == "search_files":
         return str(action.arguments.get("query") or "")
@@ -737,7 +844,7 @@ def _remaining_execution_budget(
 ) -> dict[str, int]:
     completed_steps = max(step_number - 1, 0)
     tool_calls = max(
-        sum(1 for event in events if event.event_type == "action_started")
+        _runtime_tool_call_count(events)
         - initial_tool_calls,
         0,
     )
@@ -751,6 +858,14 @@ def _remaining_execution_budget(
     remaining["agent_steps"] = min(remaining["agent_steps"], loop_steps_remaining)
     remaining["tool_calls"] = min(remaining["tool_calls"], loop_steps_remaining)
     return remaining
+
+
+def _runtime_tool_call_count(events: list[RuntimeEvent]) -> int:
+    return sum(
+        1
+        for event in events
+        if event.event_type in {"action_started", "action_recovery_started"}
+    )
 
 
 def _merge_context_paths(

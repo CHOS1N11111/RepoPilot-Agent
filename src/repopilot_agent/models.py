@@ -446,6 +446,7 @@ class WorkflowReport:
     agent_stop_reason: str = ""
     agent_pending_question: str = ""
     agent_pending_approval: dict[str, Any] = field(default_factory=dict)
+    agent_runtime_recovery: dict[str, Any] = field(default_factory=dict)
     agent_completion_ready: bool = False
     agent_completion_blockers: list[str] = field(default_factory=list)
     agent_proposed_edits: list[dict[str, Any]] = field(default_factory=list)

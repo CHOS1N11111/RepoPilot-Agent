@@ -13,6 +13,7 @@ from .execution_profile import (
     compare_execution_profiles,
 )
 from .git_tools import inspect_repository
+from .runtime import RuntimeEvent, analyze_runtime_recovery
 from .task_runs import (
     RESUME_CHECKPOINT_APPROVAL,
     RESUME_CHECKPOINT_REPAIR,
@@ -43,6 +44,7 @@ class TaskRunRecoveryReadiness:
     summary: str
     checks: list[RecoveryReadinessCheck]
     execution_profile_comparison: ExecutionProfileComparison | None = None
+    runtime_recovery: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -52,6 +54,7 @@ class TaskRunRecoveryReadiness:
             if self.execution_profile_comparison
             else None
         )
+        data["runtime_recovery"] = self.runtime_recovery
         data["blockers"] = [
             item.detail
             for item in self.checks
@@ -67,6 +70,7 @@ def inspect_task_run_recovery(
     task_run: TaskRun,
     proposal_record: object = None,
     current_execution_profile: TaskRunExecutionProfile | None = None,
+    runtime_events: list[RuntimeEvent] | None = None,
 ) -> TaskRunRecoveryReadiness:
     """Inspect recovery prerequisites without changing task or repository state."""
 
@@ -84,6 +88,14 @@ def inspect_task_run_recovery(
         )
     )
     checks.append(_execution_checkpoint_check(task_run))
+    runtime_recovery = None
+    if runtime_events is not None:
+        runtime_plan = analyze_runtime_recovery(
+            runtime_events,
+            objective=task_run.task,
+        )
+        runtime_recovery = runtime_plan.to_dict()
+        checks.append(_runtime_recovery_check(runtime_recovery, bool(runtime_events)))
 
     if plan.allowed and plan.checkpoint == RESUME_CHECKPOINT_SOURCE:
         checks.extend(_repository_checks(task_run.source_repo, "source", require_clean=True))
@@ -151,6 +163,44 @@ def inspect_task_run_recovery(
         summary=summary,
         checks=checks,
         execution_profile_comparison=profile_comparison,
+        runtime_recovery=runtime_recovery,
+    )
+
+
+def _runtime_recovery_check(
+    recovery: dict[str, Any],
+    has_events: bool,
+) -> RecoveryReadinessCheck:
+    if not has_events:
+        return RecoveryReadinessCheck(
+            name="runtime_action",
+            status="warning",
+            detail="This legacy task has no Runtime action events; phase-level recovery will be used.",
+            required=False,
+        )
+    next_step = str(recovery.get("next_step") or "")
+    pending = recovery.get("pending_action")
+    if next_step == "await_input":
+        return RecoveryReadinessCheck(
+            name="runtime_action",
+            status="failed",
+            detail="The Runtime is waiting for durable user input, which is not resumable yet.",
+        )
+    if bool(recovery.get("requires_confirmation")) and isinstance(pending, dict):
+        return RecoveryReadinessCheck(
+            name="runtime_action",
+            status="warning",
+            detail=(
+                f"Interrupted {pending.get('action_kind', 'side-effect')} action "
+                f"{pending.get('action_id', '(unknown)')} has an unknown outcome and requires "
+                "exact confirmation before continuation."
+            ),
+            required=False,
+        )
+    return RecoveryReadinessCheck(
+        name="runtime_action",
+        status="passed",
+        detail=str(recovery.get("summary") or "Runtime action recovery is ready."),
     )
 
 

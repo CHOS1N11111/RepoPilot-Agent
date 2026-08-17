@@ -16,9 +16,13 @@ from repopilot_agent.execution import AcceptanceCriterion, ExecutionBudget
 from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.models import AgentStep, MemoryContextItem, RepoFile, SearchHit
 from repopilot_agent.runtime import (
+    AgentRuntime,
     InMemoryRuntimeStore,
+    RuntimeAction,
     RuntimeObservation,
+    RuntimePolicy,
     STOPPING_OBSERVATION_STATUSES,
+    create_agent_working_state,
 )
 
 
@@ -69,6 +73,245 @@ class FakeLLMClient:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_resume_retries_exact_read_only_action_then_calls_next_decision(self) -> None:
+        content = "def parse(value):\n    return value\n"
+        files = [
+            RepoFile(
+                path=Path("main.py"),
+                relative_path="main.py",
+                size_bytes=len(content.encode("utf-8")),
+                language="python",
+                content=content,
+            )
+        ]
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text(content, encoding="utf-8")
+            runtime = AgentRuntime(
+                root,
+                "inspect parser",
+                run_id="resume-exact-read",
+                store=store,
+            )
+            runtime.record_working_state(create_agent_working_state("inspect parser"))
+            action = RuntimeAction(
+                kind="read_file",
+                arguments={"path": "main.py"},
+                action_id="explore-1",
+                idempotency_key="explore-step-1",
+            )
+            runtime.record_decision(
+                action,
+                json.loads(
+                    decision(
+                        "read_file",
+                        {"path": "main.py"},
+                        "Read the parser implementation.",
+                        "Current parser source.",
+                    )
+                ),
+            )
+            store.reserve(runtime.run_id, action)
+            store.append_event(
+                runtime.run_id,
+                "action_started",
+                action=action,
+                payload={"action": action.to_dict()},
+            )
+            client = FakeLLMClient(
+                [
+                    decision(
+                        "finish",
+                        {"selected_paths": ["main.py"]},
+                        "The recovered file observation is sufficient.",
+                        "A completion observation.",
+                        finish_reason="Parser source was recovered without restarting exploration.",
+                        plan_updates=[
+                            {
+                                "step_id": "investigate_repository",
+                                "title": "Investigate repository evidence",
+                                "detail": "Read the parser implementation.",
+                                "status": "completed",
+                                "evidence_action_ids": ["explore-1"],
+                            }
+                        ],
+                        acceptance_updates=[
+                            {
+                                "criterion_id": "analysis_complete",
+                                "kind": "analysis",
+                                "description": "Repository evidence addresses the parser task.",
+                                "required": True,
+                                "evidence_action_ids": ["explore-1"],
+                                "evidence_summary": "Recovered main.py content identifies parse.",
+                            }
+                        ],
+                    )
+                ]
+            )
+
+            result = run_agent_loop(
+                "inspect parser",
+                root,
+                files,
+                [],
+                client,
+                max_steps=1,
+                runtime_run_id=runtime.run_id,
+                runtime_store=store,
+                resume_existing_state=True,
+            )
+
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertEqual([step.order for step in result.steps], [2])
+        self.assertEqual(len(client.calls), 1)
+        self.assertIn("def parse", client.calls[0][1].content)
+        decision_ids = [
+            event.action_id
+            for event in store.list_events("resume-exact-read")
+            if event.event_type == "decision_recorded"
+        ]
+        self.assertEqual(decision_ids, ["explore-1", "explore-2"])
+        self.assertIn(
+            "action_recovered",
+            [event.event_type for event in store.list_events("resume-exact-read")],
+        )
+
+    def test_recovered_read_consumes_tool_budget_before_next_llm_decision(self) -> None:
+        content = "def parse(value):\n    return value\n"
+        files = [
+            RepoFile(
+                path=Path("main.py"),
+                relative_path="main.py",
+                size_bytes=len(content.encode("utf-8")),
+                language="python",
+                content=content,
+            )
+        ]
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text(content, encoding="utf-8")
+            runtime = AgentRuntime(
+                root,
+                "inspect parser",
+                run_id="resume-read-budget",
+                store=store,
+            )
+            runtime.record_working_state(create_agent_working_state("inspect parser"))
+            action = RuntimeAction(
+                kind="read_file",
+                arguments={"path": "main.py"},
+                action_id="explore-1",
+                idempotency_key="explore-step-1",
+            )
+            runtime.record_decision(
+                action,
+                json.loads(
+                    decision(
+                        "read_file",
+                        {"path": "main.py"},
+                        "Read the parser implementation.",
+                        "Current parser source.",
+                    )
+                ),
+            )
+            store.reserve(runtime.run_id, action)
+            store.append_event(
+                runtime.run_id,
+                "action_started",
+                action=action,
+                payload={"action": action.to_dict()},
+            )
+            client = FakeLLMClient([])
+
+            result = run_agent_loop(
+                "inspect parser",
+                root,
+                files,
+                [],
+                client,
+                max_steps=2,
+                runtime_run_id=runtime.run_id,
+                runtime_store=store,
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=2,
+                    max_tool_calls=1,
+                    max_validation_commands=1,
+                    max_elapsed_seconds=60,
+                ),
+                resume_existing_state=True,
+            )
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result.stop_reason, "step_limit")
+        self.assertIn("remaining tool-call budget", result.summary)
+        self.assertEqual(result.working_state.iteration, 1)
+        self.assertEqual(
+            [
+                event.action_id
+                for event in store.list_events("resume-read-budget")
+                if event.event_type == "decision_recorded"
+            ],
+            ["explore-1"],
+        )
+
+    def test_resume_ambiguous_write_stops_before_llm_or_replay(self) -> None:
+        content = "before\n"
+        files = [
+            RepoFile(
+                path=Path("notes.txt"),
+                relative_path="notes.txt",
+                size_bytes=len(content.encode("utf-8")),
+                language="text",
+                content=content,
+            )
+        ]
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "notes.txt"
+            target.write_text(content, encoding="utf-8")
+            runtime = AgentRuntime(
+                root,
+                "edit notes",
+                run_id="resume-ambiguous-write",
+                store=store,
+                policy=RuntimePolicy.sandboxed(allowed_edit_paths=["notes.txt"]),
+            )
+            runtime.record_working_state(create_agent_working_state("edit notes"))
+            action = RuntimeAction(
+                kind="edit_file",
+                arguments={"path": "notes.txt", "new_content": "after\n"},
+                action_id="explore-1",
+                idempotency_key="explore-step-1",
+            )
+            store.reserve(runtime.run_id, action)
+            store.append_event(
+                runtime.run_id,
+                "action_started",
+                action=action,
+                payload={"action": action.to_dict()},
+            )
+            client = FakeLLMClient([])
+
+            result = run_agent_loop(
+                "edit notes",
+                root,
+                files,
+                [],
+                client,
+                max_steps=1,
+                runtime_run_id=runtime.run_id,
+                runtime_store=store,
+                resume_existing_state=True,
+            )
+
+            self.assertEqual(result.stop_reason, "recovery_confirmation_required")
+            self.assertEqual(client.calls, [])
+            self.assertTrue(result.runtime_recovery["requires_confirmation"])
+            self.assertEqual(target.read_text(encoding="utf-8"), content)
+
     def test_agent_loop_continues_existing_state_with_unique_action_ids(self) -> None:
         content = "def parse(value):\n    return value\n"
         files = [

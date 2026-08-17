@@ -183,10 +183,22 @@ async function resumeTaskRun() {
     return;
   }
   const checkpointLabel = checkpoint.replaceAll("_", " ");
-  const confirmed = window.confirm(
-    `Resume this task from the ${checkpointLabel} checkpoint? RepoPilot will run the saved safety preflight first.`
-  );
+  const runtimeRecovery = readiness.runtime_recovery || {};
+  const pendingAction = runtimeRecovery.pending_action || null;
+  const exactConfirmation = {};
+  const confirmed = runtimeRecovery.requires_confirmation && pendingAction
+    ? window.confirm(
+        `Action ${pendingAction.action_id} (${pendingAction.action_kind}) started before interruption, but its outcome was not recorded. Continue from ${checkpointLabel} without replaying it? The Agent will inspect current repository evidence before deciding again.`
+      )
+    : window.confirm(
+        `Resume this task from the ${checkpointLabel} checkpoint? RepoPilot will run the saved safety preflight first.`
+      );
   if (!confirmed) return;
+  if (runtimeRecovery.requires_confirmation && pendingAction) {
+    exactConfirmation.confirm_ambiguous_action = true;
+    exactConfirmation.runtime_recovery_action_id = pendingAction.action_id;
+    exactConfirmation.runtime_recovery_token = pendingAction.confirmation_token;
+  }
   setStatus("Resuming task run...");
   try {
     const data = await postJson("/api/task-runs/resume", {
@@ -194,6 +206,7 @@ async function resumeTaskRun() {
       ...taskRunControlPayload(),
       resume_checkpoint: checkpoint,
       confirm_resume: true,
+      ...exactConfirmation,
     });
     if (data.recovery_readiness) {
       state.taskRunRecoveryReadiness = data.recovery_readiness;
@@ -590,6 +603,7 @@ function renderTaskRunRecoveryReadiness(readiness) {
   const profileComparison = renderExecutionProfileComparison(
     readiness.execution_profile_comparison
   );
+  const runtimeRecovery = renderRuntimeRecoveryPlan(readiness.runtime_recovery);
   $("taskRunRecoveryReadiness").innerHTML = `
     <div class="timeline-event">
       <div class="timeline-step">Recovery ${resultTag}</div>
@@ -597,8 +611,50 @@ function renderTaskRunRecoveryReadiness(readiness) {
       <div>${escapeHtml(readiness.summary || "")}</div>
     </div>
     ${checks}
+    ${runtimeRecovery}
     ${profileComparison}
   `;
+}
+
+function renderRuntimeRecoveryPlan(recovery) {
+  if (!recovery) return "";
+  const pending = recovery.pending_action;
+  const statusClass = recovery.requires_confirmation
+    ? "warn"
+    : recovery.can_continue
+      ? "ok"
+      : "danger";
+  const pendingDetail = pending
+    ? `<div class="timeline-event">
+        <div class="timeline-step">Exact action <span class="tag ${statusClass}">${escapeHtml(String(pending.classification || "pending").replaceAll("_", " "))}</span></div>
+        <div class="timeline-status">${escapeHtml(pending.action_kind || "action")}</div>
+        <div>Action ${escapeHtml(pending.action_id || "unknown")} | Payload ${escapeHtml(String(pending.payload_hash || "").slice(0, 12))}...</div>
+        <div>${escapeHtml(pending.summary || "")}</div>
+        ${renderRuntimeRecoveryArguments(pending.arguments)}
+      </div>`
+    : "";
+  const replayed = Array.isArray(recovery.replayed_observations)
+    ? recovery.replayed_observations.length
+    : 0;
+  return `
+    <div class="timeline-event">
+      <div class="timeline-step">Runtime resume <span class="tag ${statusClass}">${escapeHtml(String(recovery.status || "unknown").replaceAll("_", " "))}</span></div>
+      <div class="timeline-status">${escapeHtml(String(recovery.next_step || "unknown").replaceAll("_", " "))}</div>
+      <div>${escapeHtml(recovery.summary || "")}</div>
+      <div><small>Working State iteration ${escapeHtml(recovery.working_state_iteration ?? 0)} | Replayed read-only observations ${escapeHtml(replayed)}</small></div>
+    </div>
+    ${pendingDetail}
+  `;
+}
+
+function renderRuntimeRecoveryArguments(argumentsValue) {
+  if (!argumentsValue || typeof argumentsValue !== "object") return "";
+  const entries = Object.entries(argumentsValue).filter(([, value]) => value !== "");
+  if (!entries.length) return "";
+  const text = entries
+    .map(([name, value]) => `${name.replaceAll("_", " ")}: ${Array.isArray(value) ? value.join(", ") : value}`)
+    .join(" | ");
+  return `<div><small>${escapeHtml(text)}</small></div>`;
 }
 
 function renderExecutionProfileComparison(comparison) {

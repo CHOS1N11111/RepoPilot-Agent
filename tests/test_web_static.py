@@ -284,6 +284,15 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn('"interrupted", "awaiting_approval"', self.app_js)
         self.assertIn(".interruption-notice", self.app_css)
 
+    def test_exact_action_recovery_is_rendered_and_confirmed_by_token(self) -> None:
+        self.assertIn("function renderRuntimeRecoveryPlan", self.app_js)
+        self.assertIn("function renderRuntimeRecoveryArguments", self.app_js)
+        self.assertIn("readiness.runtime_recovery", self.app_js)
+        self.assertIn("confirm_ambiguous_action", self.app_js)
+        self.assertIn("runtime_recovery_action_id", self.app_js)
+        self.assertIn("runtime_recovery_token", self.app_js)
+        self.assertIn("without replaying it", self.app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

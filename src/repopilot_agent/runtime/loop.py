@@ -23,6 +23,7 @@ from .approval import (
     utc_timestamp,
 )
 from .models import (
+    READ_ONLY_ACTIONS,
     SIDE_EFFECT_ACTIONS,
     STOPPING_OBSERVATION_STATUSES,
     RuntimeAction,
@@ -30,6 +31,13 @@ from .models import (
     RuntimeObservation,
     RuntimePolicy,
     RuntimeRunResult,
+)
+from .recovery import (
+    RECOVERY_CONFIRM_SIDE_EFFECT,
+    RECOVERY_EXECUTE_PENDING,
+    RECOVERY_RETRY_READ_ONLY,
+    RuntimeRecoveryPlan,
+    analyze_runtime_recovery,
 )
 from .store import InMemoryRuntimeStore, RuntimeEventStore
 from .state import AgentWorkingState, latest_agent_working_state
@@ -74,6 +82,7 @@ class AgentRuntime:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._started = any(event.event_type == "run_started" for event in self.events)
         self._stopped = False
+        self._restore_recovery_context()
 
     @property
     def events(self):
@@ -86,6 +95,10 @@ class AgentRuntime:
     @property
     def working_state(self) -> AgentWorkingState | None:
         return latest_agent_working_state(self.events, default_objective=self.task)
+
+    @property
+    def recovery_plan(self) -> RuntimeRecoveryPlan:
+        return analyze_runtime_recovery(self.events, objective=self.task)
 
     @property
     def proposed_edits(self) -> list[dict]:
@@ -274,6 +287,91 @@ class AgentRuntime:
             "working_state_updated",
             payload={"working_state": state.to_dict()},
         )
+
+    def prepare_recovery(self) -> RuntimeRecoveryPlan:
+        """Reconcile durable reservations and persist a reconstructed state snapshot."""
+
+        plan = self.recovery_plan
+        pending = plan.pending_action
+        if pending and pending.classification in {
+            "ambiguous_side_effect",
+            "interrupted_read_only",
+        }:
+            reservation = self.store.lookup(self.run_id, pending.action)
+            if reservation.status == "completed" and reservation.observation is not None:
+                observation = reservation.observation.as_replayed()
+                self.store.append_event(
+                    self.run_id,
+                    "action_recovered",
+                    action=pending.action,
+                    payload={
+                        "source": "completed_reservation",
+                        "observation": observation.to_dict(),
+                    },
+                )
+                plan = self.recovery_plan
+        return self._persist_reconstructed_state(plan)
+
+    def resume_recoverable_action(self) -> RuntimeObservation | None:
+        """Continue one exact not-started or safely retryable read-only action."""
+
+        plan = self.prepare_recovery()
+        pending = plan.pending_action
+        if pending is None:
+            return None
+        if plan.next_step == RECOVERY_EXECUTE_PENDING:
+            observation = self.execute(pending.action)
+        elif plan.next_step == RECOVERY_RETRY_READ_ONLY:
+            observation = self._retry_interrupted_read_only(pending.action)
+        else:
+            return None
+        self._persist_reconstructed_state(self.recovery_plan)
+        return observation
+
+    def confirm_ambiguous_side_effect(
+        self,
+        action_id: str,
+        confirmation_token: str,
+    ) -> RuntimeObservation:
+        """Acknowledge an unknown side-effect outcome without replaying the action."""
+
+        plan = self.prepare_recovery()
+        pending = plan.pending_action
+        if (
+            plan.next_step != RECOVERY_CONFIRM_SIDE_EFFECT
+            or pending is None
+            or pending.action.action_id != action_id
+        ):
+            raise ValueError("The ambiguous Runtime action is missing or has changed.")
+        if not confirmation_token or confirmation_token != pending.confirmation_token:
+            raise ValueError("The Runtime recovery confirmation token is missing or stale.")
+        observation = RuntimeObservation(
+            action_id=pending.action.action_id,
+            action_kind=pending.action.kind,
+            status="outcome_unknown",
+            summary=(
+                "The user confirmed the interrupted side effect. It was not replayed; "
+                "the controller must inspect current repository evidence before acting again."
+            ),
+            data={
+                "recovery_confirmation": confirmation_token,
+                "requires_repository_inspection": True,
+                "side_effect_replayed": False,
+            },
+        )
+        self.store.append_event(
+            self.run_id,
+            "action_recovery_confirmed",
+            action=pending.action,
+            payload={
+                "confirmation_token": confirmation_token,
+                "action_payload_hash": pending.to_dict()["payload_hash"],
+                "observation": observation.to_dict(),
+            },
+        )
+        self.store.complete(self.run_id, pending.action, observation)
+        self._persist_reconstructed_state(self.recovery_plan)
+        return observation
 
     def record_decision(
         self,
@@ -722,6 +820,74 @@ class AgentRuntime:
             diff_truncated=preview.diff_truncated,
             requested_at=utc_timestamp(self._now()),
         )
+
+    def _retry_interrupted_read_only(
+        self,
+        action: RuntimeAction,
+    ) -> RuntimeObservation:
+        if action.kind not in READ_ONLY_ACTIONS:
+            raise ValueError("Only interrupted read-only actions may be retried automatically.")
+        decision, reason = self.policy.evaluate(action, approval_granted=False)
+        if decision != "allow":
+            return self._deny_action(action, reason)
+        self.store.append_event(
+            self.run_id,
+            "action_recovery_started",
+            action=action,
+            payload={"action": action.to_dict(), "reason": "safe_read_only_retry"},
+        )
+        try:
+            tool_result = execute_runtime_tool(action, self.context)
+            observation = RuntimeObservation(
+                action_id=action.action_id,
+                action_kind=action.kind,
+                status=tool_result.status,
+                summary=tool_result.summary,
+                data=tool_result.data,
+            )
+        except Exception as exc:
+            observation = RuntimeObservation(
+                action_id=action.action_id,
+                action_kind=action.kind,
+                status="failed",
+                summary=f"Recovered read-only action {action.kind} failed.",
+                error=str(exc),
+            )
+        observation = self.store.complete(self.run_id, action, observation)
+        self.store.append_event(
+            self.run_id,
+            "action_recovered",
+            action=action,
+            payload={
+                "source": "safe_read_only_retry",
+                "observation": observation.to_dict(),
+            },
+        )
+        return observation
+
+    def _persist_reconstructed_state(
+        self,
+        plan: RuntimeRecoveryPlan,
+    ) -> RuntimeRecoveryPlan:
+        if plan.recovered_through_sequence <= plan.latest_snapshot_sequence:
+            return plan
+        self.store.append_event(
+            self.run_id,
+            "runtime_recovery_state_reconstructed",
+            payload={"recovery": plan.to_dict()},
+        )
+        self.record_working_state(plan.working_state)
+        return self.recovery_plan
+
+    def _restore_recovery_context(self) -> None:
+        plan = self.recovery_plan
+        for path in plan.working_state.selected_paths:
+            self.context.select_path(path)
+        for action in plan.context_actions:
+            try:
+                execute_runtime_tool(action, self.context)
+            except Exception:
+                continue
 
     def _valid_approval_grant(
         self,

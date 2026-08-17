@@ -20,7 +20,7 @@ RepoPilot Agent 是一个在本地运行、以人工审批为先的编程 Agent�
 - 持久化有时效的精确 action 审批凭证，并绑定 payload 哈希、当前 Diff、checkpoint 以及文件或命令范围。
 - 逐条审批并执行配置的验证命令，将有界输出交回同一个 Agent controller 进行有限次数的修复决策。
 - 在服务端保存修改方案，并且只应用用户明确批准的文件。
-- 在受管理的 Git Worktree 中执行完整任务，支持修复预算、无进展检测、检查点和重启恢复。
+- 在受管理的 Git Worktree 中执行完整任务，支持修复预算、无进展检测、检查点和精确 action 重启恢复。
 - 读取 GitHub Issue、Pull Request、Review、评论、变更文件以及 CI/Check 状态。
 
 ## 工作流程
@@ -84,7 +84,7 @@ repopilot serve
 - 设置 LLM 模型、API 端点、API Key、超时时间和 JSON 兼容模式，并测试连接。
 - 查看 Agent Steps、Working State、上下文预算、LLM 输入输出 Trace 和运行时事件。
 - 查看修改方案和累积 Diff，逐文件审批，获取验证反馈并回滚修改。
-- 查看沙箱任务进度，暂停、恢复或取消任务，检查恢复状态并准备本地分支交付。
+- 查看沙箱任务进度，暂停、恢复或取消任务，检查精确 action 恢复状态并准备本地分支交付。
 - 查看 GitHub Issue、Pull Request、Review、评论以及 CI/Check 状态。
 
 在浏览器中输入的 API Key 只会随当前请求发送给本地服务器，不会被持久化保存。
@@ -122,6 +122,7 @@ LLM 是可选能力。RepoPilot 通过 `OPENAI_API_KEY`、`OPENAI_API_URL` 以�
 - Runtime 审批凭证会过期，不能授权已经变化的 payload、过期的文件基线或扩大的路径与命令范围。
 - 精确补丁使用 SHA-256 前置条件，拒绝过期或存在歧义的修改。
 - 验证命令必须通过允许列表检查。
+- 中断的只读 action 可以安全重试，但缺少终态记录的已启动写入或命令绝不会被自动重放。
 - 敏感路径、仓库路径逃逸以及不安全的沙箱删除会被阻止。
 - 受管理的任务 Worktree 会将批准的修改与源分支隔离。
 - API Key 仅在单次请求中使用，会从诊断信息中脱敏，并且不会写入本地历史。

@@ -15,7 +15,13 @@ from repopilot_agent.llm.base import LLMMessage
 from repopilot_agent.models import MemoryContextItem, SearchHit
 from repopilot_agent.patch_proposer import propose_patch_with_optional_llm
 from repopilot_agent.planner import create_plan_with_optional_llm
-from repopilot_agent.runtime import AGENT_WORKING_STATE_VERSION
+from repopilot_agent.runtime import (
+    AGENT_WORKING_STATE_VERSION,
+    AgentRuntime,
+    InMemoryRuntimeStore,
+    RuntimeAction,
+    create_agent_working_state,
+)
 from repopilot_agent.workflow import run_workflow
 
 
@@ -69,6 +75,102 @@ class FakeLLMClient:
 
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_workflow_resume_counts_only_new_runtime_tool_calls(self) -> None:
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text(
+                "def parse(value):\n    return value\n",
+                encoding="utf-8",
+            )
+            runtime = AgentRuntime(
+                root,
+                "inspect parser",
+                run_id="workflow-resume-budget",
+                store=store,
+            )
+            runtime.record_working_state(create_agent_working_state("inspect parser"))
+            interrupted = RuntimeAction(
+                kind="read_file",
+                arguments={"path": "main.py"},
+                action_id="explore-1",
+                idempotency_key="explore-step-1",
+            )
+            runtime.record_decision(
+                interrupted,
+                json.loads(
+                    iterative_decision(
+                        "read_file",
+                        {"path": "main.py"},
+                        "Read the parser.",
+                        "Current parser source.",
+                        focus="Inspect parser behavior.",
+                    )
+                ),
+            )
+            store.reserve(runtime.run_id, interrupted)
+            store.append_event(
+                runtime.run_id,
+                "action_started",
+                action=interrupted,
+                payload={"action": interrupted.to_dict()},
+            )
+            client = FakeLLMClient(
+                [
+                    iterative_decision(
+                        "finish",
+                        {"selected_paths": ["main.py"]},
+                        "The recovered read is sufficient.",
+                        "A completion observation.",
+                        focus="Finish parser inspection.",
+                        finish_reason="Parser source was recovered.",
+                        plan_updates=[
+                            {
+                                "step_id": "investigate_repository",
+                                "title": "Investigate repository evidence",
+                                "detail": "Read the parser.",
+                                "status": "completed",
+                                "evidence_action_ids": ["explore-1"],
+                            }
+                        ],
+                        acceptance_updates=[
+                            {
+                                "criterion_id": "analysis_complete",
+                                "kind": "analysis",
+                                "description": "Repository evidence addresses the parser task.",
+                                "required": True,
+                                "evidence_action_ids": ["explore-1"],
+                                "evidence_summary": "main.py was recovered.",
+                            }
+                        ],
+                    ),
+                    '{"steps":[{"title":"Review parser","detail":"Use the recovered main.py evidence."}]}',
+                    '{"objective":"No repository change is required","files":[],"risks":[],'
+                    '"validation_suggestions":[],"ready_for_patch":false,"file_edits":[]}',
+                    '{"summary":"No patch to review.","risk_level":"low","concerns":[],'
+                    '"suggested_tests":[],"approved_for_apply":false}',
+                ],
+                model="fake-resume-budget",
+            )
+
+            report = run_workflow(
+                root,
+                "inspect parser",
+                use_llm=True,
+                llm_client=client,
+                iterative_agent=True,
+                agent_max_steps=1,
+                agent_run_id=runtime.run_id,
+                agent_event_store=store,
+                resume_agent_runtime=True,
+            )
+
+        usage = report.execution_budget["usage"]
+        self.assertEqual(usage["agent_steps"], 1)
+        self.assertEqual(usage["tool_calls"], 2)
+        self.assertEqual(report.agent_state["iteration"], 2)
+        self.assertEqual(report.agent_runtime_recovery["next_step"], "stopped")
+
     def test_create_plan_with_llm_response(self) -> None:
         traces = []
         client = FakeLLMClient(
@@ -456,6 +558,8 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.agent_events[-1].event_type, "run_stopped")
         self.assertEqual(report.agent_state["status"], "completed")
         self.assertEqual(report.agent_stop_reason, "finished")
+        self.assertEqual(report.agent_runtime_recovery["next_step"], "stopped")
+        self.assertEqual(report.agent_runtime_recovery["working_state_iteration"], 3)
         self.assertEqual(report.agent_pending_question, "")
         self.assertTrue(report.agent_completion_ready)
         self.assertEqual(report.agent_completion_blockers, [])
