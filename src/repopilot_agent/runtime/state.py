@@ -8,10 +8,16 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from ..models import AgentStateUpdate
+from .interaction import (
+    MAX_INPUT_ANSWER_CHARS,
+    MAX_INPUT_QUESTION_CHARS,
+    RuntimeInputAnswer,
+    RuntimeInputRequest,
+)
 from .models import RuntimeAction, RuntimeEvent, RuntimeObservation
 
 
-AGENT_WORKING_STATE_VERSION = 5
+AGENT_WORKING_STATE_VERSION = 6
 MAX_RECENT_OBSERVATIONS = 8
 MAX_OBJECTIVE_CHARS = 2_000
 MAX_OBSERVATION_SUMMARY_CHARS = 500
@@ -22,6 +28,7 @@ MAX_STATE_ITEM_CHARS = 500
 MAX_AGENT_PLAN_ITEMS = 12
 MAX_AGENT_ACCEPTANCE_CRITERIA = 20
 MAX_AGENT_PROPOSED_EDITS = 12
+MAX_AGENT_USER_INPUTS = 8
 MAX_EVIDENCE_ACTION_IDS = 8
 MAX_VALIDATION_COMMAND_CHARS = 1_000
 SUCCESSFUL_EVIDENCE_STATUSES = frozenset({"completed", "applied", "no_change"})
@@ -94,6 +101,22 @@ class AgentProposedEditState:
 
 
 @dataclass(frozen=True)
+class AgentUserInputState:
+    answer_id: str
+    checkpoint: str
+    action_id: str
+    input_type: str
+    question: str
+    question_hash: str
+    answer: str
+    answered_at: str
+    evidence: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AgentWorkingState:
     version: int
     objective: str
@@ -108,6 +131,7 @@ class AgentWorkingState:
     plan: list[AgentPlanItem]
     acceptance_criteria: list[AgentAcceptanceState]
     proposed_edits: list[AgentProposedEditState]
+    user_inputs: list[AgentUserInputState]
     recent_observations: list[AgentStateObservation]
     stop_reason: str | None
     updated_at: str
@@ -119,6 +143,7 @@ class AgentWorkingState:
             item.to_dict() for item in self.acceptance_criteria
         ]
         data["proposed_edits"] = [item.to_dict() for item in self.proposed_edits]
+        data["user_inputs"] = [item.to_dict() for item in self.user_inputs]
         data["recent_observations"] = [item.to_dict() for item in self.recent_observations]
         return data
 
@@ -154,6 +179,7 @@ def create_agent_working_state(
             normalized_objective,
         ),
         proposed_edits=[],
+        user_inputs=[],
         recent_observations=[],
         stop_reason=None,
         updated_at=_now(),
@@ -305,6 +331,7 @@ def agent_working_state_from_record(
             value.get("acceptance_criteria")
         ),
         proposed_edits=_proposed_edits_from_record(value.get("proposed_edits")),
+        user_inputs=_user_inputs_from_record(value.get("user_inputs")),
         recent_observations=parsed_observations,
         stop_reason=(
             _bounded_text(value.get("stop_reason"), 100)
@@ -370,6 +397,10 @@ def render_agent_working_state(state: AgentWorkingState) -> str:
         f"{item.hunk_count} cumulative hunk(s), virtual SHA-256 {item.current_sha256}"
         for item in state.proposed_edits
     ) or "- none"
+    user_inputs = "\n".join(
+        f"- {item.question} Answer: {item.answer} (not repository evidence)"
+        for item in state.user_inputs
+    ) or "- none"
     blockers = agent_completion_blockers(state)
     return "\n".join(
         [
@@ -389,6 +420,8 @@ def render_agent_working_state(state: AgentWorkingState) -> str:
             acceptance,
             "Virtual proposed edits:",
             proposed_edits,
+            "User inputs (not repository evidence):",
+            user_inputs,
             f"Completion ready: {'yes' if not blockers else 'no'}",
             f"Completion blockers: {'; '.join(blockers) if blockers else 'none'}",
             f"Expected evidence: {state.expected_evidence or 'none'}",
@@ -430,6 +463,60 @@ def apply_agent_state_update(
         open_questions=open_questions,
         plan=plan,
         acceptance_criteria=acceptance,
+        updated_at=_now(),
+    )
+
+
+def record_agent_user_input(
+    state: AgentWorkingState,
+    request: RuntimeInputRequest,
+    answer: RuntimeInputAnswer,
+) -> AgentWorkingState:
+    if (
+        answer.checkpoint != request.checkpoint
+        or answer.run_id != request.run_id
+        or answer.action_id != request.action_id
+        or answer.input_type != request.input_type
+        or answer.question_hash != request.question_hash
+    ):
+        raise ValueError("Input answer does not match the exact pending question.")
+    existing = next(
+        (item for item in state.user_inputs if item.checkpoint == request.checkpoint),
+        None,
+    )
+    if existing is not None and existing.answer_id != answer.answer_id:
+        raise ValueError("The pending question already has a different durable answer.")
+    record = AgentUserInputState(
+        answer_id=answer.answer_id,
+        checkpoint=request.checkpoint,
+        action_id=request.action_id,
+        input_type=request.input_type,
+        question=request.question,
+        question_hash=request.question_hash,
+        answer=answer.answer,
+        answered_at=answer.answered_at,
+        evidence=False,
+    )
+    answered_key = _normalized_item_key(request.question)
+    return replace(
+        state,
+        version=AGENT_WORKING_STATE_VERSION,
+        phase=request.resume_phase,
+        status="running",
+        open_questions=[
+            item
+            for item in state.open_questions
+            if _normalized_item_key(item) != answered_key
+        ],
+        user_inputs=[
+            *(
+                item
+                for item in state.user_inputs
+                if item.checkpoint != request.checkpoint
+            ),
+            record,
+        ][-MAX_AGENT_USER_INPUTS:],
+        stop_reason=None,
         updated_at=_now(),
     )
 
@@ -843,6 +930,50 @@ def _proposed_edits_from_record(value: object) -> list[AgentProposedEditState]:
         for raw in value[-MAX_AGENT_PROPOSED_EDITS:]
         if (parsed := _proposed_edit_from_record(raw)) is not None
     ]
+
+
+def _user_inputs_from_record(value: object) -> list[AgentUserInputState]:
+    if not isinstance(value, list):
+        return []
+    result: list[AgentUserInputState] = []
+    for raw in value[-MAX_AGENT_USER_INPUTS:]:
+        if not isinstance(raw, dict):
+            continue
+        answer_id = _bounded_identifier(raw.get("answer_id"))
+        checkpoint = _bounded_identifier(raw.get("checkpoint"))
+        action_id = _bounded_identifier(raw.get("action_id"))
+        question_hash = _normalized_sha256(raw.get("question_hash"))
+        question = _bounded_text(raw.get("question"), MAX_INPUT_QUESTION_CHARS)
+        answer = _bounded_text(raw.get("answer"), MAX_INPUT_ANSWER_CHARS)
+        input_type = _bounded_identifier(raw.get("input_type"))
+        answered_at = _bounded_text(raw.get("answered_at"), 100)
+        if not all(
+            (
+                answer_id,
+                checkpoint,
+                action_id,
+                question_hash,
+                question,
+                answer,
+                input_type,
+                answered_at,
+            )
+        ):
+            continue
+        result.append(
+            AgentUserInputState(
+                answer_id=answer_id,
+                checkpoint=checkpoint,
+                action_id=action_id,
+                input_type=input_type,
+                question=question,
+                question_hash=question_hash,
+                answer=answer,
+                answered_at=answered_at,
+                evidence=False,
+            )
+        )
+    return result
 
 
 def _proposed_edit_from_record(value: object) -> AgentProposedEditState | None:

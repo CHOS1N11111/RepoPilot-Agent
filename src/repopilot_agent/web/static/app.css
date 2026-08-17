@@ -349,6 +349,27 @@ button:disabled:hover {
   margin: 14px 0 22px;
 }
 
+.task-run-input {
+  margin: 18px 0 24px;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.task-run-input[hidden] {
+  display: none;
+}
+
+.task-run-input textarea {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+}
+
+.task-run-input-controls {
+  margin-top: 10px;
+}
+
 .task-run-delivery {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto;

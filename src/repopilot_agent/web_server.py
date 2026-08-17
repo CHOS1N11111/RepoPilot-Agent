@@ -13,6 +13,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .agent_input import AgentInputError, continue_agent_after_input
+from .agent_loop import AgentLoopResult
 from .agent_validation import (
     AgentValidationError,
     AgentValidationResult,
@@ -72,6 +74,7 @@ from .repair_loop import (
 from .recovery import TaskRunRecoveryReadiness, inspect_task_run_recovery
 from .runtime import (
     AgentRuntime,
+    RuntimeInputAnswer,
     RuntimePolicy,
     SQLiteRuntimeStore,
     agent_completion_blockers,
@@ -117,6 +120,7 @@ from .worktree_sandbox import (
     create_worktree_sandbox,
     list_worktree_sandboxes,
     remove_worktree_sandbox,
+    require_managed_worktree,
 )
 from .workflow import run_workflow
 
@@ -271,6 +275,9 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/task-runs/runtime-approval/reject":
             self._handle_runtime_approval_reject()
+            return
+        if parsed.path == "/api/task-runs/runtime-input/answer":
+            self._handle_runtime_input_answer()
             return
         if parsed.path == "/api/history/delete":
             self._handle_history_delete()
@@ -1600,6 +1607,381 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"task_run": task_run.to_public_dict()})
 
+    def _handle_runtime_input_answer(self) -> None:
+        payload = self._read_json()
+        task_run = self._task_run_from_payload_or_error(payload)
+        if task_run is None:
+            return
+        if not isinstance(payload.get("answer"), str):
+            self._send_json(
+                {"error": "answer must be text."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        store = SQLiteRuntimeStore(self._memory(task_run.source_repo))
+        request = _pending_runtime_input(task_run)
+        if not request:
+            try:
+                existing = _existing_runtime_input_answer(
+                    store.list_events(task_run.run_id),
+                    payload,
+                )
+            except ValueError as exc:
+                self._send_json(
+                    {"error": str(exc), "task_run": task_run.to_public_dict()},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            if existing is not None:
+                self._send_json(
+                    {
+                        "input_answer": existing.to_public_dict(),
+                        "task_run": task_run.to_public_dict(),
+                    }
+                )
+                return
+            self._send_json(
+                {"error": "This task run has no pending Runtime input."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if not task_run.sandbox_path:
+            self._send_json(
+                {"error": "The task run has no managed worktree sandbox."},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        task_run.execution_usage = _reconcile_runtime_execution_usage(
+            task_run.execution_usage,
+            store.list_events(task_run.run_id),
+        )
+        try:
+            sandbox = require_managed_worktree(task_run.sandbox_path)
+            if Path(sandbox.source_repo).resolve() != Path(task_run.source_repo).resolve():
+                raise AgentInputError(
+                    "The managed worktree does not belong to this task run."
+                )
+            remaining_budget = _remaining_agent_continuation_budget(task_run, payload)
+            if remaining_budget is None:
+                raise ValueError(
+                    "Execution budget cannot cover another Agent decision."
+                )
+            llm_client = _runtime_continuation_llm_client(payload, task_run)
+            if llm_client is None:
+                raise ValueError(
+                    "A request-scoped LLM client is required to continue after input."
+                )
+        except (AgentInputError, LLMError, ValueError, WorktreeSandboxError) as exc:
+            self._send_json(
+                {"error": str(exc), "task_run": task_run.to_public_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        runtime = AgentRuntime(
+            task_run.sandbox_path,
+            task_run.task,
+            run_id=task_run.run_id,
+            policy=RuntimePolicy.read_only(),
+            store=store,
+        )
+        try:
+            input_answer = runtime.submit_input(
+                str(payload.get("checkpoint") or ""),
+                action_id=str(payload.get("action_id") or ""),
+                question_hash=str(payload.get("question_hash") or ""),
+                answer=str(payload.get("answer") or ""),
+            )
+        except ValueError as exc:
+            self._send_json(
+                {"error": str(exc), "task_run": task_run.to_public_dict()},
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        task_result = dict(task_run.result or {})
+        task_result["agent_pending_input"] = {}
+        task_result["agent_pending_question"] = ""
+        task_result["agent_state"] = (
+            runtime.working_state.to_dict() if runtime.working_state else {}
+        )
+        task_result["agent_events"] = _public_runtime_events(
+            store.list_events(task_run.run_id)
+        )
+        traces = []
+        repair_transition = _active_agent_repair_transition(task_run, task_result)
+        before_tool_calls = _runtime_started_action_count(
+            store.list_events(task_run.run_id)
+        )
+        continued_at = time.monotonic()
+        try:
+            memory_context = None
+            if _payload_use_memory(payload):
+                memory_context = self._memory(task_run.source_repo).find_related_runs(
+                    task_run.task
+                )
+            continued = continue_agent_after_input(
+                task_run.source_repo,
+                task_run.sandbox_path,
+                task_run.task,
+                task_run.run_id,
+                store,
+                llm_client,
+                max_steps=remaining_budget.max_agent_steps,
+                execution_budget=remaining_budget,
+                memory_context=memory_context,
+                traces=traces,
+                repair_context=(
+                    render_agent_repair_context(repair_transition)
+                    if repair_transition and repair_transition.repair_required
+                    else ""
+                ),
+                blocked_repair_proposal_fingerprints=(
+                    blocked_agent_repair_fingerprints(repair_transition.history)
+                    if repair_transition and repair_transition.repair_required
+                    else None
+                ),
+            )
+        except (AgentInputError, LLMError, ValueError, WorktreeSandboxError) as exc:
+            task_result["agent_continuation_error"] = str(exc)
+            task_result["agent_stop_reason"] = "continuation_failed"
+            task_result["agent_events"] = _public_runtime_events(
+                store.list_events(task_run.run_id)
+            )
+            update_task_run(
+                task_run,
+                "failed",
+                "The answer was saved, but the next Agent decision failed.",
+                result=task_result,
+                error=str(exc),
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_continuation_failed",
+                str(exc),
+                "resume_agent_decision",
+            )
+            self._persist_task_run(task_run)
+            self._send_json(
+                {
+                    "input_answer": input_answer.to_public_dict(),
+                    "task_run": task_run.to_public_dict(),
+                },
+                status=HTTPStatus.ACCEPTED,
+            )
+            return
+
+        after_tool_calls = _runtime_started_action_count(
+            store.list_events(task_run.run_id)
+        )
+        task_run.execution_usage = task_run.execution_usage.add(
+            agent_steps=len(continued.steps),
+            tool_calls=max(after_tool_calls - before_tool_calls, 0),
+            elapsed_ms=max(int((time.monotonic() - continued_at) * 1000), 0),
+        )
+        _merge_agent_continuation_result(
+            task_run,
+            task_result,
+            continued,
+            traces,
+            store,
+        )
+        self._settle_input_continuation(
+            task_run,
+            task_result,
+            continued,
+            repair_transition,
+            store,
+        )
+        self._persist_task_run(task_run)
+        self._send_json(
+            {
+                "input_answer": input_answer.to_public_dict(),
+                "task_run": task_run.to_public_dict(),
+            }
+        )
+
+    def _settle_input_continuation(
+        self,
+        task_run: TaskRun,
+        task_result: dict[str, Any],
+        continued: AgentLoopResult,
+        repair_transition: AgentRepairTransition | None,
+        store: SQLiteRuntimeStore,
+    ) -> None:
+        if repair_transition and repair_transition.repair_required:
+            pending_kind = str(continued.pending_approval.get("action_kind") or "")
+            repeated_proposal = continued.stop_reason == STOP_REPEATED_PROPOSAL
+            if pending_kind in {"apply_patch", "edit_file"} or repeated_proposal:
+                next_attempt = repair_transition.next_attempt
+                if next_attempt is None or not continued.repair_write_fingerprint:
+                    proposal_transition = stop_agent_repair(
+                        repair_transition.history,
+                        attempt=next_attempt or repair_transition.attempt,
+                        max_attempts=repair_transition.max_attempts,
+                        reason=STOP_NO_PROPOSAL,
+                        message=(
+                            "The Agent reached a repair write decision without a valid "
+                            "material proposal fingerprint."
+                        ),
+                        trigger_failure_fingerprint=(
+                            repair_transition.trigger_failure_fingerprint
+                        ),
+                    )
+                else:
+                    proposal_transition = observe_agent_repair_proposal(
+                        repair_transition.history,
+                        attempt=next_attempt,
+                        max_attempts=repair_transition.max_attempts,
+                        trigger_failure_fingerprint=(
+                            repair_transition.trigger_failure_fingerprint
+                        ),
+                        proposal_fingerprint=continued.repair_write_fingerprint,
+                        proposal_paths=continued.repair_write_paths,
+                        summary=continued.summary or "Agent repair proposal prepared.",
+                    )
+                _apply_agent_repair_transition(
+                    task_run,
+                    task_result,
+                    proposal_transition,
+                    store,
+                )
+                if proposal_transition.stop_reason:
+                    task_result["agent_pending_approval"] = {}
+                    task_result["agent_stop_reason"] = proposal_transition.stop_reason
+                    _finish_stopped_agent_repair(
+                        task_run,
+                        task_result,
+                        proposal_transition,
+                    )
+                    return
+                task_result["agent_repair_pending_attempt"] = proposal_transition.attempt
+                _sync_agent_repair_result(task_run, task_result)
+            elif not continued.pending_input:
+                budget_state = execution_budget_state(
+                    task_run.execution_budget,
+                    task_run.execution_usage,
+                )
+                exhausted = budget_state["exhausted"] or (
+                    budget_state["remaining"]["agent_steps"] <= 0
+                    or budget_state["remaining"]["tool_calls"] <= 0
+                )
+                stopped = stop_agent_repair(
+                    repair_transition.history,
+                    attempt=repair_transition.next_attempt or repair_transition.attempt,
+                    max_attempts=repair_transition.max_attempts,
+                    reason=STOP_EXECUTION_BUDGET if exhausted else STOP_NO_PROPOSAL,
+                    message=(
+                        "The execution budget ended before the Agent produced a new repair patch."
+                        if exhausted
+                        else "The Agent continuation produced no apply-ready repair action."
+                    ),
+                    trigger_failure_fingerprint=(
+                        repair_transition.trigger_failure_fingerprint
+                    ),
+                )
+                _apply_agent_repair_transition(task_run, task_result, stopped, store)
+                _finish_stopped_agent_repair(task_run, task_result, stopped)
+                return
+
+        if continued.pending_input:
+            update_task_run(
+                task_run,
+                "awaiting_input",
+                "The Agent needs another exact user answer before continuing.",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_input_ready",
+                "The next typed Runtime question is waiting for an exact bounded answer.",
+                "answer_agent_question",
+            )
+            return
+        if continued.pending_approval:
+            update_task_run(
+                task_run,
+                "awaiting_approval",
+                "The Agent used the answer to prepare an exact managed action.",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_approval_ready",
+                "A post-input Agent action is waiting for exact approval.",
+                "review_runtime_action",
+            )
+            return
+        if continued.stop_reason == "finished" and agent_completion_ready(
+            continued.working_state
+        ):
+            cycle = _task_validation_cycle(task_run)
+            validation = _validation_results_from_cycle(cycle) if cycle else []
+            approved_paths = _approved_agent_write_paths(task_result)
+            try:
+                changed_files = [
+                    change.path
+                    for change in inspect_repository(task_run.sandbox_path or "").changes
+                ]
+            except (FileNotFoundError, RuntimeError):
+                changed_files = list(approved_paths)
+            completion = evaluate_completion(
+                task_run.acceptance_criteria,
+                changed_files=changed_files,
+                approved_paths=approved_paths,
+                validation=validation,
+                diff=str(task_result.get("agent_resulting_diff") or ""),
+            )
+            task_run.completion_evidence = completion
+            task_result["completion_evidence"] = completion.to_dict()
+            if completion.status == "passed":
+                update_task_run(
+                    task_run,
+                    "completed",
+                    "The Agent finished after using the answer with complete evidence.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_task_complete",
+                    completion.summary,
+                    "review_report",
+                )
+            else:
+                task_result["agent_stop_reason"] = "completion_evidence_incomplete"
+                update_task_run(
+                    task_run,
+                    "review_pending",
+                    "The Agent requested completion, but repository evidence did not pass.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_completion_blocked",
+                    completion.summary,
+                    "review_validation",
+                )
+            return
+
+        update_task_run(
+            task_run,
+            "review_pending",
+            "Review the answered Agent trajectory and current repository evidence.",
+            result=task_result,
+            error=None,
+        )
+        record_task_run_checkpoint(
+            task_run,
+            "runtime_input_observed",
+            "The answer was consumed and the bounded continuation stopped for review.",
+            "review_agent_state",
+        )
+
     def _handle_runtime_approval_grant(self) -> None:
         payload = self._read_json()
         task_run = self._task_run_from_payload_or_error(payload)
@@ -2221,6 +2603,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
         task_result["agent_state"] = continued.working_state.to_dict()
         task_result["agent_stop_reason"] = continued.stop_reason
         task_result["agent_pending_question"] = continued.pending_question
+        task_result["agent_pending_input"] = continued.pending_input
         task_result["agent_pending_approval"] = continued.pending_approval
         task_result["agent_completion_ready"] = agent_completion_ready(
             continued.working_state
@@ -2286,7 +2669,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     return
                 task_result["agent_repair_pending_attempt"] = proposal_transition.attempt
                 _sync_agent_repair_result(task_run, task_result)
-            elif not continued.pending_question:
+            elif not continued.pending_input:
                 budget_state = execution_budget_state(
                     task_run.execution_budget,
                     task_run.execution_usage,
@@ -2313,6 +2696,21 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 _finish_stopped_agent_repair(task_run, task_result, stopped)
                 return
 
+        if continued.pending_input:
+            update_task_run(
+                task_run,
+                "awaiting_input",
+                "The Agent used validation evidence and now needs one exact user answer.",
+                result=task_result,
+                error=None,
+            )
+            record_task_run_checkpoint(
+                task_run,
+                "runtime_input_ready",
+                "A post-validation Agent question is waiting for an exact bounded answer.",
+                "answer_agent_question",
+            )
+            return
         if continued.pending_approval:
             update_task_run(
                 task_run,
@@ -2380,11 +2778,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 )
             return
 
-        detail = (
-            "The Agent requested user input; answer continuation is not available until the user-interaction milestone."
-            if continued.pending_question
-            else "Review the validation evidence and current Agent state before continuing."
-        )
+        detail = "Review the validation evidence and current Agent state before continuing."
         update_task_run(
             task_run,
             "review_pending",
@@ -2698,6 +3092,56 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     task_run.execution_budget,
                     task_run.execution_usage,
                 )
+            if str(runtime_recovery.get("next_step") or "") == "await_input":
+                if not task_run.sandbox_path:
+                    raise TaskRunError(
+                        "The pending Runtime input has no preserved sandbox."
+                    )
+                input_runtime = AgentRuntime(
+                    task_run.sandbox_path,
+                    task_run.task,
+                    run_id=task_run.run_id,
+                    policy=RuntimePolicy.read_only(),
+                    store=SQLiteRuntimeStore(self._memory(task_run.source_repo)),
+                )
+                pending_input = input_runtime.pending_input
+                if not pending_input:
+                    raise TaskRunError(
+                        "The durable Runtime input checkpoint is missing or stale."
+                    )
+                task_result = dict(task_run.result or {})
+                task_result["agent_pending_input"] = pending_input
+                task_result["agent_pending_question"] = str(
+                    pending_input.get("question") or ""
+                )
+                task_result["agent_events"] = _public_runtime_events(
+                    input_runtime.events
+                )
+                task_result["agent_runtime_recovery"] = (
+                    input_runtime.recovery_plan.to_dict()
+                )
+                update_task_run(
+                    task_run,
+                    "awaiting_input",
+                    "The exact Runtime question was restored after interruption.",
+                    result=task_result,
+                    error=None,
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_input_ready",
+                    "The restored typed Runtime question is waiting for an exact answer.",
+                    "answer_agent_question",
+                )
+                self._persist_task_run(task_run)
+                self._send_json(
+                    {
+                        "task_run": task_run.to_public_dict(),
+                        "recovery_readiness": readiness.to_dict(),
+                    },
+                    status=HTTPStatus.ACCEPTED,
+                )
+                return
             prepare_task_run_resume(task_run, requested_checkpoint, confirmed=True)
             self._persist_task_run(task_run)
             if task_run.status not in {"awaiting_approval", "repair_pending"}:
@@ -2851,6 +3295,7 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 agent_event_store=runtime_store,
                 execution_budget=workflow_budget,
                 allow_agent_writes=True,
+                allow_agent_questions=True,
                 resume_agent_runtime=reuse_sandbox,
             )
             task_run.acceptance_criteria = criteria_from_records(report.acceptance_criteria)
@@ -2882,8 +3327,14 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                 in {"apply_patch", "edit_file"}
                 else {}
             )
+            runtime_input = (
+                report.agent_pending_input
+                if report.agent_pending_input.get("checkpoint")
+                else {}
+            )
             if (
                 not runtime_approval
+                and not runtime_input
                 and proposal
                 and proposal.file_edits
                 and proposal.apply_ready
@@ -2970,12 +3421,17 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             if task_run.cancel_requested:
                 checkpoint_task_run(
                     task_run,
-                    "awaiting_approval"
+                    "awaiting_input"
+                    if runtime_input
+                    else "awaiting_approval"
                     if proposal_id or runtime_approval
                     else "completed",
                 )
-            elif task_run.pause_requested and (proposal_id or runtime_approval):
-                checkpoint_task_run(task_run, "awaiting_approval")
+            elif task_run.pause_requested and (proposal_id or runtime_approval or runtime_input):
+                checkpoint_task_run(
+                    task_run,
+                    "awaiting_input" if runtime_input else "awaiting_approval",
+                )
             elif budget_exhausted:
                 update_task_run(
                     task_run,
@@ -2988,6 +3444,18 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
                     "analysis_failed",
                     "Analysis stopped after exhausting the execution budget.",
                     "inspect_failure",
+                )
+            elif runtime_input:
+                update_task_run(
+                    task_run,
+                    "awaiting_input",
+                    "The Agent needs one exact user answer before continuing this run.",
+                )
+                record_task_run_checkpoint(
+                    task_run,
+                    "runtime_input_ready",
+                    "A typed Runtime question is waiting for an exact bounded answer.",
+                    "answer_agent_question",
                 )
             elif runtime_approval:
                 update_task_run(
@@ -3722,6 +4190,20 @@ def _public_runtime_events(events: list[Any]) -> list[dict[str, Any]]:
             else:
                 payload["snapshots"] = []
             data["payload"] = payload
+        if data.get("event_type") == "input_received":
+            payload = dict(data.get("payload") or {})
+            raw_answer = payload.get("input_answer")
+            if isinstance(raw_answer, dict):
+                answer_text = raw_answer.get("answer")
+                payload["input_answer"] = {
+                    key: value
+                    for key, value in raw_answer.items()
+                    if key != "answer"
+                }
+                payload["input_answer"]["answer_chars"] = (
+                    len(answer_text) if isinstance(answer_text, str) else 0
+                )
+            data["payload"] = payload
         public_events.append(data)
     return public_events
 
@@ -4087,6 +4569,91 @@ def _runtime_continuation_llm_client(
     )
 
 
+def _runtime_started_action_count(events: list[Any]) -> int:
+    return sum(
+        1
+        for event in events
+        if event.event_type in {"action_started", "action_recovery_started"}
+    )
+
+
+def _merge_agent_continuation_result(
+    task_run: TaskRun,
+    task_result: dict[str, Any],
+    continued: AgentLoopResult,
+    traces: list[Any],
+    store: SQLiteRuntimeStore,
+) -> None:
+    state = continued.working_state
+    if state is None:
+        raise ValueError("The continued Agent Working State is missing.")
+    task_result["agent_steps"] = [
+        *list(task_result.get("agent_steps") or []),
+        *[asdict(step) for step in continued.steps],
+    ]
+    task_result["llm_traces"] = [
+        *list(task_result.get("llm_traces") or []),
+        *[asdict(trace) for trace in traces],
+    ]
+    task_result["agent_events"] = _public_runtime_events(
+        store.list_events(task_run.run_id)
+    )
+    task_result["agent_state"] = state.to_dict()
+    task_result["agent_stop_reason"] = continued.stop_reason
+    task_result["agent_pending_question"] = continued.pending_question
+    task_result["agent_pending_input"] = continued.pending_input
+    task_result["agent_pending_approval"] = continued.pending_approval
+    task_result["agent_completion_ready"] = agent_completion_ready(state)
+    task_result["agent_completion_blockers"] = agent_completion_blockers(state)
+    task_result["agent_proposed_edits"] = continued.proposed_edits
+    task_result["agent_proposed_diff"] = continued.proposed_diff
+    task_result["agent_runtime_recovery"] = continued.runtime_recovery
+    task_result["execution_budget"] = execution_budget_state(
+        task_run.execution_budget,
+        task_run.execution_usage,
+    )
+    task_run.acceptance_criteria = criteria_from_records(
+        state.to_dict().get("acceptance_criteria")
+    )
+    task_run.result = task_result
+
+
+def _active_agent_repair_transition(
+    task_run: TaskRun,
+    task_result: dict[str, Any],
+) -> AgentRepairTransition | None:
+    raw = task_result.get("agent_repair")
+    if not isinstance(raw, dict) or raw.get("repair_required") is not True:
+        return None
+    attempt = raw.get("attempt")
+    max_attempts = raw.get("max_attempts")
+    if (
+        not isinstance(attempt, int)
+        or isinstance(attempt, bool)
+        or attempt < 0
+        or not isinstance(max_attempts, int)
+        or isinstance(max_attempts, bool)
+        or max_attempts < 0
+    ):
+        return None
+    return AgentRepairTransition(
+        history=list(task_run.repair_history),
+        attempt=attempt,
+        max_attempts=max_attempts,
+        status=str(raw.get("status") or "repair_required"),
+        repair_required=True,
+        trigger_failure_fingerprint=str(
+            raw.get("trigger_failure_fingerprint") or ""
+        ),
+        stop_reason=(
+            str(raw.get("stop_reason"))
+            if raw.get("stop_reason") is not None
+            else None
+        ),
+        message=str(raw.get("message") or ""),
+    )
+
+
 def _pending_runtime_approval(task_run: TaskRun) -> dict[str, Any]:
     if task_run.status != "awaiting_approval" or not isinstance(task_run.result, dict):
         return {}
@@ -4094,6 +4661,47 @@ def _pending_runtime_approval(task_run: TaskRun) -> dict[str, Any]:
     if not isinstance(request, dict) or not request.get("checkpoint"):
         return {}
     return request
+
+
+def _pending_runtime_input(task_run: TaskRun) -> dict[str, Any]:
+    if task_run.status != "awaiting_input" or not isinstance(task_run.result, dict):
+        return {}
+    request = task_run.result.get("agent_pending_input")
+    if not isinstance(request, dict) or not request.get("checkpoint"):
+        return {}
+    return request
+
+
+def _existing_runtime_input_answer(
+    events: list[Any],
+    payload: dict[str, Any],
+) -> RuntimeInputAnswer | None:
+    checkpoint = str(payload.get("checkpoint") or "").strip()
+    if not checkpoint:
+        return None
+    for event in reversed(events):
+        if event.event_type != "input_received":
+            continue
+        raw = event.payload.get("input_answer")
+        if not isinstance(raw, dict):
+            continue
+        try:
+            response = RuntimeInputAnswer.from_dict(raw)
+        except ValueError:
+            continue
+        if response.checkpoint != checkpoint:
+            continue
+        if (
+            response.action_id == str(payload.get("action_id") or "").strip()
+            and response.question_hash
+            == str(payload.get("question_hash") or "").strip().lower()
+            and response.answer == str(payload.get("answer") or "").strip()
+        ):
+            return response
+        raise ValueError(
+            "The input checkpoint was already answered with different exact data."
+        )
+    return None
 
 
 def _normalize_approved_path(path: str) -> str:

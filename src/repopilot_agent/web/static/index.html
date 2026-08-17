@@ -172,6 +172,16 @@
             <button id="cancelTaskRun" class="secondary danger-button" disabled>Cancel</button>
           </div>
           <p id="taskRunResumeLine" class="status-line"></p>
+          <section id="taskRunInput" class="task-run-input" hidden>
+            <h2>Agent Input</h2>
+            <div id="taskRunInputRequest" class="timeline"></div>
+            <label for="taskRunInputAnswer">Answer</label>
+            <textarea id="taskRunInputAnswer" rows="5" maxlength="4000"></textarea>
+            <div class="toolbar task-run-input-controls">
+              <button id="submitTaskRunInput" class="secondary" disabled>Submit Answer</button>
+              <span id="taskRunInputStatus" class="status-line"></span>
+            </div>
+          </section>
           <h2>Recovery Readiness</h2>
           <div id="taskRunRecoveryReadiness" class="timeline"></div>
           <h2>Saved Execution Profile</h2>

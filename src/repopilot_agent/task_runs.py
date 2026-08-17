@@ -28,6 +28,7 @@ TASK_RUN_STATUSES = {
     "queued",
     "creating_sandbox",
     "exploring",
+    "awaiting_input",
     "awaiting_approval",
     "applying",
     "review_pending",
@@ -178,6 +179,16 @@ class TaskRun:
             self.status == "awaiting_approval"
             and isinstance(pending_runtime_approval, dict)
             and pending_runtime_approval.get("checkpoint")
+        )
+        pending_runtime_input = (
+            self.result.get("agent_pending_input")
+            if isinstance(self.result, dict)
+            else None
+        )
+        data["can_answer_input"] = bool(
+            self.status == "awaiting_input"
+            and isinstance(pending_runtime_input, dict)
+            and pending_runtime_input.get("checkpoint")
         )
         data["can_repair"] = self.status == "repair_pending"
         data["can_create_branch"] = self.status == "completed" and not self.delivery_branch
@@ -439,6 +450,7 @@ def request_task_run_cancel(task_run: TaskRun) -> TaskRun:
         task_run.resume_checkpoint, blocked = _resume_checkpoint_for_state(task_run, task_run.status)
         task_run.resume_blocked_reason = blocked or None
     if task_run.status in {
+        "awaiting_input",
         "awaiting_approval",
         "repair_pending",
         "review_pending",

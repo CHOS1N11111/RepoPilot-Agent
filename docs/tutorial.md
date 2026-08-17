@@ -238,6 +238,7 @@ Important LLM-related fields:
 - `agent_state`: latest versioned working-state snapshot with objective, focus, findings, open questions, implementation plan, acceptance state, virtual-edit metadata, expected evidence, lifecycle fields, selected paths, and bounded observations with action ids.
 - `agent_stop_reason`: explicit controller result such as `finished`, `step_limit`, `input_required`, `policy_denied`, or `failed`.
 - `agent_pending_question`: user question attached to an `input_required` stop, when core question support is enabled.
+- `agent_pending_input`: exact run, action, checkpoint, input type, question hash, and timestamp required to submit a durable answer.
 - `agent_completion_ready`: whether plan, required acceptance criteria, and virtual proposal review are complete.
 - `agent_completion_blockers`: stable `plan:<id>`, `acceptance:<id>`, and `proposal:<path>:<reason>` identifiers preventing finish.
 - `agent_proposed_edits`: bounded path, hash, revision, hunk-count, conflict, and inspection metadata.
@@ -270,7 +271,7 @@ http://127.0.0.1:8765
 
 The web UI is local. It gives you the full workflow in tabs:
 
-- Task Run: sandbox lifecycle, current phase, pause/resume/cancel controls, event history, and local branch delivery.
+- Task Run: sandbox lifecycle, durable Agent Input, current phase, pause/resume/cancel controls, event history, and local branch delivery.
 - Summary: plan, Repository Map, proposal, validation, safety, repair feedback, and timeline.
 - LLM I/O: prompt preview, output preview, trace status, and context budget.
 - GitHub: open issues, pull requests, reviews, files, comments, and checks.
@@ -286,11 +287,11 @@ Open an `agent_step_N` entry in LLM I/O and inspect `Context Budget`. A summary 
 
 Agent Working State is a compact controller snapshot rather than a transcript. Version 4 adds up to 12 virtual-edit metadata records to version 3's bounded plan, acceptance, focus, findings, questions, expected evidence, lifecycle, and selected-path fields. Each virtual-edit record contains only its path, real and virtual hashes, revision, cumulative hunk count, conflict status, and inspection state. RepoPilot seeds one investigation step plus preliminary acceptance criteria, applies structured updates deterministically, and records initial, per-action, and terminal snapshots. Questions are matched case-insensitively, duplicate findings/questions are suppressed, and only bounded values plus the eight newest observation summaries and action ids are retained. Version 1 through 3 snapshots remain readable with empty later fields. Complete virtual file contents are process-local rather than restored from Working State; complete command output, API keys, and provider endpoints are also excluded. Saved History derives the latest state from persisted `working_state_updated` events and the latest bounded virtual diff observation.
 
-Findings in Working State are model-maintained investigation notes. They help the next decision stay focused, but RepoPilot does not treat them as passing tests, completion evidence, or permission to modify files. The core controller can opt into `ask_user`; a valid question pauses with `input_required`, persists the open question, and exposes it as `agent_pending_question`. The top-level CLI/Web workflow deliberately does not offer this action yet because it cannot durably bind an answer and resume the same controller run.
+Findings in Working State are model-maintained investigation notes. They help the next decision stay focused, but RepoPilot does not treat them as passing tests, completion evidence, or permission to modify files. A sandboxed Task Run may choose `ask_user`; a valid question pauses with `input_required`, persists an exact `agent_pending_input` request, and moves the task to `awaiting_input`. Enter the answer in the Task Run's Agent Input panel and click `Submit Answer`. RepoPilot binds it to the displayed checkpoint and question hash, records it as non-evidence, and continues the same Runtime run. One-shot CLI and `/api/run` workflows keep questions disabled.
 
 Runtime events are ordered by sequence number. A normal controller cycle records `decision_recorded`, `action_authorized`, `action_started`, `action_completed`, and `working_state_updated`; stale hashes or hunk conflicts record `action_conflict`. `decision_recorded` stores the validated bounded decision envelope. `action_authorized` proves policy allowed the exact action; denied, approval-required, and acceptance-incomplete finish actions do not receive it. `finish_blocked` is recoverable inside the current loop and reports exactly which plan, acceptance, or proposal-review ids need work. `input_required` records a question pause. `action_replayed` means a completed idempotent result was reused without executing the tool again. After restart, `action_recovered` records either a recovered completed reservation or a safe read-only retry; `action_recovery_confirmed` records a user-confirmed unknown side-effect outcome without replaying it. Runtime stopping observations still end the current loop immediately; patch conflicts and `finish_blocked` are controller observations that allow a later corrective decision within the remaining budget.
 
-The runtime tool registry contains `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `propose_patch`, `inspect_proposed_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The current iterative LLM Agent receives a non-writing policy that includes the virtual proposal tools, and the top-level workflow further removes `ask_user` until durable answer/resume support is implemented. Real edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
+The runtime tool registry contains `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `propose_patch`, `inspect_proposed_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The iterative LLM Agent receives virtual proposal tools; only durable sandboxed Task Runs also receive `ask_user` and approval-gated write actions. Real edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
 
 The Repository Map is built locally from scanned files. For Python it uses the standard AST to index classes, functions, methods, signatures, and imports. It also recognizes common JavaScript/TypeScript declarations and relative imports, links source files to tests, and ranks entries against the current task. Planner and proposal prompts receive a bounded map section, while the Summary tab shows the counts and most relevant entries.
 
@@ -631,7 +632,7 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 3. Configure and test the LLM connection when model-backed edits are needed.
 4. Click `Start Sandboxed Task`.
 5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
-6. At `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
+6. At `awaiting_input`, answer the exact question in Agent Input; at `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
 7. If Summary shows a write under `Pending Runtime Approval`, inspect it and click `Approve Exact Write` or `Reject`. An approved write changes only the managed worktree and records its resulting diff.
 8. If a configured command then appears, inspect it and click `Run Exact Validation` or `Reject`. Each command gets a separate approval and bounded result.
 9. If the run produced the compatible server-stored proposal flow instead, select approved files and click `Apply Proposal`; that existing path runs its configured validation commands.
@@ -644,7 +645,7 @@ Task runs are saved in the source repository's `.repopilot/memory.sqlite3`. Repo
 
 The advanced task settings include four execution limits: Agent steps, tool calls, validation commands, and elapsed seconds. Agent exploration consumes step and tool-call capacity. Applying an approved file and running a validation command also consume tool-call capacity. RepoPilot checks the remaining command and tool budget before writing, records elapsed usage, and preserves the proposal without applying it when the configured capacity is insufficient.
 
-Acceptance criteria are generated from the task, proposal file scope, and validation commands. The Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. In the Runtime path, Working State v5 binds every generated validation criterion to one exact command and its observation action id. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded.
+Acceptance criteria are generated from the task, proposal file scope, and validation commands. The Completion Evidence panel reports whether files changed, whether all changed paths were approved, and whether each required command passed. In the Runtime path, Working State v6 binds every generated validation criterion to one exact command and its observation action id while keeping user answers in a separate non-evidence section. A task run is `completed` only when all required criteria pass and its execution budget is not exceeded.
 
 Existing UTF-8 proposal files are converted from full replacement content into exact-text structured hunks. Each patch carries the file's proposal-time SHA-256. If the file changes before approval, RepoPilot rejects the patch instead of overwriting the newer content. If a later file conflicts during a multi-file apply, earlier writes from that apply attempt are restored from the captured snapshots.
 
@@ -673,6 +674,7 @@ For iterative runs, the Runtime Resume panel also shows the Working State iterat
 - A started read-only action may be retried with its existing idempotency reservation.
 - A started write or command with no terminal observation is marked `ambiguous_side_effect` and is never replayed automatically.
 - An unresolved approval keeps its original checkpoint.
+- An unresolved question restores `awaiting_input` with its original checkpoint and must be answered rather than replayed.
 
 For an ambiguous side effect, Resume opens a confirmation naming the exact action id and kind. The browser echoes the action id and recovery token shown by the latest readiness report. Confirmation records an unknown outcome and continues from the next Agent decision; it does not mark the action successful. Inspect the current diff, Git status, and relevant files before approving any later write or validation command.
 

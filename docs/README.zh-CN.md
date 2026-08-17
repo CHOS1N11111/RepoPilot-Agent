@@ -16,6 +16,7 @@ RepoPilot Agent 是一个在本地运行、以人工审批为先的编程 Agent�
 
 - 根据任务，从文件、符号、导入关系、Git 状态以及源码与测试的关联中构建仓库上下文。
 - 运行带类型约束的多步骤 Agent 循环，支持上下文预算、持久化事件、证据驱动计划和可检查的 LLM Trace。
+- 让持久化 Task Run 在需要澄清时暂停，将有界回答绑定到精确 checkpoint，并继续同一个 Agent run。
 - 生成带 SHA-256 保护的虚拟补丁，并允许沙箱 Task Run 请求精确、需审批的写入。
 - 持久化有时效的精确 action 审批凭证，并绑定 payload 哈希、当前 Diff、checkpoint 以及文件或命令范围。
 - 逐条审批并执行配置的验证命令，将有界输出交回同一个 Agent controller 进行有限次数的修复决策。
@@ -83,6 +84,7 @@ repopilot serve
 - 选择并同步本地路径或 GitHub URL 对应的仓库。
 - 设置 LLM 模型、API 端点、API Key、超时时间和 JSON 兼容模式，并测试连接。
 - 查看 Agent Steps、Working State、上下文预算、LLM 输入输出 Trace 和运行时事件。
+- 在独立的 Agent Input 面板回答持久化问题；回答会进入上下文，但不会被视为仓库证据。
 - 查看修改方案和累积 Diff，逐文件审批，获取验证反馈并回滚修改。
 - 查看沙箱任务进度，暂停、恢复或取消任务，检查精确 action 恢复状态并准备本地分支交付。
 - 查看 GitHub Issue、Pull Request、Review、评论以及 CI/Check 状态。

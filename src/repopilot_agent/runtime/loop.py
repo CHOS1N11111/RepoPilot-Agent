@@ -22,6 +22,13 @@ from .approval import (
     normalize_file_scope,
     utc_timestamp,
 )
+from .interaction import (
+    RuntimeInputAnswer,
+    RuntimeInputRequest,
+    create_runtime_input_answer,
+    create_runtime_input_request,
+    utc_input_timestamp,
+)
 from .models import (
     READ_ONLY_ACTIONS,
     SIDE_EFFECT_ACTIONS,
@@ -40,7 +47,11 @@ from .recovery import (
     analyze_runtime_recovery,
 )
 from .store import InMemoryRuntimeStore, RuntimeEventStore
-from .state import AgentWorkingState, latest_agent_working_state
+from .state import (
+    AgentWorkingState,
+    latest_agent_working_state,
+    record_agent_user_input,
+)
 from .tools import (
     RuntimeSideEffectPreview,
     RuntimeToolContext,
@@ -164,6 +175,70 @@ class AgentRuntime:
             if str(event.payload.get("checkpoint") or "") == request.checkpoint:
                 return {}
         return request.to_dict()
+
+    @property
+    def pending_input(self) -> dict:
+        request_event = self._latest_input_request_event()
+        request = _input_request_from_event(request_event)
+        if request is None or self._answer_for_checkpoint(request.checkpoint) is not None:
+            return {}
+        return request.to_dict()
+
+    def submit_input(
+        self,
+        checkpoint: str,
+        *,
+        action_id: str,
+        question_hash: str,
+        answer: str,
+    ) -> RuntimeInputAnswer:
+        """Persist one answer bound to the exact pending Runtime question."""
+
+        self.start()
+        request_event = self._input_request_event(checkpoint)
+        request = _input_request_from_event(request_event)
+        if request is None:
+            raise ValueError("Input checkpoint does not exist.")
+        if (
+            request.run_id != self.run_id
+            or request.action_id != str(action_id).strip()
+            or request.question_hash != str(question_hash).strip().lower()
+        ):
+            raise ValueError("Input answer does not match the exact pending question.")
+
+        normalized_answer = str(answer).strip()
+        existing = self._answer_for_checkpoint(request.checkpoint)
+        if existing is not None:
+            if existing.answer == normalized_answer:
+                self._persist_input_state(request, existing)
+                return existing
+            raise ValueError("The pending question already has a different durable answer.")
+
+        latest = self._latest_input_request_event()
+        latest_request = _input_request_from_event(latest)
+        if latest_request is None or latest_request.checkpoint != request.checkpoint:
+            raise ValueError("Input checkpoint is stale.")
+
+        response = create_runtime_input_answer(
+            request,
+            normalized_answer,
+            answered_at=utc_input_timestamp(self._now()),
+        )
+        action = RuntimeAction.from_dict(
+            dict(request_event.payload.get("action") or {})
+        )
+        self.store.append_event(
+            self.run_id,
+            "input_received",
+            action=action,
+            payload={
+                "action": action.to_dict(),
+                "input_request": request.to_dict(),
+                "input_answer": response.to_dict(),
+            },
+        )
+        self._persist_input_state(request, response)
+        return response
 
     def grant_approval(
         self,
@@ -631,18 +706,33 @@ class AgentRuntime:
             question = str(action.arguments.get("question") or "").strip()
             if not question:
                 question = "The agent needs additional user input before continuing."
+            current_state = self.working_state
+            request = create_runtime_input_request(
+                self.run_id,
+                action.action_id,
+                question,
+                requested_at=utc_input_timestamp(self._now()),
+                resume_phase=(current_state.phase if current_state else "exploration"),
+            )
             observation = RuntimeObservation(
                 action_id=action.action_id,
                 action_kind=action.kind,
                 status="input_required",
                 summary=question,
-                data={"question": question},
+                data={
+                    "question": question,
+                    "input_request": request.to_dict(),
+                },
             )
             self.store.append_event(
                 self.run_id,
                 "input_required",
                 action=action,
-                payload={"action": action.to_dict(), "observation": observation.to_dict()},
+                payload={
+                    "action": action.to_dict(),
+                    "input_request": request.to_dict(),
+                    "observation": observation.to_dict(),
+                },
             )
             return observation
 
@@ -939,6 +1029,77 @@ class AgentRuntime:
                 return event
         return None
 
+    def _latest_input_request_event(self, action_id: str | None = None):
+        for event in reversed(self.events):
+            request = _input_request_from_event(event)
+            if request is None:
+                continue
+            if action_id is None or request.action_id == action_id:
+                return event
+        return None
+
+    def _input_request_event(self, checkpoint: str):
+        for event in reversed(self.events):
+            request = _input_request_from_event(event)
+            if request and request.checkpoint == checkpoint:
+                return event
+        return None
+
+    def _answer_for_checkpoint(self, checkpoint: str) -> RuntimeInputAnswer | None:
+        for event in reversed(self.events):
+            if event.event_type != "input_received":
+                continue
+            raw = event.payload.get("input_answer")
+            try:
+                response = (
+                    RuntimeInputAnswer.from_dict(raw)
+                    if isinstance(raw, dict)
+                    else None
+                )
+            except ValueError:
+                continue
+            if response and response.checkpoint == checkpoint:
+                return response
+        return None
+
+    def _persist_input_state(
+        self,
+        request: RuntimeInputRequest,
+        answer: RuntimeInputAnswer,
+    ) -> None:
+        latest_state = self.working_state
+        persisted = next(
+            (
+                item
+                for item in (latest_state.user_inputs if latest_state else [])
+                if item.checkpoint == request.checkpoint
+            ),
+            None,
+        )
+        if persisted is not None:
+            if persisted.answer_id != answer.answer_id:
+                raise ValueError(
+                    "The pending question already has a different durable answer."
+                )
+            return
+        state = self.recovery_plan.working_state
+        reconstructed = next(
+            (
+                item
+                for item in state.user_inputs
+                if item.checkpoint == request.checkpoint
+            ),
+            None,
+        )
+        if reconstructed is not None:
+            if reconstructed.answer_id != answer.answer_id:
+                raise ValueError(
+                    "The pending question already has a different durable answer."
+                )
+            self.record_working_state(state)
+            return
+        self.record_working_state(record_agent_user_input(state, request, answer))
+
     def _approval_request_event(self, checkpoint: str):
         for event in reversed(self.events):
             request = _approval_request_from_event(event)
@@ -1027,4 +1188,29 @@ def _approval_request_from_event(event: RuntimeEvent | None) -> RuntimeApprovalR
     try:
         return RuntimeApprovalRequest.from_dict(raw) if isinstance(raw, dict) else None
     except ValueError:
+        return None
+
+
+def _input_request_from_event(event: RuntimeEvent | None) -> RuntimeInputRequest | None:
+    if event is None or event.event_type != "input_required":
+        return None
+    raw = event.payload.get("input_request")
+    if isinstance(raw, dict):
+        try:
+            return RuntimeInputRequest.from_dict(raw)
+        except ValueError:
+            return None
+
+    action_raw = event.payload.get("action")
+    if not isinstance(action_raw, dict):
+        return None
+    try:
+        action = RuntimeAction.from_dict(action_raw)
+        return create_runtime_input_request(
+            event.run_id,
+            action.action_id,
+            str(action.arguments.get("question") or ""),
+            requested_at=event.created_at,
+        )
+    except (TypeError, ValueError):
         return None

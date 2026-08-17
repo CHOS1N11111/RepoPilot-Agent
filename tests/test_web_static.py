@@ -119,6 +119,11 @@ class WebApprovalUiContractTests(unittest.TestCase):
             "taskRunLatestCheckpoint",
             "taskRunCheckpoints",
             "taskRunEvents",
+            "taskRunInput",
+            "taskRunInputRequest",
+            "taskRunInputAnswer",
+            "submitTaskRunInput",
+            "taskRunInputStatus",
             "taskRunBranch",
             "createTaskBranch",
         ]:
@@ -131,6 +136,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
             "/api/task-runs/resume",
             "/api/task-runs/cancel",
             "/api/task-runs/branch",
+            "/api/task-runs/runtime-input/answer",
         ]:
             self.assertIn(endpoint, self.app_js)
         self.assertIn("startTaskRunPolling", self.app_js)
@@ -149,8 +155,13 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("taskRun.latest_checkpoint", self.app_js)
         self.assertIn("taskRun.checkpoints", self.app_js)
         self.assertIn("task_run_id: state.taskRun.run_id", self.app_js)
+        self.assertIn("async function submitTaskRunInput", self.app_js)
+        self.assertIn("function renderTaskRunInput", self.app_js)
+        self.assertIn("question_hash: request.question_hash", self.app_js)
+        self.assertIn("not evidence", self.app_js)
         self.assertIn("RepoPilot will not commit or push", self.app_js)
         self.assertIn(".task-run-phases", self.app_css)
+        self.assertIn(".task-run-input", self.app_css)
 
     def test_summary_exposes_typed_runtime_events(self) -> None:
         self.assertIn('id="runtimeEventList"', self.index_html)

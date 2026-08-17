@@ -57,6 +57,7 @@ def run_workflow(
     agent_event_store: RuntimeEventStore | None = None,
     execution_budget: ExecutionBudget | None = None,
     allow_agent_writes: bool = False,
+    allow_agent_questions: bool = False,
     managed_worktree_root: str | Path | None = None,
     resume_agent_runtime: bool = False,
 ) -> WorkflowReport:
@@ -82,6 +83,7 @@ def run_workflow(
     llm_creation_error: LLMError | None = None
     agent_result: AgentLoopResult | None = None
     agent_waiting_for_write = False
+    agent_waiting_for_input = False
     runtime_tool_call_offset = 0
     if use_llm:
         if llm_client is None:
@@ -130,7 +132,7 @@ def run_workflow(
                         current_diff=current_diff,
                         acceptance_criteria=agent_acceptance_criteria,
                         execution_budget=budget,
-                        allow_user_questions=False,
+                        allow_user_questions=allow_agent_questions,
                         allow_write_actions=allow_agent_writes,
                         managed_worktree_root=managed_worktree_root,
                         resume_existing_state=resume_agent_runtime,
@@ -140,6 +142,7 @@ def run_workflow(
                         and agent_result.pending_approval.get("action_kind")
                         in {"apply_patch", "edit_file"}
                     )
+                    agent_waiting_for_input = bool(agent_result.pending_input)
                     hits = select_agent_hits(hits, files, agent_result.selected_paths, search_limit)
                     repository_map_context = render_repository_map(
                         repository_map,
@@ -149,7 +152,7 @@ def run_workflow(
                 except LLMError:
                     if not allow_llm_fallback:
                         raise
-            if agent_waiting_for_write:
+            if agent_waiting_for_write or agent_waiting_for_input:
                 plan = create_plan(task, hits, memory_context=related_memory)
                 plan_metadata = PlanMetadata(
                     source="agent_runtime",
@@ -174,7 +177,7 @@ def run_workflow(
         plan = create_plan(task, hits, memory_context=related_memory)
         plan_metadata = PlanMetadata(source="rules")
 
-    if agent_waiting_for_write:
+    if agent_waiting_for_write or agent_waiting_for_input:
         patch_proposal = propose_patch(task, hits)
         patch_proposal_metadata = PatchProposalMetadata(
             source="agent_runtime",
@@ -207,7 +210,12 @@ def run_workflow(
     patch_proposal = _attach_validation_plan(root, patch_proposal)
     patch_proposal = _attach_safety_check(root, task, patch_proposal)
     patch_review = None
-    if use_llm and llm_client is not None and not agent_waiting_for_write:
+    if (
+        use_llm
+        and llm_client is not None
+        and not agent_waiting_for_write
+        and not agent_waiting_for_input
+    ):
         patch_review = review_patch_with_optional_llm(
             task,
             patch_proposal,
@@ -262,6 +270,7 @@ def run_workflow(
         ),
         agent_stop_reason=agent_result.stop_reason if agent_result else "",
         agent_pending_question=agent_result.pending_question if agent_result else "",
+        agent_pending_input=agent_result.pending_input if agent_result else {},
         agent_pending_approval=agent_result.pending_approval if agent_result else {},
         agent_runtime_recovery=(
             agent_result.runtime_recovery if agent_result else {}

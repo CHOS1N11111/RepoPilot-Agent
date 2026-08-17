@@ -183,8 +183,12 @@ def _runtime_recovery_check(
     if next_step == "await_input":
         return RecoveryReadinessCheck(
             name="runtime_action",
-            status="failed",
-            detail="The Runtime is waiting for durable user input, which is not resumable yet.",
+            status="warning",
+            detail=(
+                "The Runtime is waiting for the exact durable user-input checkpoint; "
+                "submit its answer instead of replaying an Agent action."
+            ),
+            required=False,
         )
     if bool(recovery.get("requires_confirmation")) and isinstance(pending, dict):
         return RecoveryReadinessCheck(

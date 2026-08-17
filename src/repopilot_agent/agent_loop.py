@@ -70,6 +70,7 @@ class AgentLoopResult:
     working_state: AgentWorkingState | None = None
     stop_reason: str = ""
     pending_question: str = ""
+    pending_input: dict = field(default_factory=dict)
     pending_approval: dict = field(default_factory=dict)
     proposed_edits: list[dict] = field(default_factory=list)
     proposed_diff: str = ""
@@ -190,6 +191,7 @@ def run_agent_loop(
                 working_state=working_state,
                 stop_reason=stop_reason,
                 pending_question=pending_question,
+                pending_input=runtime.pending_input,
                 pending_approval=runtime.pending_approval,
                 proposed_edits=runtime.proposed_edits,
                 proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
@@ -247,7 +249,7 @@ def run_agent_loop(
                 step_ceiling,
                 llm_client,
                 traces,
-                allow_user_questions,
+                allow_user_questions and local_step_number < max_steps,
                 write_actions_enabled,
             )
             runtime_action = _to_runtime_action(decision, step_number)
@@ -385,6 +387,7 @@ def run_agent_loop(
         working_state=working_state,
         stop_reason=stop_reason,
         pending_question=pending_question,
+        pending_input=runtime.pending_input,
         pending_approval=runtime.pending_approval,
         proposed_edits=runtime.proposed_edits,
         proposed_diff=_clip(runtime.proposed_diff, MAX_PROPOSED_DIFF_CHARS),
@@ -534,6 +537,8 @@ def _choose_next_decision(
     allow_write_actions: bool,
 ) -> AgentDecision:
     allowed_actions = set(ALLOWED_AGENT_DECISION_ACTIONS)
+    if not allow_user_questions:
+        allowed_actions.discard("ask_user")
     if allow_write_actions:
         allowed_actions.update(AGENT_WRITE_ACTIONS)
     return traced_llm_json_call(
@@ -785,9 +790,9 @@ def _recovery_wait_state(
     if plan.next_step == RECOVERY_AWAIT_APPROVAL:
         return "approval_required", plan.summary, ""
     if plan.next_step == RECOVERY_AWAIT_INPUT:
-        question = ""
         pending = plan.pending_action
-        if pending and pending.observation:
+        question = pending.input_request.question if pending and pending.input_request else ""
+        if not question and pending and pending.observation:
             question = str(
                 pending.observation.data.get("question")
                 or pending.observation.summary

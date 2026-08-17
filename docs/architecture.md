@@ -44,6 +44,7 @@ src/repopilot_agent/
   search.py              task-aware relevance search
   repository_map.py      symbols, dependencies, and source/test relations
   agent_context.py       bounded and redacted iterative context packets
+  agent_input.py         exact user-input continuation in the same run
   agent_loop.py          LLM decision loop adapter
   agent_repair.py        unified repair transitions and stop decisions
   agent_write.py         exact approved-write continuation and diff observation
@@ -64,6 +65,7 @@ src/repopilot_agent/
   web_server.py          local HTTP API and static UI server
   runtime/
     approval.py          exact-action approval requests and expiring grants
+    interaction.py       exact question and bounded answer contracts
     models.py            actions, observations, events, and policies
     recovery.py          exact-action state reconstruction and resume plans
     tools.py             typed tool registry
@@ -136,7 +138,7 @@ The non-writing action set includes:
 - `inspect_proposed_diff`
 - `finish`
 
-The core controller can also support `ask_user`, but the top-level CLI and Web workflow keep it disabled until answers can be durably bound to the same paused run.
+The controller supports `ask_user` only in durable sandboxed Task Runs. One-shot CLI and `/api/run` workflows keep it disabled because they do not own a resumable interaction lifecycle. A question is also excluded from the last available Agent step so the accepted answer always leaves capacity for another decision.
 
 Each action follows one lifecycle:
 
@@ -144,11 +146,11 @@ Each action follows one lifecycle:
 decide -> record -> authorize -> execute -> observe -> update state -> repeat or stop
 ```
 
-The runtime persists ordered decision, authorization, action, observation, conflict, approval, recovery, replay, and stop events. Policy-denied and approval-required actions are never executed. Completed actions use idempotency records. On restart, RepoPilot reconstructs the last valid Working State, folds later durable observations, safely retries only read-only interruptions, and blocks ambiguous side effects for exact confirmation.
+The runtime persists ordered decision, authorization, action, observation, input, conflict, approval, recovery, replay, and stop events. Policy-denied and approval-required actions are never executed. Completed actions use idempotency records. On restart, RepoPilot reconstructs the last valid Working State, folds later durable observations and answers, safely retries only read-only interruptions, and blocks ambiguous side effects for exact confirmation.
 
 ## Working State And Evidence
 
-Working State v5 is a compact controller snapshot, not a transcript. It contains:
+Working State v6 is a compact controller snapshot, not a transcript. It contains:
 
 - Objective, focus, phase, status, iteration, and stop reason.
 - Selected repository paths.
@@ -157,6 +159,7 @@ Working State v5 is a compact controller snapshot, not a transcript. It contains
 - Required and optional acceptance criteria.
 - Expected evidence and the eight newest bounded observations with action ids.
 - Virtual-edit path, hash, revision, hunk-count, conflict, and inspection metadata.
+- The newest bounded user answers, explicitly marked as non-evidence.
 - Exact validation commands, pass/fail status, and the action evidence bound to each command.
 
 Plan completion and acceptance success must cite prior completed evidence-producing action ids. Search candidates, future expectations, model findings, virtual proposals, user questions, and `finish` are not sufficient evidence. Required acceptance criteria cannot be downgraded by a later model response.
@@ -164,6 +167,14 @@ Plan completion and acceptance success must cite prior completed evidence-produc
 The controller blocks `finish` while any plan item is incomplete, required criterion lacks evidence, or virtual proposal is conflicted or uninspected. A blocked finish becomes another observation and the loop may continue within its existing budget.
 
 Older Working State versions remain readable with empty defaults for fields introduced later. Complete file contents, provider endpoints, API keys, and command logs are not copied into snapshots.
+
+## Durable User Input
+
+When a sandboxed Task Run chooses `ask_user`, Runtime persists an `input_required` request containing the exact run id, action id, question, input type, resume phase, timestamp, deterministic checkpoint, and SHA-256 question fingerprint. The Task Run moves to `awaiting_input`; normal planner, proposal, review, and tool execution stop at that boundary.
+
+The Answer API must echo the checkpoint, action id, and question hash and provide no more than 4,000 characters of text. Runtime persists one `input_received` event and folds the answer into Working State without incrementing the Agent iteration. Repeating the identical answer is idempotent; changed or stale data is rejected. If the process stops after the answer event but before the next state snapshot, recovery replays the answer and reconstructs the same state.
+
+Answers are rendered in a dedicated Working State section and sent to the next bounded Agent decision, but they never become findings, tool observations, validation results, plan evidence, acceptance evidence, or approval grants. Public Runtime events expose only answer metadata and character count. The full local answer remains in the private Runtime store and current Working State. Continuing still uses the remaining execution and repair budgets, request-scoped LLM credentials, the same managed worktree, and the same Runtime run id.
 
 ## Virtual Proposed Edits
 
@@ -234,7 +245,7 @@ An exact match follows this sequence:
 5. The write observation records file existence plus before/after SHA-256 values.
 6. Complete rollback content is stored in a separate `rollback_snapshot_recorded` runtime event under RepoPilot's ignored local state.
 7. Runtime executes a read-only `inspect_diff`, appends both observations to Working State, and stops at `write_complete`.
-8. Working State v5 replaces generated change/safety criteria with evidence from that write and creates one command-bound criterion for each configured validation command.
+8. Working State v6 replaces generated change/safety criteria with evidence from that write and creates one command-bound criterion for each configured validation command.
 9. Runtime prepares the first exact `validate` approval request. Each command requires its own checkpoint, payload hash, and echoed command allowlist.
 10. Approved command output is UTF-8 decoded, bounded, and stored with exit code and truncation metadata. A failed command records evidence but leaves its criterion failed.
 11. After failure or after all commands pass, RepoPilot resumes the same run and Working State. The controller receives the validation observations plus bounded repair state and may inspect, propose another revision, ask for input, or finish within the remaining budget.

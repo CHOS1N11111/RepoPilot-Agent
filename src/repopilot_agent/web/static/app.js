@@ -65,6 +65,7 @@ $("pauseTaskRun").addEventListener("click", pauseTaskRun);
 $("checkTaskRunReadiness").addEventListener("click", checkTaskRunRecoveryReadiness);
 $("resumeTaskRun").addEventListener("click", resumeTaskRun);
 $("cancelTaskRun").addEventListener("click", cancelTaskRun);
+$("submitTaskRunInput").addEventListener("click", submitTaskRunInput);
 $("createTaskBranch").addEventListener("click", createTaskBranch);
 $("approveRuntimeWrite").addEventListener("click", approveRuntimeWrite);
 $("rejectRuntimeWrite").addEventListener("click", rejectRuntimeWrite);
@@ -441,7 +442,7 @@ function updateTaskRun(taskRun) {
   const report = currentTaskRunReport(taskRun);
   const manualRepairAvailable = taskRun.status === "repair_pending"
     && taskRun.proposal_id && report?.validation_feedback && !taskRun.repair_stop_reason;
-  if (["diagnosing", "replanning", "review_pending", "failed", "completed", "cancelled", "interrupted"].includes(taskRun.status)) {
+  if (["diagnosing", "replanning", "review_pending", "failed", "completed", "cancelled", "interrupted", "awaiting_input"].includes(taskRun.status)) {
     state.repairParentId = null;
   } else if (manualRepairAvailable) {
     state.repairParentId = taskRun.proposal_id;
@@ -455,7 +456,7 @@ function updateTaskRun(taskRun) {
     state.lastReport = report;
     renderReport(report, state.taskRunPayload || buildWorkflowPayload());
   }
-  if (["completed", "review_pending", "cancelled", "failed", "paused", "interrupted", "awaiting_approval", "repair_pending"].includes(taskRun.status)) {
+  if (["completed", "review_pending", "cancelled", "failed", "paused", "interrupted", "awaiting_approval", "awaiting_input", "repair_pending"].includes(taskRun.status)) {
     stopTaskRunPolling();
   }
 }
@@ -510,6 +511,7 @@ function renderTaskRun(taskRun) {
   $("resumeTaskRun").disabled = !taskRun.can_resume;
   $("cancelTaskRun").disabled = !taskRun.can_cancel;
   $("createTaskBranch").disabled = !taskRun.can_create_branch;
+  renderTaskRunInput(taskRun);
   $("taskRunDelivery").textContent = taskRun.delivery_branch
     ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
     : "No delivery branch created.";
@@ -630,6 +632,8 @@ function renderRuntimeRecoveryPlan(recovery) {
         <div class="timeline-status">${escapeHtml(pending.action_kind || "action")}</div>
         <div>Action ${escapeHtml(pending.action_id || "unknown")} | Payload ${escapeHtml(String(pending.payload_hash || "").slice(0, 12))}...</div>
         <div>${escapeHtml(pending.summary || "")}</div>
+        ${pending.input_request?.question ? `<div><strong>Question:</strong> ${escapeHtml(pending.input_request.question)}</div>` : ""}
+        ${pending.input_request?.checkpoint ? `<div><small>Input checkpoint ${escapeHtml(pending.input_request.checkpoint)}</small></div>` : ""}
         ${renderRuntimeRecoveryArguments(pending.arguments)}
       </div>`
     : "";
@@ -785,6 +789,10 @@ function taskRunPhaseIndex(taskRun) {
   if (["queued", "creating_sandbox"].includes(status)) return 0;
   if (status === "failed" && taskRun.repair_stop_reason) return 4;
   if (["exploring", "pausing", "cancelling", "interrupted", "failed"].includes(status)) return 1;
+  if (status === "awaiting_input") {
+    const resumePhase = taskRun.result?.agent_pending_input?.resume_phase;
+    return resumePhase === "validation" ? 4 : 1;
+  }
   if (status === "awaiting_approval") return runtimeActionKind === "validate" ? 4 : 2;
   if (status === "review_pending" && taskRun.result?.agent_validation_cycle) return 4;
   if (["applying", "review_pending"].includes(status)) return 3;
@@ -797,6 +805,98 @@ function taskRunControlPayload() {
     run_id: state.taskRun?.run_id,
     source_repo: state.taskRun?.source_repo,
   };
+}
+
+function currentRuntimeInput(taskRun = state.taskRun) {
+  const request = taskRun?.result?.agent_pending_input;
+  return request?.checkpoint ? request : null;
+}
+
+function renderTaskRunInput(taskRun) {
+  const section = $("taskRunInput");
+  const request = currentRuntimeInput(taskRun);
+  const userInputs = Array.isArray(taskRun.result?.agent_state?.user_inputs)
+    ? taskRun.result.agent_state.user_inputs
+    : [];
+  section.hidden = !request && userInputs.length === 0;
+  if (section.hidden) {
+    $("taskRunInputRequest").innerHTML = "";
+    $("submitTaskRunInput").disabled = true;
+    $("taskRunInputAnswer").disabled = true;
+    $("taskRunInputStatus").textContent = "";
+    return;
+  }
+
+  const answeredRows = userInputs.slice(-3).reverse().map((value) => `
+    <div class="timeline-event">
+      <div class="timeline-step">Answered</div>
+      <div class="timeline-status">not evidence</div>
+      <div>
+        <strong>${escapeHtml(value.question || "Agent question")}</strong>
+        <p>${escapeHtml(value.answer || "")}</p>
+        <small>Action ${escapeHtml(value.action_id || "unknown")} | ${escapeHtml(formatTime(value.answered_at))}</small>
+      </div>
+    </div>
+  `).join("");
+  const pendingRow = request ? `
+    <div class="timeline-event">
+      <div class="timeline-step">Pending question</div>
+      <div class="timeline-status">${escapeHtml(request.input_type || "text")}</div>
+      <div>
+        <strong>${escapeHtml(request.question || "Agent input required")}</strong>
+        <p><small>Checkpoint ${escapeHtml(request.checkpoint)} | Action ${escapeHtml(request.action_id || "unknown")}</small></p>
+        <p><small>Question SHA-256 ${escapeHtml(request.question_hash || "unknown")}</small></p>
+      </div>
+    </div>
+  ` : "";
+  $("taskRunInputRequest").innerHTML = pendingRow + answeredRows;
+  const available = Boolean(request && taskRun.can_answer_input);
+  $("taskRunInputAnswer").disabled = !available;
+  $("submitTaskRunInput").disabled = !available;
+  $("taskRunInputStatus").textContent = available
+    ? "The answer will continue this exact Runtime run."
+    : "No Agent question is currently waiting for an answer.";
+}
+
+async function submitTaskRunInput() {
+  const request = currentRuntimeInput();
+  const answer = $("taskRunInputAnswer").value.trim();
+  if (!request || !state.taskRun?.can_answer_input) {
+    setStatus("No exact Agent question is waiting for an answer.");
+    return;
+  }
+  if (!answer) {
+    setStatus("Answer is required.");
+    return;
+  }
+
+  $("submitTaskRunInput").disabled = true;
+  $("taskRunInputStatus").textContent = "Saving answer and continuing the Agent...";
+  setStatus("Continuing the sandboxed Agent run...");
+  try {
+    const data = await postJson("/api/task-runs/runtime-input/answer", {
+      ...taskRunControlPayload(),
+      ...buildRepairAutomationPayload(),
+      checkpoint: request.checkpoint,
+      action_id: request.action_id,
+      question_hash: request.question_hash,
+      answer,
+    });
+    if (data.error) {
+      if (data.task_run) updateTaskRun(data.task_run);
+      throw new Error(data.error);
+    }
+    $("taskRunInputAnswer").value = "";
+    updateTaskRun(data.task_run);
+    setStatus(data.task_run?.message || "Agent answer accepted.");
+    if (!["awaiting_input", "awaiting_approval", "review_pending", "completed", "failed", "cancelled"].includes(data.task_run?.status)) {
+      startTaskRunPolling();
+    }
+  } catch (error) {
+    $("submitTaskRunInput").disabled = !state.taskRun?.can_answer_input;
+    $("taskRunInputStatus").textContent = `Answer failed: ${error.message}`;
+    setStatus(`Error: ${error.message}`);
+  }
 }
 
 function taskRunLinkPayload() {
@@ -1604,6 +1704,9 @@ function renderAgentWorkingState(
   const acceptance = Array.isArray(agentState.acceptance_criteria)
     ? agentState.acceptance_criteria
     : [];
+  const userInputs = Array.isArray(agentState.user_inputs)
+    ? agentState.user_inputs
+    : [];
   const virtualEdits = Array.isArray(proposedEdits) && proposedEdits.length
     ? proposedEdits
     : Array.isArray(agentState.proposed_edits) ? agentState.proposed_edits : [];
@@ -1652,6 +1755,13 @@ function renderAgentWorkingState(
       <span>${escapeHtml(observation.summary || "No summary recorded.")}</span>
     </div>
   `).join("");
+  const userInputRows = userInputs.map((value) => `
+    <div class="timeline-event">
+      <span class="timeline-step">User input</span>
+      <span class="timeline-status">not evidence</span>
+      <span><strong>${escapeHtml(value.question || "Agent question")}</strong><br>${escapeHtml(value.answer || "")}</span>
+    </div>
+  `).join("");
   return `
     <div class="timeline-event">
       <span class="timeline-step">${escapeHtml(agentState.phase || "unknown")}</span>
@@ -1698,6 +1808,7 @@ function renderAgentWorkingState(
       <span class="timeline-step">Pending question</span>
       <span>${escapeHtml(pendingQuestion)}</span>
     </div>` : ""}
+    ${userInputRows}
     ${observationRows}
   `;
 }

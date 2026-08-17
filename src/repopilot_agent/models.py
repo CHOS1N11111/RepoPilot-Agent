@@ -445,6 +445,7 @@ class WorkflowReport:
     agent_state: dict[str, Any] = field(default_factory=dict)
     agent_stop_reason: str = ""
     agent_pending_question: str = ""
+    agent_pending_input: dict[str, Any] = field(default_factory=dict)
     agent_pending_approval: dict[str, Any] = field(default_factory=dict)
     agent_runtime_recovery: dict[str, Any] = field(default_factory=dict)
     agent_completion_ready: bool = False

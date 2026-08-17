@@ -9,6 +9,11 @@ from typing import Any
 
 from ..llm.base import LLMError
 from ..llm.schema import parse_agent_decision_json
+from .interaction import (
+    RuntimeInputAnswer,
+    RuntimeInputRequest,
+    create_runtime_input_request,
+)
 from .models import (
     READ_ONLY_ACTIONS,
     SIDE_EFFECT_ACTIONS,
@@ -22,6 +27,7 @@ from .state import (
     advance_agent_working_state,
     agent_working_state_from_record,
     create_agent_working_state,
+    record_agent_user_input,
 )
 
 
@@ -57,6 +63,7 @@ class RuntimeActionRecovery:
     last_sequence: int
     started_sequence: int | None = None
     observation: RuntimeObservation | None = None
+    input_request: RuntimeInputRequest | None = None
     confirmation_token: str = ""
     summary: str = ""
 
@@ -76,6 +83,9 @@ class RuntimeActionRecovery:
             "last_sequence": self.last_sequence,
             "started_sequence": self.started_sequence,
             "observation_status": self.observation.status if self.observation else "",
+            "input_request": (
+                self.input_request.to_dict() if self.input_request else None
+            ),
             "confirmation_token": self.confirmation_token,
             "requires_confirmation": self.requires_confirmation,
             "summary": _redact_public_text(self.summary),
@@ -151,6 +161,10 @@ class _ActionTrack:
     waiting_sequence: int | None = None
     approval_granted_sequence: int | None = None
     approval_rejected_sequence: int | None = None
+    input_request: RuntimeInputRequest | None = None
+    input_request_sequence: int | None = None
+    input_answer: RuntimeInputAnswer | None = None
+    input_answer_sequence: int | None = None
 
 
 def analyze_runtime_recovery(
@@ -168,30 +182,62 @@ def analyze_runtime_recovery(
     snapshot_sequence, state = _latest_valid_snapshot(ordered, objective)
     tracks = _build_action_tracks(ordered)
 
-    replay_items: list[tuple[int, _ActionTrack, RuntimeObservation]] = []
+    replay_items: list[tuple[int, str, _ActionTrack, object]] = []
     for track in tracks.values():
         if (
             track.waiting_observation is not None
             and (track.waiting_sequence or 0) > snapshot_sequence
         ):
             replay_items.append(
-                (track.waiting_sequence or 0, track, track.waiting_observation)
+                (
+                    track.waiting_sequence or 0,
+                    "observation",
+                    track,
+                    track.waiting_observation,
+                )
             )
         if (
             track.observation is not None
             and (track.observation_sequence or 0) > snapshot_sequence
         ):
             replay_items.append(
-                (track.observation_sequence or 0, track, track.observation)
+                (
+                    track.observation_sequence or 0,
+                    "observation",
+                    track,
+                    track.observation,
+                )
+            )
+        if (
+            track.input_request is not None
+            and track.input_answer is not None
+            and (track.input_answer_sequence or 0) > snapshot_sequence
+        ):
+            replay_items.append(
+                (
+                    track.input_answer_sequence or 0,
+                    "input_answer",
+                    track,
+                    track.input_answer,
+                )
             )
     replay_items.sort(key=lambda item: item[0])
     applied_decisions: set[str] = set()
-    for _, track, observation in replay_items:
+    for _, item_type, track, value in replay_items:
+        if item_type == "input_answer":
+            if track.input_request is not None and isinstance(value, RuntimeInputAnswer):
+                try:
+                    state = record_agent_user_input(state, track.input_request, value)
+                except ValueError:
+                    pass
+            continue
+        if not isinstance(value, RuntimeObservation):
+            continue
         apply_decision = track.action.action_id not in applied_decisions
         state = _fold_observation(
             state,
             track,
-            observation,
+            value,
             snapshot_sequence,
             apply_decision=apply_decision,
         )
@@ -202,7 +248,7 @@ def analyze_runtime_recovery(
     replayed_observations = _context_observations(state, tracks)
     context_actions = _virtual_context_actions(state, tracks)
     recovered_through = max(
-        [snapshot_sequence, *(sequence for sequence, _, _ in replay_items)],
+        [snapshot_sequence, *(sequence for sequence, _, _, _ in replay_items)],
         default=snapshot_sequence,
     )
     return RuntimeRecoveryPlan(
@@ -281,10 +327,28 @@ def _build_action_tracks(events: list[RuntimeEvent]) -> dict[str, _ActionTrack]:
         elif event.event_type in _WAITING_EVENT_TYPES and observation is not None:
             track.waiting_observation = observation
             track.waiting_sequence = event.sequence
+            if event.event_type == "input_required":
+                track.input_request = _input_request_from_event(event, track.action)
+                track.input_request_sequence = event.sequence
         if event.event_type == "approval_granted":
             track.approval_granted_sequence = event.sequence
         elif event.event_type == "approval_rejected":
             track.approval_rejected_sequence = event.sequence
+        elif event.event_type == "input_received":
+            request = _input_request_from_answer_event(event)
+            answer = _input_answer_from_event(event)
+            if (
+                request is not None
+                and answer is not None
+                and request.run_id == answer.run_id == event.run_id
+                and request.action_id == answer.action_id == track.action.action_id
+                and request.checkpoint == answer.checkpoint
+                and request.question_hash == answer.question_hash
+                and request.input_type == answer.input_type
+            ):
+                track.input_request = request
+                track.input_answer = answer
+                track.input_answer_sequence = event.sequence
     return tracks
 
 
@@ -295,6 +359,8 @@ def _latest_unresolved_action(
     unresolved: list[RuntimeActionRecovery] = []
     for track in tracks.values():
         if track.observation_sequence is not None:
+            continue
+        if track.input_answer_sequence is not None:
             continue
         if track.approval_rejected_sequence is not None:
             continue
@@ -369,6 +435,7 @@ def _classified(
         last_sequence=track.last_sequence,
         started_sequence=track.started_sequence,
         observation=track.waiting_observation,
+        input_request=track.input_request,
         confirmation_token=confirmation_token,
         summary=summary,
     )
@@ -538,6 +605,47 @@ def _observation_from_event(event: RuntimeEvent) -> RuntimeObservation | None:
     except (TypeError, ValueError):
         return None
     return observation if observation.action_id else None
+
+
+def _input_request_from_event(
+    event: RuntimeEvent,
+    action: RuntimeAction,
+) -> RuntimeInputRequest | None:
+    raw = event.payload.get("input_request")
+    if isinstance(raw, dict):
+        try:
+            return RuntimeInputRequest.from_dict(raw)
+        except ValueError:
+            return None
+    try:
+        return create_runtime_input_request(
+            event.run_id,
+            action.action_id,
+            str(action.arguments.get("question") or ""),
+            requested_at=event.created_at,
+        )
+    except ValueError:
+        return None
+
+
+def _input_request_from_answer_event(event: RuntimeEvent) -> RuntimeInputRequest | None:
+    raw = event.payload.get("input_request")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return RuntimeInputRequest.from_dict(raw)
+    except ValueError:
+        return None
+
+
+def _input_answer_from_event(event: RuntimeEvent) -> RuntimeInputAnswer | None:
+    raw = event.payload.get("input_answer")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return RuntimeInputAnswer.from_dict(raw)
+    except ValueError:
+        return None
 
 
 def _merge_selected_paths(

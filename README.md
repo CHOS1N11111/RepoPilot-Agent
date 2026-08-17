@@ -16,6 +16,7 @@ RepoPilot Agent is a local, approval-first coding agent that turns repository ta
 
 - Builds task-aware repository context from files, symbols, imports, Git state, and source/test relationships.
 - Runs a typed multi-step Agent loop with bounded context, persistent events, evidence-backed plans, and inspectable LLM traces.
+- Pauses durable Task Runs for exact user questions, binds bounded answers to their checkpoints, and continues the same Agent run.
 - Prepares SHA-256-guarded virtual patches, then lets sandboxed Task Runs request an exact approval-gated write.
 - Persists expiring exact-action approval grants bound to payload hashes, current diffs, checkpoints, and file or command scope.
 - Runs configured validation one exact approved command at a time and returns bounded output to the same Agent controller for bounded repair decisions.
@@ -83,6 +84,7 @@ The local Web UI provides:
 - Local path or GitHub URL repository selection and synchronization.
 - LLM model, endpoint, API key, timeout, JSON compatibility, and connection testing.
 - Agent steps, Working State, context budgets, LLM input/output traces, and runtime events.
+- A dedicated Agent Input panel for answering durable questions without treating answers as repository evidence.
 - Proposed changes, exact Runtime or per-file approval, cumulative diffs, write hashes, approval-gated validation cycles, and rollback evidence.
 - Sandboxed task progress, pause/resume/cancel controls, exact-action recovery readiness, and local branch delivery.
 - GitHub issue, pull request, review, comment, and CI/check inspection.
