@@ -134,6 +134,7 @@ class AgentStep:
     state_update: dict[str, Any] = field(default_factory=dict)
     finish_reason: str = ""
     user_question: str = ""
+    tool_call_count: int = 1
 
 
 @dataclass(frozen=True)

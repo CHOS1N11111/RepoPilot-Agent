@@ -658,6 +658,9 @@ def _merge_selected_paths(
     if action.kind in {"read_file", "propose_patch", "edit_file", "apply_patch"}:
         candidates.append(action.arguments.get("path"))
     candidates.append(observation.data.get("path"))
+    observed_paths = observation.data.get("selected_paths")
+    if isinstance(observed_paths, list):
+        candidates.extend(observed_paths)
     selected = action.arguments.get("selected_paths")
     if isinstance(selected, list):
         candidates.extend(selected)
@@ -692,6 +695,30 @@ def _public_action_arguments(action: RuntimeAction) -> dict[str, Any]:
         arguments["hunk_count"] = len(hunks)
     if "new_content" in action.arguments:
         arguments["new_content_chars"] = len(str(action.arguments.get("new_content") or ""))
+    members = action.arguments.get("actions")
+    if action.kind == "parallel_read" and isinstance(members, list):
+        public_members: list[dict[str, Any]] = []
+        for member in members[:4]:
+            if not isinstance(member, dict):
+                continue
+            raw_arguments = member.get("arguments")
+            member_arguments: dict[str, Any] = {}
+            if isinstance(raw_arguments, dict):
+                for name in ("path", "query", "staged", "limit"):
+                    value = raw_arguments.get(name)
+                    if isinstance(value, (str, bool, int, float)):
+                        member_arguments[name] = (
+                            _redact_public_text(value)
+                            if isinstance(value, str)
+                            else value
+                        )
+            public_members.append(
+                {
+                    "kind": _redact_public_text(member.get("kind")),
+                    "arguments": member_arguments,
+                }
+            )
+        arguments["actions"] = public_members
     return arguments
 
 

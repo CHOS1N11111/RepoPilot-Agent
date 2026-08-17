@@ -98,6 +98,44 @@ class AgentDecisionSchemaTests(unittest.TestCase):
             "Which behavior should remain compatible?",
         )
 
+    def test_parallel_read_is_strict_bounded_and_budget_aware(self) -> None:
+        payload = decision_payload(
+            "parallel_read",
+            {
+                "actions": [
+                    {"kind": "read_file", "arguments": {"path": "src\\main.py"}},
+                    {"kind": "inspect_diff", "arguments": {}},
+                ]
+            },
+        )
+
+        parsed = parse_agent_decision_json(
+            json.dumps(payload),
+            max_parallel_read_actions=2,
+        )
+
+        self.assertEqual(parsed.action_arguments["actions"][0]["arguments"]["path"], "src/main.py")
+        self.assertEqual(parsed.action_arguments["actions"][1]["arguments"], {"staged": False})
+        with self.assertRaisesRegex(LLMError, "Invalid Agent decision action"):
+            parse_agent_decision_json(
+                json.dumps(payload),
+                max_parallel_read_actions=1,
+            )
+        payload["action"]["arguments"]["actions"].append(
+            {"kind": "search_files", "arguments": {"query": "parser"}}
+        )
+        with self.assertRaisesRegex(LLMError, "2 to 2"):
+            parse_agent_decision_json(
+                json.dumps(payload),
+                max_parallel_read_actions=2,
+            )
+        payload["action"]["arguments"]["actions"] = [
+            {"kind": "read_file", "arguments": {"path": "main.py"}},
+            {"kind": "validate", "arguments": {"command": "python bad.py"}},
+        ]
+        with self.assertRaisesRegex(LLMError, "unsupported action"):
+            parse_agent_decision_json(json.dumps(payload))
+
     def test_virtual_patch_actions_are_strict_and_bounded(self) -> None:
         proposed = parse_agent_decision_json(
             json.dumps(

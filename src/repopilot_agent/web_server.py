@@ -80,6 +80,7 @@ from .runtime import (
     agent_completion_blockers,
     agent_completion_ready,
     agent_working_state_from_record,
+    runtime_started_tool_call_count,
     stop_agent_working_state,
 )
 from .safety import SafetyCheckError
@@ -4529,7 +4530,10 @@ def _reconcile_runtime_execution_usage(
     )
     return ExecutionUsage(
         agent_steps=max(usage.agent_steps, decision_count),
-        tool_calls=max(usage.tool_calls, len(started_events)),
+        tool_calls=max(
+            usage.tool_calls,
+            runtime_started_tool_call_count(events),
+        ),
         validation_commands=max(usage.validation_commands, validation_count),
         elapsed_ms=usage.elapsed_ms,
     )
@@ -4570,11 +4574,7 @@ def _runtime_continuation_llm_client(
 
 
 def _runtime_started_action_count(events: list[Any]) -> int:
-    return sum(
-        1
-        for event in events
-        if event.event_type in {"action_started", "action_recovery_started"}
-    )
+    return runtime_started_tool_call_count(events)
 
 
 def _merge_agent_continuation_result(

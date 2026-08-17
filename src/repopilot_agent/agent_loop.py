@@ -33,6 +33,9 @@ from .models import (
 from .repair_loop import STOP_REPEATED_PROPOSAL, agent_write_proposal_fingerprint
 from .repository_map import RepositoryMap, render_repository_map
 from .runtime import (
+    MAX_PARALLEL_READ_ACTIONS,
+    MIN_PARALLEL_READ_ACTIONS,
+    PARALLEL_READ_ACTION,
     RECOVERY_AWAIT_APPROVAL,
     RECOVERY_AWAIT_INPUT,
     RECOVERY_CONFIRM_SIDE_EFFECT,
@@ -50,6 +53,8 @@ from .runtime import (
     agent_completion_blockers,
     apply_agent_state_update,
     create_agent_working_state,
+    runtime_action_tool_call_cost,
+    runtime_started_tool_call_count,
     stop_agent_working_state,
 )
 from .structured_patch import file_sha256, parse_structured_patch, preview_structured_patch
@@ -211,6 +216,22 @@ def run_agent_loop(
         for local_step_number in range(1, max_steps + 1):
             step_number = starting_iteration + local_step_number
             step_ceiling = starting_iteration + max_steps
+            remaining_budget = _remaining_execution_budget(
+                loop_budget,
+                local_step_number,
+                max_steps,
+                runtime.events,
+                loop_started_at,
+                initial_tool_calls,
+            )
+            if remaining_budget["tool_calls"] <= 0:
+                stop_reason = "step_limit"
+                summary = "The previous action consumed the remaining tool-call budget."
+                break
+            if remaining_budget["elapsed_ms"] <= 0:
+                stop_reason = "step_limit"
+                summary = "The Agent execution time budget was exhausted."
+                break
             map_context = (
                 render_repository_map(
                     repository_map,
@@ -232,14 +253,7 @@ def run_agent_loop(
                     else current_diff
                 ),
                 acceptance_criteria=acceptance_criteria,
-                remaining_budget=_remaining_execution_budget(
-                    loop_budget,
-                    local_step_number,
-                    max_steps,
-                    runtime.events,
-                    loop_started_at,
-                    initial_tool_calls,
-                ),
+                remaining_budget=remaining_budget,
                 repair_context=repair_context,
             )
             decision = _choose_next_decision(
@@ -251,6 +265,10 @@ def run_agent_loop(
                 traces,
                 allow_user_questions and local_step_number < max_steps,
                 write_actions_enabled,
+                min(
+                    MAX_PARALLEL_READ_ACTIONS,
+                    remaining_budget["tool_calls"],
+                ),
             )
             runtime_action = _to_runtime_action(decision, step_number)
             try:
@@ -327,6 +345,7 @@ def run_agent_loop(
                 state_update=asdict(decision.state_update),
                 finish_reason=decision.finish_reason,
                 user_question=decision.user_question,
+                tool_call_count=runtime_action_tool_call_cost(runtime_action),
             )
             steps.append(agent_step)
             if repeated_repair_proposal:
@@ -535,12 +554,15 @@ def _choose_next_decision(
     traces: list[LLMCallTrace] | None,
     allow_user_questions: bool,
     allow_write_actions: bool,
+    parallel_read_limit: int,
 ) -> AgentDecision:
     allowed_actions = set(ALLOWED_AGENT_DECISION_ACTIONS)
     if not allow_user_questions:
         allowed_actions.discard("ask_user")
     if allow_write_actions:
         allowed_actions.update(AGENT_WRITE_ACTIONS)
+    if parallel_read_limit < MIN_PARALLEL_READ_ACTIONS:
+        allowed_actions.discard(PARALLEL_READ_ACTION)
     return traced_llm_json_call(
         f"agent_step_{step_number}",
         llm_client,
@@ -558,12 +580,14 @@ def _choose_next_decision(
                     max_steps,
                     allow_user_questions=allow_user_questions,
                     allow_write_actions=allow_write_actions,
+                    parallel_read_limit=parallel_read_limit,
                 ),
             ),
         ],
         lambda response: parse_agent_decision_json(
             response,
             allowed_actions=allowed_actions,
+            max_parallel_read_actions=parallel_read_limit,
         ),
         traces,
         context_summary=f"Step {step_number}/{max_steps}. {context_packet.summary}",
@@ -601,6 +625,41 @@ def _decision_record(decision: AgentDecision) -> dict:
 
 
 def _format_runtime_observation(observation) -> str:
+    if observation.action_kind == PARALLEL_READ_ACTION:
+        results = observation.data.get("results") or []
+        if not isinstance(results, list) or not results:
+            return observation.error or observation.summary
+        member_limit = max(
+            (MAX_FILE_OBSERVATION_CHARS - 500) // len(results),
+            500,
+        )
+        lines = [observation.summary]
+        for index, result in enumerate(results, start=1):
+            if not isinstance(result, dict):
+                continue
+            child = RuntimeObservation(
+                action_id=str(result.get("action_id") or f"member-{index}"),
+                action_kind=str(result.get("action_kind") or "read"),
+                status=str(result.get("status") or "failed"),
+                summary=str(result.get("summary") or "Parallel read member completed."),
+                data=(
+                    dict(result.get("data") or {})
+                    if isinstance(result.get("data"), dict)
+                    else {}
+                ),
+                error=(
+                    str(result.get("error"))
+                    if result.get("error") is not None
+                    else None
+                ),
+            )
+            lines.extend(
+                [
+                    f"[{index}] {child.action_kind} [{child.status}]",
+                    _clip(_format_runtime_observation(child), member_limit),
+                ]
+            )
+        return _clip("\n".join(lines), MAX_FILE_OBSERVATION_CHARS)
     if observation.action_kind == "propose_patch":
         conflicts = observation.data.get("conflicts") or []
         conflict_lines = "\n".join(
@@ -778,6 +837,7 @@ def _recovery_context_steps(
                 observation=_format_runtime_observation(observation),
                 selected_paths=[],
                 expected_evidence="Durable observation replayed from the Runtime event stream.",
+                tool_call_count=_observation_tool_call_count(observation),
             )
         )
     return result
@@ -810,6 +870,8 @@ def _recovery_wait_state(
 
 
 def _recovered_tool_input(observation: RuntimeObservation) -> str:
+    if observation.action_kind == PARALLEL_READ_ACTION:
+        return f"{_observation_tool_call_count(observation)} ordered read tools"
     for name in ("path", "query", "command"):
         value = observation.data.get(name)
         if isinstance(value, str) and value.strip():
@@ -818,6 +880,23 @@ def _recovered_tool_input(observation: RuntimeObservation) -> str:
 
 
 def _runtime_tool_input(action: RuntimeAction) -> str:
+    if action.kind == PARALLEL_READ_ACTION:
+        members = action.arguments.get("actions")
+        if not isinstance(members, list):
+            return "parallel read batch"
+        labels = []
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            kind = str(member.get("kind") or "read")
+            arguments = member.get("arguments")
+            value = ""
+            if isinstance(arguments, dict):
+                value = str(arguments.get("path") or arguments.get("query") or "")
+                if kind == "inspect_diff":
+                    value = "staged" if arguments.get("staged") else "working tree"
+            labels.append(f"{kind}{f' {value}' if value else ''}")
+        return "; ".join(labels) or "parallel read batch"
     if action.kind == "search_files":
         return str(action.arguments.get("query") or "")
     if action.kind == "read_file":
@@ -861,16 +940,18 @@ def _remaining_execution_budget(
     remaining = dict(execution_budget_state(budget, usage)["remaining"])
     loop_steps_remaining = max(max_steps - completed_steps, 0)
     remaining["agent_steps"] = min(remaining["agent_steps"], loop_steps_remaining)
-    remaining["tool_calls"] = min(remaining["tool_calls"], loop_steps_remaining)
     return remaining
 
 
 def _runtime_tool_call_count(events: list[RuntimeEvent]) -> int:
-    return sum(
-        1
-        for event in events
-        if event.event_type in {"action_started", "action_recovery_started"}
-    )
+    return runtime_started_tool_call_count(events)
+
+
+def _observation_tool_call_count(observation: RuntimeObservation) -> int:
+    if observation.action_kind != PARALLEL_READ_ACTION:
+        return 1
+    count = observation.data.get("member_count")
+    return count if isinstance(count, int) and not isinstance(count, bool) else 1
 
 
 def _merge_context_paths(

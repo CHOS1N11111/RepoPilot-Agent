@@ -28,6 +28,7 @@ from .runtime import (
     agent_completion_blockers,
     agent_completion_ready,
     render_agent_working_state,
+    runtime_started_tool_call_count,
 )
 from .repository_map import build_repository_map, render_repository_map
 from .safety import check_file_edits
@@ -109,13 +110,8 @@ def run_workflow(
                         except (OSError, sqlite3.Error):
                             runtime_store = None
                     if resume_agent_runtime and runtime_store is not None and agent_run_id:
-                        runtime_tool_call_offset = sum(
-                            1
-                            for event in runtime_store.list_events(agent_run_id)
-                            if event.event_type in {
-                                "action_started",
-                                "action_recovery_started",
-                            }
+                        runtime_tool_call_offset = runtime_started_tool_call_count(
+                            runtime_store.list_events(agent_run_id)
                         )
                     agent_result = run_agent_loop(
                         task,
@@ -231,10 +227,8 @@ def run_workflow(
     if not planned_validation and patch_proposal and patch_proposal.validation_plan:
         planned_validation = list(patch_proposal.validation_plan.commands)
     acceptance_criteria = build_acceptance_criteria(task, proposed_paths, planned_validation)
-    runtime_tool_calls = sum(
-        1
-        for event in (agent_result.events if agent_result else [])
-        if event.event_type in {"action_started", "action_recovery_started"}
+    runtime_tool_calls = runtime_started_tool_call_count(
+        agent_result.events if agent_result else []
     )
     runtime_tool_calls = max(runtime_tool_calls - runtime_tool_call_offset, 0)
     usage = ExecutionUsage(

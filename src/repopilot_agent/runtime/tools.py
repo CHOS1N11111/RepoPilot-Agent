@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import difflib
 import hashlib
 from dataclasses import asdict, dataclass, field
@@ -21,6 +22,7 @@ from ..structured_patch import (
     preview_structured_patch,
 )
 from ..validator import run_validation
+from .batch import parallel_read_member_actions
 from .models import RuntimeAction, RuntimePolicy
 from .virtual_patch import VirtualPatchOverlay
 
@@ -29,6 +31,10 @@ MAX_FILE_CHARS = 12_000
 MAX_DIFF_CHARS = 24_000
 MAX_COMMAND_OUTPUT_CHARS = 12_000
 MAX_SEARCH_RESULTS = 8
+MAX_PARALLEL_MEMBER_CONTENT_CHARS = 6_000
+MAX_PARALLEL_MEMBER_SUMMARY_CHARS = 1_000
+MAX_PARALLEL_MEMBER_ERROR_CHARS = 2_000
+MAX_PARALLEL_MEMBER_LIST_ITEMS = 8
 
 
 class RuntimeToolError(RuntimeError):
@@ -85,6 +91,9 @@ class RuntimeToolContext:
 
 
 def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> RuntimeToolResult:
+    if action.kind == "parallel_read":
+        return _execute_parallel_read_batch(action, context)
+
     if action.kind == "search_files":
         query = _required_string(action, "query")
         hits = search_files(query, context.files, limit=MAX_SEARCH_RESULTS)
@@ -357,6 +366,130 @@ def execute_runtime_tool(action: RuntimeAction, context: RuntimeToolContext) -> 
         )
 
     raise RuntimeToolError(f"Action {action.kind} is not implemented by the runtime tool registry.")
+
+
+def _execute_parallel_read_batch(
+    action: RuntimeAction,
+    context: RuntimeToolContext,
+) -> RuntimeToolResult:
+    members = parallel_read_member_actions(action)
+    selected_before = tuple(context.selected_paths)
+    with ThreadPoolExecutor(
+        max_workers=len(members),
+        thread_name_prefix="repopilot-read",
+    ) as executor:
+        results = list(
+            executor.map(
+                lambda member: _execute_parallel_read_member(
+                    member,
+                    context,
+                    selected_before,
+                ),
+                members,
+            )
+        )
+
+    for member, result in zip(members, results):
+        if member.kind == "read_file" and result["status"] == "completed":
+            context.select_path(str(member.arguments.get("path") or ""))
+
+    completed_count = sum(result["status"] == "completed" for result in results)
+    failed_count = len(results) - completed_count
+    if completed_count:
+        summary = (
+            f"Completed {completed_count} of {len(results)} ordered parallel read(s)"
+            f"{' with member failures' if failed_count else ''}."
+        )
+        status = "completed"
+    else:
+        summary = f"All {len(results)} ordered parallel reads failed."
+        status = "failed"
+    return RuntimeToolResult(
+        summary=summary,
+        status=status,
+        data={
+            "parallel": True,
+            "member_count": len(results),
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+            "results": results,
+            "selected_paths": list(context.selected_paths),
+        },
+    )
+
+
+def _execute_parallel_read_member(
+    member: RuntimeAction,
+    parent_context: RuntimeToolContext,
+    selected_paths: tuple[str, ...],
+) -> dict[str, Any]:
+    child_context = RuntimeToolContext(
+        parent_context.repo_path,
+        parent_context.task,
+        parent_context.policy,
+        files=parent_context.files,
+        repository_map=parent_context.repository_map,
+    )
+    for path in selected_paths:
+        child_context.select_path(path)
+    try:
+        result = execute_runtime_tool(member, child_context)
+        summary, _ = _clip(result.summary, MAX_PARALLEL_MEMBER_SUMMARY_CHARS)
+        return {
+            "action_id": member.action_id,
+            "action_kind": member.kind,
+            "arguments": dict(member.arguments),
+            "status": result.status,
+            "summary": summary,
+            "data": _bound_parallel_member_data(member.kind, result.data),
+            "error": None,
+        }
+    except Exception as exc:
+        error, _ = _clip(str(exc), MAX_PARALLEL_MEMBER_ERROR_CHARS)
+        return {
+            "action_id": member.action_id,
+            "action_kind": member.kind,
+            "arguments": dict(member.arguments),
+            "status": "failed",
+            "summary": f"Parallel member {member.kind} failed.",
+            "data": {},
+            "error": error,
+        }
+
+
+def _bound_parallel_member_data(kind: str, data: dict[str, Any]) -> dict[str, Any]:
+    bounded = dict(data)
+    if kind == "read_file":
+        content, truncated = _clip(
+            str(bounded.get("content") or ""),
+            MAX_PARALLEL_MEMBER_CONTENT_CHARS,
+        )
+        bounded["content"] = content
+        bounded["truncated"] = bool(bounded.get("truncated")) or truncated
+    elif kind == "inspect_diff":
+        diff, truncated = _clip(
+            str(bounded.get("diff") or ""),
+            MAX_PARALLEL_MEMBER_CONTENT_CHARS,
+        )
+        bounded["diff"] = diff
+        bounded["truncated"] = bool(bounded.get("truncated")) or truncated
+    for name in ("diff_stat", "staged_diff_stat"):
+        value = bounded.get(name)
+        if not isinstance(value, str):
+            continue
+        bounded[name], truncated = _clip(
+            value,
+            MAX_PARALLEL_MEMBER_CONTENT_CHARS,
+        )
+        if truncated:
+            bounded[f"{name}_truncated"] = True
+    for name in ("hits", "matches", "changes", "remotes", "selected_paths"):
+        value = bounded.get(name)
+        if not isinstance(value, list) or len(value) <= MAX_PARALLEL_MEMBER_LIST_ITEMS:
+            continue
+        bounded[name] = value[:MAX_PARALLEL_MEMBER_LIST_ITEMS]
+        bounded[f"{name}_truncated"] = True
+    return bounded
 
 
 def preview_runtime_side_effect(

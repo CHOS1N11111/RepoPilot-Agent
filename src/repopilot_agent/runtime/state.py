@@ -38,6 +38,7 @@ EVIDENCE_ACTION_KINDS = frozenset(
         "inspect_repository_map",
         "inspect_git_status",
         "inspect_diff",
+        "parallel_read",
         "apply_patch",
         "edit_file",
         "run_command",

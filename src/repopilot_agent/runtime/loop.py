@@ -22,6 +22,7 @@ from .approval import (
     normalize_file_scope,
     utc_timestamp,
 )
+from .batch import runtime_action_tool_call_cost
 from .interaction import (
     RuntimeInputAnswer,
     RuntimeInputRequest,
@@ -781,7 +782,10 @@ class AgentRuntime:
             self.run_id,
             "action_started",
             action=action,
-            payload={"action": action.to_dict()},
+            payload={
+                "action": action.to_dict(),
+                "tool_call_cost": runtime_action_tool_call_cost(action),
+            },
         )
         rollback_snapshots: tuple[FileRollbackSnapshot, ...] = ()
         try:
@@ -924,7 +928,11 @@ class AgentRuntime:
             self.run_id,
             "action_recovery_started",
             action=action,
-            payload={"action": action.to_dict(), "reason": "safe_read_only_retry"},
+            payload={
+                "action": action.to_dict(),
+                "reason": "safe_read_only_retry",
+                "tool_call_cost": runtime_action_tool_call_cost(action),
+            },
         )
         try:
             tool_result = execute_runtime_tool(action, self.context)

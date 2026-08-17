@@ -23,6 +23,7 @@ from repopilot_agent.runtime import (
     RuntimePolicy,
     STOPPING_OBSERVATION_STATUSES,
     create_agent_working_state,
+    runtime_started_tool_call_count,
 )
 
 
@@ -73,6 +74,176 @@ class FakeLLMClient:
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_parallel_read_uses_one_decision_and_charges_each_member(self) -> None:
+        contents = {
+            "src/main.py": "def parse(value):\n    return value\n",
+            "tests/test_main.py": "def test_parse():\n    assert True\n",
+        }
+        files = [
+            RepoFile(
+                path=Path(path),
+                relative_path=path,
+                size_bytes=len(content.encode("utf-8")),
+                language="python",
+                content=content,
+            )
+            for path, content in contents.items()
+        ]
+        client = FakeLLMClient(
+            [
+                decision(
+                    "parallel_read",
+                    {
+                        "actions": [
+                            {"kind": "read_file", "arguments": {"path": "src/main.py"}},
+                            {"kind": "read_file", "arguments": {"path": "tests/test_main.py"}},
+                        ]
+                    },
+                    "Read independent implementation and test files together.",
+                    "Both complete file bodies and hashes.",
+                    focus="Compare implementation and tests.",
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["src/main.py", "tests/test_main.py"]},
+                    "The relevant behavior and tests are understood.",
+                    "Evidence-backed completion.",
+                    focus="Summarize parser behavior.",
+                    finish_reason="The parser and its tests were inspected.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read implementation and tests.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-1"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the parser task.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-1"],
+                            "evidence_summary": "Implementation and tests were read.",
+                        }
+                    ],
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for path, content in contents.items():
+                target = root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            result = run_agent_loop(
+                "explain parser behavior",
+                root,
+                files,
+                [],
+                client,
+                max_steps=2,
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=2,
+                    max_tool_calls=3,
+                ),
+            )
+
+        self.assertEqual([step.action for step in result.steps], ["parallel_read", "finish"])
+        self.assertEqual(result.steps[0].tool_call_count, 2)
+        self.assertIn("[1] read_file [completed]", result.steps[0].observation)
+        self.assertIn("[2] read_file [completed]", result.steps[0].observation)
+        self.assertEqual(result.selected_paths, ["src/main.py", "tests/test_main.py"])
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertEqual(runtime_started_tool_call_count(result.events), 3)
+
+    def test_parallel_read_consumes_remaining_tools_before_another_llm_call(self) -> None:
+        content = "value = 1\n"
+        files = [
+            RepoFile(Path("one.py"), "one.py", len(content), "python", content),
+            RepoFile(Path("two.py"), "two.py", len(content), "python", content),
+        ]
+        client = FakeLLMClient(
+            [
+                decision(
+                    "parallel_read",
+                    {
+                        "actions": [
+                            {"kind": "read_file", "arguments": {"path": "one.py"}},
+                            {"kind": "read_file", "arguments": {"path": "two.py"}},
+                        ]
+                    },
+                    "Read both independent files.",
+                    "Both file bodies.",
+                ),
+                decision(
+                    "finish",
+                    {"selected_paths": ["one.py", "two.py"]},
+                    "This response must not be consumed.",
+                    "A finish observation.",
+                    finish_reason="This response must not be consumed.",
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "one.py").write_text(content, encoding="utf-8")
+            (root / "two.py").write_text(content, encoding="utf-8")
+            result = run_agent_loop(
+                "inspect both files",
+                root,
+                files,
+                [],
+                client,
+                max_steps=3,
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=3,
+                    max_tool_calls=2,
+                ),
+            )
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(result.stop_reason, "step_limit")
+        self.assertIn("remaining tool-call budget", result.summary)
+        self.assertEqual(runtime_started_tool_call_count(result.events), 2)
+
+    def test_parallel_read_is_hidden_when_only_one_tool_call_remains(self) -> None:
+        content = "value = 1\n"
+        files = [RepoFile(Path("one.py"), "one.py", len(content), "python", content)]
+        client = FakeLLMClient(
+            [
+                decision(
+                    "read_file",
+                    {"path": "one.py"},
+                    "Read the only relevant file.",
+                    "The file body.",
+                )
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "one.py").write_text(content, encoding="utf-8")
+            run_agent_loop(
+                "inspect one file",
+                root,
+                files,
+                [],
+                client,
+                max_steps=2,
+                execution_budget=ExecutionBudget(
+                    max_agent_steps=2,
+                    max_tool_calls=1,
+                ),
+            )
+
+        prompt = client.calls[0][1].content
+        self.assertNotIn("- parallel_read:", prompt)
+
     def test_resume_retries_exact_read_only_action_then_calls_next_decision(self) -> None:
         content = "def parse(value):\n    return value\n"
         files = [

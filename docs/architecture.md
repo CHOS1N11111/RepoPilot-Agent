@@ -65,6 +65,7 @@ src/repopilot_agent/
   web_server.py          local HTTP API and static UI server
   runtime/
     approval.py          exact-action approval requests and expiring grants
+    batch.py             strict parallel-read contracts and usage accounting
     interaction.py       exact question and bounded answer contracts
     models.py            actions, observations, events, and policies
     recovery.py          exact-action state reconstruction and resume plans
@@ -131,6 +132,7 @@ The non-writing action set includes:
 
 - `search_files`
 - `read_file`
+- `parallel_read`
 - `inspect_repository_map`
 - `inspect_git_status`
 - `inspect_diff`
@@ -147,6 +149,14 @@ decide -> record -> authorize -> execute -> observe -> update state -> repeat or
 ```
 
 The runtime persists ordered decision, authorization, action, observation, input, conflict, approval, recovery, replay, and stop events. Policy-denied and approval-required actions are never executed. Completed actions use idempotency records. On restart, RepoPilot reconstructs the last valid Working State, folds later durable observations and answers, safely retries only read-only interruptions, and blocks ambiguous side effects for exact confirmation.
+
+## Parallel Read Batches
+
+`parallel_read` groups 2 to 4 unique, independent actions whose inputs are already known. Members are restricted to `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, and `inspect_diff`; strict member schemas reject nested batches, writes, validation, user questions, finish actions, unsafe paths, and dependent pipelines.
+
+The parent batch follows one normal Runtime lifecycle and consumes one Agent decision. Its members execute in isolated read contexts through a bounded thread pool, without writing Runtime events or mutating shared selected-path state. The controller then emits one aggregate observation, always orders member results by request order, and merges successfully read paths in that same order. A partial failure preserves successful evidence and reports every failed member; the parent fails only when all members fail. Per-member content and the formatted aggregate are bounded independently.
+
+Every member consumes one tool call. The exact count is stored as `tool_call_cost` on the parent `action_started` or `action_recovery_started` event and is used by controller, Workflow, Task Run, and restart budget reconciliation. RepoPilot removes the batch action from the prompt when fewer than two tool calls remain and stops before another LLM decision if a batch exhausts the budget. Completed parents replay idempotently, while interrupted parents may retry the whole batch because all permitted members are read-only. Writes, virtual patch mutations, approvals, validation, user interaction, and completion remain serialized.
 
 ## Working State And Evidence
 
@@ -279,7 +289,7 @@ The latest unresolved action receives one deterministic classification:
 - `awaiting_approval`: preserve the original request and checkpoint.
 - `interrupted_read_only`: retry the same read-only tool and complete its existing reservation.
 - `ambiguous_side_effect`: require an action-id and payload-bound recovery token before continuation.
-- `input_required`: remain blocked until the durable user interaction loop is implemented.
+- `input_required`: preserve the exact pending request and remain blocked until its checkpoint-bound answer is accepted.
 
 Confirming an ambiguous side effect records `outcome_unknown` and `side_effect_replayed=false`. It does not infer success and does not rerun the action. The next controller decision receives an explicit requirement to inspect current repository evidence. Recovery summaries redact secrets and omit complete write content. A dirty sandbox is allowed at `sandbox_inspection` because the uncommitted diff may be the only evidence of an interrupted write; exploration checkpoints still require cleanliness.
 

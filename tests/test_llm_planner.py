@@ -75,6 +75,78 @@ class FakeLLMClient:
 
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_workflow_counts_each_parallel_read_member_as_a_tool_call(self) -> None:
+        client = FakeLLMClient(
+            [
+                iterative_decision(
+                    "parallel_read",
+                    {
+                        "actions": [
+                            {"kind": "read_file", "arguments": {"path": "main.py"}},
+                            {"kind": "read_file", "arguments": {"path": "test_main.py"}},
+                        ]
+                    },
+                    "Read independent implementation and test files.",
+                    "Both file bodies.",
+                    focus="Compare implementation and tests.",
+                ),
+                iterative_decision(
+                    "finish",
+                    {"selected_paths": ["main.py", "test_main.py"]},
+                    "Both files are understood.",
+                    "Evidence-backed completion.",
+                    focus="Summarize the repository.",
+                    finish_reason="Implementation and tests were inspected.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read implementation and tests.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-1"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the task.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-1"],
+                            "evidence_summary": "Both files were read.",
+                        }
+                    ],
+                ),
+                '{"steps":[{"title":"Review behavior","detail":"Use both inspected files."}]}',
+                '{"objective":"Explain behavior","files":[],"risks":[],'
+                '"validation_suggestions":[],"ready_for_patch":false,"file_edits":[]}',
+                '{"summary":"No patch required.","risk_level":"low","concerns":[],'
+                '"suggested_tests":[],"approved_for_apply":false}',
+            ],
+            model="fake-parallel-workflow",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "main.py").write_text("value = 1\n", encoding="utf-8")
+            (root / "test_main.py").write_text("def test_value(): pass\n", encoding="utf-8")
+            report = run_workflow(
+                root,
+                "explain implementation and tests",
+                use_llm=True,
+                llm_client=client,
+                iterative_agent=True,
+                agent_max_steps=2,
+            )
+
+        self.assertEqual(report.execution_budget["usage"]["agent_steps"], 2)
+        self.assertEqual(report.execution_budget["usage"]["tool_calls"], 3)
+        self.assertEqual(report.agent_steps[0].tool_call_count, 2)
+        self.assertEqual(
+            report.agent_state["selected_paths"],
+            ["main.py", "test_main.py"],
+        )
+
     def test_workflow_resume_counts_only_new_runtime_tool_calls(self) -> None:
         store = InMemoryRuntimeStore()
         with tempfile.TemporaryDirectory() as tmp:

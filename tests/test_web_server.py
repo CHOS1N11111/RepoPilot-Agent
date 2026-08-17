@@ -256,6 +256,44 @@ class ExecutionBudgetPayloadTests(unittest.TestCase):
         self.assertEqual(reconciled.validation_commands, 1)
         self.assertEqual(reconciled.elapsed_ms, 125)
 
+    def test_runtime_events_reconcile_parallel_read_member_usage(self) -> None:
+        store = InMemoryRuntimeStore()
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = AgentRuntime(
+                tmp,
+                "inspect independent repository evidence",
+                run_id="runtime-parallel-usage-floor",
+                store=store,
+            )
+            action = RuntimeAction(
+                kind="parallel_read",
+                arguments={
+                    "actions": [
+                        {"kind": "read_file", "arguments": {"path": "README.md"}},
+                        {"kind": "inspect_git_status", "arguments": {}},
+                        {"kind": "inspect_diff", "arguments": {"staged": False}},
+                    ]
+                },
+                action_id="explore-1",
+            )
+            runtime.record_decision(action, {"action": action.to_dict()})
+            store.append_event(
+                runtime.run_id,
+                "action_started",
+                action=action,
+                payload={"action": action.to_dict(), "tool_call_cost": 3},
+            )
+
+            reconciled = _reconcile_runtime_execution_usage(
+                ExecutionUsage(elapsed_ms=125),
+                runtime.events,
+            )
+
+        self.assertEqual(reconciled.agent_steps, 1)
+        self.assertEqual(reconciled.tool_calls, 3)
+        self.assertEqual(reconciled.validation_commands, 0)
+        self.assertEqual(reconciled.elapsed_ms, 125)
+
     def test_payload_approved_paths_rejects_unknown_or_unsafe_paths(self) -> None:
         cases = [
             ({"approved_paths": ["missing.txt"]}, "not in this proposal"),

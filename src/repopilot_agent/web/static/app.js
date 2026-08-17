@@ -1652,6 +1652,9 @@ function renderAgentSteps(steps) {
   return steps
     .map((step) => {
       const update = step.state_update || {};
+      const toolCallCount = Number.isInteger(step.tool_call_count)
+        ? Math.max(step.tool_call_count, 1)
+        : 1;
       const stateChanges = [
         update.focus ? `focus: ${update.focus}` : "",
         ...(update.add_findings || []).map((value) => `finding +: ${value}`),
@@ -1663,7 +1666,7 @@ function renderAgentSteps(steps) {
         )),
       ].filter(Boolean);
       return `<div class="item">
-      <div class="item-title">Step ${escapeHtml(step.order)}: ${escapeHtml(step.action)}</div>
+      <div class="item-title">Step ${escapeHtml(step.order)}: ${escapeHtml(step.action)}${toolCallCount > 1 ? ` <span class="tag">${escapeHtml(toolCallCount)} read tools</span>` : ""}</div>
       <p>${escapeHtml(step.thought || "")}</p>
       <p><small>Input: ${escapeHtml(step.tool_input || "(none)")}</small></p>
       <p><small>Expected evidence: ${escapeHtml(step.expected_evidence || "(none)")}</small></p>
@@ -1824,10 +1827,14 @@ function renderRuntimeEvents(events, runId = "") {
     .map((event) => {
       const observation = event.payload?.observation || {};
       const detail = observation.summary || event.payload?.summary || event.payload?.reason || "";
+      const toolCallCost = Number.isInteger(event.payload?.tool_call_cost)
+        ? event.payload.tool_call_cost
+        : 0;
+      const costLabel = toolCallCost > 1 ? ` | ${toolCallCost} read tools` : "";
       return `<div class="timeline-event runtime-event">
         <span class="timeline-step">#${escapeHtml(event.sequence)}</span>
         <span class="timeline-status">${escapeHtml(event.event_type || "event")}</span>
-        <span>${escapeHtml(event.action_id || detail || "runtime")}${event.action_id && detail ? ` - ${escapeHtml(detail)}` : ""}</span>
+        <span>${escapeHtml(event.action_id || detail || "runtime")}${event.action_id && detail ? ` - ${escapeHtml(detail)}` : ""}${escapeHtml(costLabel)}</span>
       </div>`;
     })
     .join("");

@@ -19,6 +19,12 @@ from ..models import (
     PlanStep,
     RiskNote,
 )
+from ..runtime.batch import (
+    MAX_PARALLEL_READ_ACTIONS,
+    MIN_PARALLEL_READ_ACTIONS,
+    PARALLEL_READ_ACTION,
+    normalize_parallel_read_arguments,
+)
 
 ALLOWED_CHANGE_TYPES = {"bugfix", "feature", "test", "documentation", "refinement"}
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
@@ -29,6 +35,7 @@ ALLOWED_AGENT_DECISION_ACTIONS = {
     "inspect_repository_map",
     "inspect_git_status",
     "inspect_diff",
+    PARALLEL_READ_ACTION,
     "propose_patch",
     "inspect_proposed_diff",
     "ask_user",
@@ -92,6 +99,7 @@ def parse_agent_decision_json(
     response: str,
     *,
     allowed_actions: set[str] | frozenset[str] | None = None,
+    max_parallel_read_actions: int = MAX_PARALLEL_READ_ACTIONS,
 ) -> AgentDecision:
     data = parse_json_object(response)
     _require_exact_keys(data, AGENT_DECISION_KEYS, "Agent decision")
@@ -127,12 +135,19 @@ def parse_agent_decision_json(
         if allowed_actions is None
         else set(allowed_actions)
     )
+    active_actions = set(active_actions)
+    if max_parallel_read_actions < MIN_PARALLEL_READ_ACTIONS:
+        active_actions.discard(PARALLEL_READ_ACTION)
     if action_kind not in active_actions:
         raise LLMError(f"Invalid Agent decision action: {action_kind}")
     raw_arguments = action.get("arguments")
     if not isinstance(raw_arguments, dict):
         raise LLMError("Agent decision action arguments must be an object.")
-    action_arguments = _parse_agent_decision_arguments(action_kind, raw_arguments)
+    action_arguments = _parse_agent_decision_arguments(
+        action_kind,
+        raw_arguments,
+        max_parallel_read_actions=max_parallel_read_actions,
+    )
     if action_kind == "finish" and not finish_reason:
         raise LLMError("finish decisions require a non-empty finish_reason.")
     if action_kind != "finish" and finish_reason:
@@ -383,6 +398,8 @@ def parse_agent_action_json(response: str) -> AgentDecision:
 def _parse_agent_decision_arguments(
     action_kind: str,
     arguments: dict,
+    *,
+    max_parallel_read_actions: int = MAX_PARALLEL_READ_ACTIONS,
 ) -> dict:
     if action_kind == "search_files":
         _require_exact_keys(arguments, {"query"}, "search_files arguments")
@@ -432,6 +449,14 @@ def _parse_agent_decision_arguments(
         if not isinstance(staged, bool):
             raise LLMError("inspect_diff staged must be a boolean.")
         return {"staged": staged}
+    if action_kind == PARALLEL_READ_ACTION:
+        try:
+            return normalize_parallel_read_arguments(
+                arguments,
+                max_actions=max_parallel_read_actions,
+            )
+        except ValueError as exc:
+            raise LLMError(str(exc)) from exc
     if action_kind in {"propose_patch", "apply_patch"}:
         action_label = action_kind
         _require_exact_keys(

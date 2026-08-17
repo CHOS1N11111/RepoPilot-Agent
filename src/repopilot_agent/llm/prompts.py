@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..models import MemoryContextItem, PlanStep
+from ..runtime.batch import MAX_PARALLEL_READ_ACTIONS, MIN_PARALLEL_READ_ACTIONS
 
 
 PLAN_SYSTEM_PROMPT = (
@@ -37,7 +38,7 @@ AGENT_SYSTEM_PROMPT = (
     "You are RepoPilot Agent's non-writing repository analysis and proposed-edit loop. "
     "Choose exactly one next decision and return only JSON with this exact shape: "
     '{"version":2,"rationale":"why this action is useful",'
-    '"action":{"kind":"search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|ask_user|finish",'
+    '"action":{"kind":"search_files|read_file|parallel_read|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|ask_user|finish",'
     '"arguments":{}},"expected_evidence":"what result would make this action useful",'
     '"state_update":{"focus":"current investigation focus","add_findings":[],'
     '"add_open_questions":[],"resolve_open_questions":[],'
@@ -48,6 +49,8 @@ AGENT_SYSTEM_PROMPT = (
     '"evidence_action_ids":[],"evidence_summary":""}]},'
     '"finish_reason":"","user_question":""}. '
     "Action arguments must be exactly one of: search_files {query}; read_file {path}; "
+    "parallel_read {actions:[{kind, arguments}]} with 2 to 4 unique independent members chosen only from "
+    "search_files, read_file, inspect_repository_map, inspect_git_status, and inspect_diff; "
     "inspect_repository_map with optional {query, limit}; inspect_git_status {}; "
     "inspect_diff with optional {staged}; propose_patch {path, expected_sha256, hunks}; "
     "inspect_proposed_diff {}; ask_user {}; "
@@ -72,6 +75,8 @@ AGENT_SYSTEM_PROMPT = (
     "For normal code, documentation, or explanation tasks, start by searching or reading files. "
     "Use inspect_git_status only when the task is about Git state, diffs, branches, delivery, or local changes. "
     "Treat search results as candidates; read important files before selecting them. "
+    "Use parallel_read only when every member input is already known and no member depends on another result. "
+    "Member results are returned in request order and every member consumes one tool call. "
     "Use finish only when Working State reports completion readiness."
 )
 
@@ -82,8 +87,8 @@ AGENT_WRITE_SYSTEM_PROMPT = (
         "approval-gated managed-worktree analysis and edit loop",
     )
     .replace(
-        "search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|ask_user|finish",
-        "search_files|read_file|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|apply_patch|edit_file|ask_user|finish",
+        "search_files|read_file|parallel_read|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|ask_user|finish",
+        "search_files|read_file|parallel_read|inspect_repository_map|inspect_git_status|inspect_diff|propose_patch|inspect_proposed_diff|apply_patch|edit_file|ask_user|finish",
     )
     .replace(
         "inspect_proposed_diff {}; ask_user {}; ",
@@ -205,16 +210,29 @@ def build_agent_prompt(
     max_steps: int,
     allow_user_questions: bool = False,
     allow_write_actions: bool = False,
+    parallel_read_limit: int = MAX_PARALLEL_READ_ACTIONS,
 ) -> str:
     actions = [
         "- search_files: find repo files by task-focused query.",
         "- read_file: inspect one repo-relative file returned by search or initial context.",
+    ]
+    effective_parallel_limit = min(
+        max(int(parallel_read_limit), 0),
+        MAX_PARALLEL_READ_ACTIONS,
+    )
+    if effective_parallel_limit >= MIN_PARALLEL_READ_ACTIONS:
+        actions.append(
+            "- parallel_read: run 2 to "
+            f"{effective_parallel_limit} independent search/read/inspection members concurrently; "
+            "members must not depend on another member's result."
+        )
+    actions.extend([
         "- inspect_repository_map: inspect task-relevant symbols, dependencies, and source/test relations.",
         "- inspect_git_status: inspect local branch, changes, and diff stats for Git-related tasks.",
         "- inspect_diff: inspect the current working-tree or staged diff.",
         "- propose_patch: apply exact hunks to a run-scoped in-memory overlay without writing the repository.",
         "- inspect_proposed_diff: review the cumulative virtual diff and recheck real baseline hashes.",
-    ]
+    ])
     if allow_write_actions:
         actions.extend(
             [
