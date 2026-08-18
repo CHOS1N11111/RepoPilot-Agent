@@ -150,6 +150,22 @@ decide -> record -> authorize -> execute -> observe -> update state -> repeat or
 
 The runtime persists ordered decision, authorization, action, observation, input, conflict, approval, recovery, replay, and stop events. Policy-denied and approval-required actions are never executed. Completed actions use idempotency records. On restart, RepoPilot reconstructs the last valid Working State, folds later durable observations and answers, safely retries only read-only interruptions, and blocks ambiguous side effects for exact confirmation.
 
+## Trajectory Observability
+
+`trajectory.py` deterministically folds the durable Runtime event stream into a versioned, bounded `AgentTrajectory`. This is an observability projection, not a second execution log or a source of authorization. Workflow reports build it at completion, Task Run responses rebuild it from their latest result, and History rebuilds it from persisted events and traces. Legacy History records recover their latest Working State from `working_state_updated` events.
+
+Each replay frame contains only sequence, elapsed time, category, event type, action identity, status, a bounded redacted summary, tool cost, and replay state. Complete event payloads, command output, file contents, user answers, prompts, and model output are excluded. At most 1,000 frames are returned; the projection preserves the beginning and end and reports the omitted count. A SHA-256 fingerprint covers canonical frame content while excluding timestamps, so the same logical trajectory remains comparable across runs with different wall-clock times. Sequence ordering, start position, duplicates, and gaps are reported separately as integrity data.
+
+Trajectory metrics have explicit semantics:
+
+- Evidence coverage is the fraction of completed plan items and passed acceptance criteria that reference at least one successful evidence-producing action.
+- Evidence tool efficiency is successful evidence result units divided by started tool calls. Parallel batch members count individually.
+- An unauthorized side effect is an `action_started` or `action_recovery_started` write/command action without an earlier `action_authorized` event for the same action id.
+- Recovery and repair counts come from typed Runtime events and persisted repair attempts, not text matching.
+- LLM latency is summed across traced provider calls. Token usage is exact when the provider returns usage fields; otherwise it is estimated from bounded trace characters and labeled `estimated` or `mixed`.
+
+The Web UI replays these frames by moving a browser-local cursor. Play, pause, seek, and History loading never call a Runtime tool and cannot resume or repeat an action. Evaluation reports retain metrics and the fingerprint, but exclude replay frames and raw LLM content.
+
 ## Parallel Read Batches
 
 `parallel_read` groups 2 to 4 unique, independent actions whose inputs are already known. Members are restricted to `search_files`, `read_file`, `inspect_repository_map`, `inspect_git_status`, and `inspect_diff`; strict member schemas reject nested batches, writes, validation, user questions, finish actions, unsafe paths, and dependent pipelines.

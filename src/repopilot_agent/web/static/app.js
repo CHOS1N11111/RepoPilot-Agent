@@ -16,6 +16,10 @@ const state = {
   taskRunRenderedProposalId: null,
   taskRunRecoveryKey: null,
   taskRunRecoveryReadiness: null,
+  trajectory: null,
+  trajectoryIndex: 0,
+  trajectoryTimer: null,
+  historyTrajectory: null,
 };
 
 const TASK_RUN_PHASES = ["Sandbox", "Explore", "Approval", "Apply", "Validate", "Complete"];
@@ -24,10 +28,7 @@ const $ = (id) => document.getElementById(id);
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
-    document.querySelectorAll(".tab-content").forEach((panel) => panel.classList.remove("active"));
-    button.classList.add("active");
-    $(`${button.dataset.tab}Tab`).classList.add("active");
+    activateTab(button.dataset.tab || "summary");
   });
 });
 
@@ -85,9 +86,34 @@ $("createPullRequest").addEventListener("click", createPullRequest);
 $("generateRepairProposal").addEventListener("click", generateRepairProposal);
 $("loadHistory").addEventListener("click", loadHistory);
 $("clearHistory").addEventListener("click", clearHistory);
+$("trajectoryFirst").addEventListener("click", () => moveTrajectory("first"));
+$("trajectoryPrevious").addEventListener("click", () => moveTrajectory(-1));
+$("trajectoryPlay").addEventListener("click", toggleTrajectoryPlayback);
+$("trajectoryNext").addEventListener("click", () => moveTrajectory(1));
+$("trajectoryLast").addEventListener("click", () => moveTrajectory("last"));
+$("trajectoryCursor").addEventListener("input", () => {
+  stopTrajectoryPlayback();
+  state.trajectoryIndex = Number.parseInt($("trajectoryCursor").value, 10) || 0;
+  renderTrajectoryFrame();
+});
 $("refreshAll").addEventListener("click", async () => {
   await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory(), pollTaskRun()]);
 });
+
+function activateTab(name) {
+  const panel = $(`${name}Tab`);
+  const button = document.querySelector(`.tab[data-tab="${name}"]`);
+  if (!panel || !button) {
+    return;
+  }
+  document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
+  document.querySelectorAll(".tab-content").forEach((item) => item.classList.remove("active"));
+  button.classList.add("active");
+  panel.classList.add("active");
+  if (name !== "trajectory") {
+    stopTrajectoryPlayback();
+  }
+}
 
 function selectedModel() {
   return $("modelSelect").value === "custom" ? $("customModel").value.trim() : $("modelSelect").value;
@@ -542,6 +568,9 @@ function renderTaskRun(taskRun) {
         )
         .join("")
     : item("No task-run events yet.");
+  if (hasTrajectory(taskRun.result?.agent_trajectory)) {
+    setTrajectory(taskRun.result.agent_trajectory, { preserveTail: true });
+  }
 }
 
 function renderTaskRunExecutionProfile(profile) {
@@ -905,10 +934,6 @@ function taskRunLinkPayload() {
     task_run_id: state.taskRun.run_id,
     source_repo: state.taskRun.source_repo,
   };
-}
-
-function activateTab(name) {
-  document.querySelector(`.tab[data-tab="${name}"]`)?.click();
 }
 
 function formatTime(value) {
@@ -1394,6 +1419,7 @@ async function loadHistory() {
 
 async function loadHistoryDetail(runId) {
   $("historyDetail").innerHTML = item("Loading run detail...");
+  state.historyTrajectory = null;
   try {
     const data = await getJson(`/api/history/run?${repositoryQuery()}&id=${encodeURIComponent(runId)}`);
     if (data.error) {
@@ -1420,6 +1446,7 @@ async function deleteHistoryRun(runId) {
       throw new Error(data.error);
     }
     $("historyDetail").innerHTML = "";
+    state.historyTrajectory = null;
     await loadHistory();
     setStatus("Saved run deleted.");
   } catch (error) {
@@ -1457,6 +1484,7 @@ async function clearHistory() {
       throw new Error(data.error);
     }
     $("historyDetail").innerHTML = "";
+    state.historyTrajectory = null;
     await loadHistory();
     setStatus(`Cleared ${data.deleted || 0} saved run(s).`);
   } catch (error) {
@@ -1533,7 +1561,262 @@ function renderReport(report, payload) {
   $("llmReview").textContent = JSON.stringify(report.patch_review || {}, null, 2);
   $("llmTraceList").innerHTML = renderLlmTraces(report.llm_traces || []);
   $("jsonOutput").textContent = JSON.stringify(report, null, 2);
+  setTrajectory(
+    hasTrajectory(report.agent_trajectory)
+      ? report.agent_trajectory
+      : trajectoryFromEvents(
+          report.agent_events || [],
+          report.agent_run_id || "",
+          report.agent_stop_reason || ""
+        )
+  );
   loadHistory().catch(() => {});
+}
+
+function hasTrajectory(value) {
+  return Boolean(value && typeof value === "object" && Array.isArray(value.frames));
+}
+
+function setTrajectory(trajectory, { preserveTail = false } = {}) {
+  const next = hasTrajectory(trajectory) ? trajectory : trajectoryFromEvents([], "", "");
+  const previousFrames = state.trajectory?.frames || [];
+  const wasAtTail = !previousFrames.length || state.trajectoryIndex >= previousFrames.length - 1;
+  const sameFingerprint = Boolean(
+    state.trajectory
+      && state.trajectory.fingerprint
+      && state.trajectory.fingerprint === next.fingerprint
+  );
+  state.trajectory = next;
+  const frameCount = next.frames.length;
+  if (sameFingerprint && !(preserveTail && wasAtTail)) {
+    state.trajectoryIndex = Math.min(state.trajectoryIndex, Math.max(frameCount - 1, 0));
+  } else {
+    state.trajectoryIndex = Math.max(frameCount - 1, 0);
+  }
+  renderTrajectory();
+}
+
+function renderTrajectory() {
+  const trajectory = state.trajectory || trajectoryFromEvents([], "", "");
+  const metrics = trajectory.metrics || {};
+  const llm = metrics.llm || {};
+  const frames = trajectory.frames || [];
+  const evidenceCoverage = Number.isFinite(metrics.evidence_coverage)
+    ? `${Math.round(metrics.evidence_coverage * 100)}%`
+    : "n/a";
+  $("trajectoryEvents").textContent = trajectory.event_count ?? frames.length;
+  $("trajectoryTools").textContent = metrics.tool_calls ?? 0;
+  $("trajectoryEvidence").textContent = evidenceCoverage;
+  $("trajectoryTokens").textContent = Number(llm.total_tokens || 0).toLocaleString();
+  $("trajectoryTokens").title = `Token source: ${llm.token_source || "none"}`;
+  $("trajectoryTokenSource").textContent = llm.token_source && llm.token_source !== "none"
+    ? `tokens (${llm.token_source})`
+    : "tokens";
+  $("trajectoryRecovery").textContent = metrics.recovery_events ?? 0;
+  $("trajectoryStop").textContent = metrics.stop_reason || (frames.length ? "in progress" : "not recorded");
+  $("trajectoryIntegrity").innerHTML = renderTrajectoryIntegrity(trajectory);
+  $("trajectoryActionList").innerHTML = renderTrajectoryActions(metrics.action_sequence || []);
+
+  const hasFrames = frames.length > 0;
+  $("trajectoryCursor").disabled = !hasFrames;
+  $("trajectoryCursor").max = String(Math.max(frames.length - 1, 0));
+  $("trajectoryCursor").value = String(Math.min(state.trajectoryIndex, Math.max(frames.length - 1, 0)));
+  ["trajectoryFirst", "trajectoryPrevious", "trajectoryPlay", "trajectoryNext", "trajectoryLast"]
+    .forEach((id) => {
+      $(id).disabled = !hasFrames;
+    });
+  renderTrajectoryFrame();
+}
+
+function renderTrajectoryIntegrity(trajectory) {
+  const integrity = trajectory.integrity || {};
+  const valid = integrity.valid !== false;
+  const gaps = (integrity.sequence_gaps || [])
+    .map((gap) => `${gap.after}-${gap.before}`)
+    .join(", ");
+  const duplicates = (integrity.duplicate_sequences || []).join(", ");
+  const omitted = Number(trajectory.omitted_frames || 0);
+  const fingerprint = trajectory.fingerprint || "unavailable";
+  return `<div class="trajectory-integrity-row">
+    <span class="tag ${valid ? "ok" : "danger"}">${valid ? "verified" : "invalid sequence"}</span>
+    <span>Schema v${escapeHtml(trajectory.schema_version ?? "legacy")}</span>
+    <span>${escapeHtml(trajectory.frame_count ?? 0)} replay frame(s)${omitted ? `, ${escapeHtml(omitted)} omitted` : ""}</span>
+    <code title="${escapeHtml(fingerprint)}">${escapeHtml(shortFingerprint(fingerprint))}</code>
+    ${gaps ? `<span>Gaps: ${escapeHtml(gaps)}</span>` : ""}
+    ${duplicates ? `<span>Duplicates: ${escapeHtml(duplicates)}</span>` : ""}
+  </div>`;
+}
+
+function renderTrajectoryActions(actions) {
+  if (!actions.length) {
+    return item("No Agent decisions were recorded.");
+  }
+  return actions
+    .map((action, index) => `<div class="trajectory-action">
+      <span>${escapeHtml(index + 1)}</span>
+      <strong>${escapeHtml(action)}</strong>
+    </div>`)
+    .join("");
+}
+
+function renderTrajectoryFrame() {
+  const frames = state.trajectory?.frames || [];
+  if (!frames.length) {
+    $("trajectoryPosition").textContent = "0 / 0";
+    $("trajectoryFrame").innerHTML = item("No trajectory frames are available.");
+    return;
+  }
+  state.trajectoryIndex = Math.min(Math.max(state.trajectoryIndex, 0), frames.length - 1);
+  const frame = frames[state.trajectoryIndex];
+  $("trajectoryCursor").value = String(state.trajectoryIndex);
+  $("trajectoryPosition").textContent = `${state.trajectoryIndex + 1} / ${frames.length}`;
+  const statusClass = ["completed", "applied", "passed", "finished"].includes(frame.status)
+    ? "ok"
+    : ["failed", "conflict", "policy_denied"].includes(frame.status)
+      ? "danger"
+      : "warn";
+  const elapsed = Number.isInteger(frame.elapsed_ms) ? `${frame.elapsed_ms} ms` : "n/a";
+  $("trajectoryFrame").innerHTML = `<div class="trajectory-frame-header">
+      <div>
+        <strong>#${escapeHtml(frame.sequence)} ${escapeHtml(frame.event_type || "event")}</strong>
+        <span class="tag">${escapeHtml(frame.category || "runtime")}</span>
+        <span class="tag ${statusClass}">${escapeHtml(frame.status || "recorded")}</span>
+      </div>
+      <small>+${escapeHtml(elapsed)}</small>
+    </div>
+    <dl class="trajectory-frame-grid">
+      <div><dt>Action</dt><dd>${escapeHtml(frame.action_kind || "none")}</dd></div>
+      <div><dt>Action ID</dt><dd>${escapeHtml(frame.action_id || "none")}</dd></div>
+      <div><dt>Tool cost</dt><dd>${escapeHtml(frame.tool_call_cost || 0)}</dd></div>
+      <div><dt>Replay</dt><dd>${frame.replayed ? "yes" : "no"}</dd></div>
+    </dl>
+    <p>${escapeHtml(frame.summary || "No bounded summary was recorded.")}</p>`;
+}
+
+function moveTrajectory(target) {
+  const frames = state.trajectory?.frames || [];
+  if (!frames.length) {
+    return;
+  }
+  if (target === "first") {
+    state.trajectoryIndex = 0;
+  } else if (target === "last") {
+    state.trajectoryIndex = frames.length - 1;
+  } else {
+    state.trajectoryIndex = Math.min(
+      Math.max(state.trajectoryIndex + Number(target || 0), 0),
+      frames.length - 1
+    );
+  }
+  renderTrajectoryFrame();
+  if (state.trajectoryTimer && state.trajectoryIndex >= frames.length - 1) {
+    stopTrajectoryPlayback();
+  }
+}
+
+function toggleTrajectoryPlayback() {
+  if (state.trajectoryTimer) {
+    stopTrajectoryPlayback();
+    return;
+  }
+  const frames = state.trajectory?.frames || [];
+  if (!frames.length) {
+    return;
+  }
+  if (state.trajectoryIndex >= frames.length - 1) {
+    state.trajectoryIndex = 0;
+    renderTrajectoryFrame();
+  }
+  $("trajectoryPlay").textContent = "||";
+  $("trajectoryPlay").title = "Pause trajectory";
+  $("trajectoryPlay").setAttribute("aria-label", "Pause trajectory");
+  state.trajectoryTimer = window.setInterval(() => moveTrajectory(1), 700);
+}
+
+function stopTrajectoryPlayback() {
+  if (state.trajectoryTimer) {
+    window.clearInterval(state.trajectoryTimer);
+    state.trajectoryTimer = null;
+  }
+  const button = $("trajectoryPlay");
+  if (button) {
+    button.textContent = ">";
+    button.title = "Play trajectory";
+    button.setAttribute("aria-label", "Play trajectory");
+  }
+}
+
+function trajectoryFromEvents(events, runId, stopReason) {
+  const records = Array.isArray(events) ? events : [];
+  const frames = records.map((event, index) => {
+    const payload = event.payload || {};
+    const observation = payload.observation || {};
+    const action = payload.action || {};
+    const eventType = event.event_type || "unknown";
+    return {
+      sequence: Number.isInteger(event.sequence) ? event.sequence : index + 1,
+      elapsed_ms: null,
+      category: trajectoryEventCategory(eventType),
+      event_type: eventType,
+      action_id: event.action_id || observation.action_id || "",
+      action_kind: observation.action_kind || action.kind || "",
+      status: observation.status || payload.status || "recorded",
+      summary: observation.summary || payload.summary || payload.reason || eventType.replaceAll("_", " "),
+      tool_call_cost: ["action_started", "action_recovery_started"].includes(eventType)
+        ? Math.max(Number(payload.tool_call_cost || 1), 1)
+        : 0,
+      replayed: Boolean(observation.replayed) || eventType === "action_replayed",
+    };
+  });
+  const actionSequence = frames
+    .filter((frame) => frame.event_type === "decision_recorded" && frame.action_kind)
+    .map((frame) => frame.action_kind);
+  const sequences = frames.map((frame) => frame.sequence);
+  const sequenceValid = sequences.every(
+    (sequence, index) => sequence === index + 1
+  );
+  const eventCounts = records.reduce((counts, event) => {
+    const name = event.event_type || "unknown";
+    counts[name] = (counts[name] || 0) + 1;
+    return counts;
+  }, {});
+  return {
+    schema_version: 0,
+    run_id: runId || "",
+    fingerprint: frames.length ? `legacy-${runId || "run"}-${frames.length}` : "unavailable",
+    event_count: frames.length,
+    frame_count: frames.length,
+    omitted_frames: 0,
+    integrity: {
+      valid: sequenceValid,
+      ordered: sequenceValid,
+      starts_at_one: !frames.length || frames[0].sequence === 1,
+      duplicate_sequences: [],
+      sequence_gaps: [],
+    },
+    metrics: {
+      stop_reason: stopReason || "",
+      action_sequence: actionSequence,
+      event_counts: eventCounts,
+      tool_calls: frames.reduce((total, frame) => total + frame.tool_call_cost, 0),
+      recovery_events: frames.filter((frame) => frame.category === "recovery").length,
+      evidence_coverage: null,
+      llm: { total_tokens: 0, token_source: "none" },
+    },
+    frames,
+  };
+}
+
+function trajectoryEventCategory(eventType) {
+  if (eventType === "decision_recorded") return "decision";
+  if (eventType.startsWith("approval_")) return "approval";
+  if (eventType.startsWith("input_")) return "interaction";
+  if (eventType.includes("recovery") || eventType === "action_replayed") return "recovery";
+  if (eventType.startsWith("working_state_")) return "state";
+  if (eventType.startsWith("repair_")) return "repair";
+  if (eventType.startsWith("run_")) return "lifecycle";
+  if (eventType.startsWith("action_")) return "execution";
+  return "runtime";
 }
 
 function renderRepositoryMap(repositoryMap) {
@@ -2313,12 +2596,22 @@ function renderHistoryDetail(run) {
   const agentProposedDiff = run.agent_proposed_diff
     || latestVirtualDiffEvent?.payload?.observation?.data?.diff
     || "";
+  state.historyTrajectory = hasTrajectory(run.agent_trajectory)
+    ? run.agent_trajectory
+    : trajectoryFromEvents(
+        run.agent_events || [],
+        run.agent_runtime_run_id || "",
+        agentStopReason
+      );
   const pinnedTag = run.pinned ? ' <span class="tag ok">pinned</span>' : "";
   $("historyDetail").innerHTML = `
     <div class="item">
       <div class="item-title">${escapeHtml(run.task)}${pinnedTag}</div>
       <p>${escapeHtml(run.summary || "")}</p>
       <p><small>${escapeHtml(run.created_at)} | ${escapeHtml(run.mode)} | ${escapeHtml(run.id)}</small></p>
+      <div class="toolbar">
+        <button class="secondary" data-open-trajectory="history">Open Trajectory</button>
+      </div>
     </div>
     <div class="item">
       <div class="item-title">Timeline</div>
@@ -2358,9 +2651,11 @@ function renderHistoryDetail(run) {
 }
 
 function renderSavedTrace(trace) {
+  const usage = formatTraceUsage(trace);
   return `<details class="trace-details">
     <summary>${escapeHtml(trace.name || "trace")} ${trace.model ? `<span class="tag">${escapeHtml(trace.model)}</span>` : ""} <span class="tag ${trace.parsed ? "ok" : "danger"}">${trace.parsed ? "parsed" : "failed"}</span></summary>
     <p>${escapeHtml(trace.error || `Latency: ${trace.latency_ms ?? 0} ms`)}</p>
+    ${usage ? `<p><small>${escapeHtml(usage)}</small></p>` : ""}
     ${trace.context_summary ? `<strong>Context Budget</strong><p>${escapeHtml(trace.context_summary)}</p>` : ""}
     <strong>Prompt</strong>
     <pre>${escapeHtml(trace.prompt_preview || "")}</pre>
@@ -2393,6 +2688,7 @@ function renderLlmTraces(traces) {
         <span class="tag ${trace.parsed ? "ok" : "danger"}">${trace.parsed ? "parsed" : "failed"}</span>
       </div>
       <p>${escapeHtml(trace.error || `Latency: ${trace.latency_ms ?? 0} ms`)}</p>
+      ${formatTraceUsage(trace) ? `<p><small>${escapeHtml(formatTraceUsage(trace))}</small></p>` : ""}
       ${trace.context_summary ? `<strong>Context Budget</strong><p>${escapeHtml(trace.context_summary)}</p>` : ""}
       <details class="trace-details">
         <summary>Prompt ${index + 1}</summary>
@@ -2404,6 +2700,13 @@ function renderLlmTraces(traces) {
       </details>
     </div>`)
     .join("");
+}
+
+function formatTraceUsage(trace) {
+  if (!Number.isInteger(trace?.total_tokens)) {
+    return "";
+  }
+  return `Tokens: ${trace.total_tokens} total (${trace.input_tokens || 0} input, ${trace.output_tokens || 0} output)`;
 }
 
 function renderGithub(data) {
@@ -2523,6 +2826,11 @@ document.addEventListener("click", (event) => {
   }
   if (target.matches("[data-history-id]")) {
     loadHistoryDetail(target.dataset.historyId || "");
+    return;
+  }
+  if (target.matches('[data-open-trajectory="history"]') && state.historyTrajectory) {
+    setTrajectory(state.historyTrajectory);
+    activateTab("trajectory");
   }
 });
 
@@ -2654,6 +2962,7 @@ function capitalize(value) {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
+setTrajectory(null);
 loadGithub().catch((error) => {
   $("githubContent").innerHTML = item(`GitHub status unavailable: ${escapeHtml(error.message)}`);
 });

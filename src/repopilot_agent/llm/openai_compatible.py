@@ -32,10 +32,12 @@ class OpenAICompatibleClient(LLMClient):
         self.model = model or os.getenv("REPOPILOT_MODEL") or DEFAULT_MODEL
         self.json_mode = _resolve_json_mode(json_mode)
         self.timeout_seconds = _resolve_timeout_seconds(timeout_seconds)
+        self.last_usage: dict[str, int] | None = None
         if not self.api_key:
             raise LLMError("OPENAI_API_KEY is not configured.")
 
     def complete(self, messages: list[LLMMessage]) -> str:
+        self.last_usage = None
         if not self.json_mode:
             return self._complete_once(messages, json_mode=False)
         try:
@@ -93,9 +95,13 @@ class OpenAICompatibleClient(LLMClient):
             ) from exc
 
         try:
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError("LLM response did not contain chat completion content.") from exc
+        if not isinstance(content, str):
+            raise LLMError("LLM response chat completion content was not a string.")
+        self.last_usage = _normalize_token_usage(data.get("usage"))
+        return content
 
 
 class ProviderHTTPError(LLMError):
@@ -156,3 +162,29 @@ def _safe_response_excerpt(body: str, api_key: str | None = None) -> str:
     if len(text) > MAX_RESPONSE_PREVIEW_CHARS:
         return text[:MAX_RESPONSE_PREVIEW_CHARS] + "..."
     return text
+
+
+def _normalize_token_usage(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    input_tokens = _usage_int(value.get("prompt_tokens", value.get("input_tokens")))
+    output_tokens = _usage_int(value.get("completion_tokens", value.get("output_tokens")))
+    total_tokens = _usage_int(value.get("total_tokens"))
+    if input_tokens is None and output_tokens is None and total_tokens is None:
+        return None
+    normalized = {
+        "input_tokens": input_tokens or 0,
+        "output_tokens": output_tokens or 0,
+    }
+    normalized["total_tokens"] = (
+        total_tokens
+        if total_tokens is not None
+        else normalized["input_tokens"] + normalized["output_tokens"]
+    )
+    return normalized
+
+
+def _usage_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None

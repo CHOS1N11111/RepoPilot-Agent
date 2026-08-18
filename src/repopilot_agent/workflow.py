@@ -34,6 +34,7 @@ from .repository_map import build_repository_map, render_repository_map
 from .safety import check_file_edits
 from .scanner import scan_repository
 from .search import search_files
+from .trajectory import build_agent_trajectory_from_record
 from .validation_feedback import build_validation_feedback
 from .validation_planner import build_validation_plan
 from .validator import run_validation
@@ -244,7 +245,7 @@ def run_workflow(
         proposal_ready=patch_proposal.ready_for_patch,
         validation=validation,
     )
-    return WorkflowReport(
+    report = WorkflowReport(
         task=task,
         repo_path=str(root),
         files_scanned=len(files),
@@ -294,6 +295,8 @@ def run_workflow(
         completion_evidence=pending_completion_evidence(acceptance_criteria).to_dict(),
         summary=summary,
     )
+    report.agent_trajectory = build_agent_trajectory_from_record(report)
+    return report
 
 
 def _resolve_memory_context(

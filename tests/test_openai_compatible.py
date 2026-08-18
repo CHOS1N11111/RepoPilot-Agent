@@ -117,6 +117,39 @@ class OpenAICompatibleClientTests(unittest.TestCase):
 
         self.assertNotIn("response_format", captured["payload"])
 
+    def test_provider_token_usage_is_normalized_and_cleared_per_call(self) -> None:
+        responses = [
+            FakeResponse(
+                json.dumps(
+                    {
+                        "choices": [{"message": {"content": '{"ok": true}'}}],
+                        "usage": {
+                            "prompt_tokens": 11,
+                            "completion_tokens": 7,
+                            "total_tokens": 18,
+                        },
+                    }
+                ).encode("utf-8")
+            ),
+            FakeResponse(),
+        ]
+
+        with patch("urllib.request.urlopen", side_effect=responses):
+            client = OpenAICompatibleClient(
+                api_key="test-key",
+                model="test-model",
+                json_mode=False,
+            )
+            client.complete([LLMMessage(role="user", content="First call")])
+            first_usage = client.last_usage
+            client.complete([LLMMessage(role="user", content="Second call")])
+
+        self.assertEqual(
+            first_usage,
+            {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+        )
+        self.assertIsNone(client.last_usage)
+
     def test_json_mode_retries_without_response_format_when_rejected(self) -> None:
         payloads = []
 

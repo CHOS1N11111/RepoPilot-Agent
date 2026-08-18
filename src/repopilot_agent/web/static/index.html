@@ -146,6 +146,7 @@
         <div class="tabs">
           <button class="tab" data-tab="taskRun">Task Run</button>
           <button class="tab active" data-tab="summary">Summary</button>
+          <button class="tab" data-tab="trajectory">Trajectory</button>
           <button class="tab" data-tab="llm">LLM I/O</button>
           <button class="tab" data-tab="github">GitHub</button>
           <button class="tab" data-tab="diff">Diff</button>
@@ -267,6 +268,34 @@
           <div class="toolbar">
             <button id="generateRepairProposal" class="secondary" disabled>Generate Repair Proposal</button>
           </div>
+        </section>
+
+        <section id="trajectoryTab" class="tab-content">
+          <div class="metrics trajectory-metrics">
+            <div><span id="trajectoryEvents">0</span><small>events</small></div>
+            <div><span id="trajectoryTools">0</span><small>tool calls</small></div>
+            <div><span id="trajectoryEvidence">n/a</span><small>evidence coverage</small></div>
+            <div><span id="trajectoryTokens">0</span><small id="trajectoryTokenSource">tokens</small></div>
+            <div><span id="trajectoryRecovery">0</span><small>recovery events</small></div>
+            <div><span id="trajectoryStop" class="trajectory-stop-value">not run</span><small>stop reason</small></div>
+          </div>
+          <h2>Integrity</h2>
+          <div id="trajectoryIntegrity" class="stack"></div>
+          <h2>Action Sequence</h2>
+          <div id="trajectoryActionList" class="trajectory-actions"></div>
+          <div class="trajectory-player" aria-label="Trajectory replay controls">
+            <div class="trajectory-controls">
+              <button id="trajectoryFirst" class="secondary trajectory-icon-button" type="button" title="First event" aria-label="First event">|&#9664;</button>
+              <button id="trajectoryPrevious" class="secondary trajectory-icon-button" type="button" title="Previous event" aria-label="Previous event">&#9664;</button>
+              <button id="trajectoryPlay" class="secondary trajectory-icon-button" type="button" title="Play trajectory" aria-label="Play trajectory">&#9654;</button>
+              <button id="trajectoryNext" class="secondary trajectory-icon-button" type="button" title="Next event" aria-label="Next event">&#9654;</button>
+              <button id="trajectoryLast" class="secondary trajectory-icon-button" type="button" title="Latest event" aria-label="Latest event">&#9654;|</button>
+            </div>
+            <input id="trajectoryCursor" type="range" min="0" max="0" value="0" aria-label="Trajectory event" />
+            <output id="trajectoryPosition" for="trajectoryCursor" aria-live="polite">0 / 0</output>
+          </div>
+          <h2>Replay Frame</h2>
+          <div id="trajectoryFrame" class="trajectory-frame"></div>
         </section>
 
         <section id="llmTab" class="tab-content">

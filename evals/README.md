@@ -40,6 +40,14 @@ Evaluate the read-only iterative agent loop as well:
 python repopilot.py eval --use-llm --iterative-agent --agent-max-steps 6 --no-llm-fallback
 ```
 
+Run the opt-in trajectory and patch-quality gate:
+
+```bash
+python repopilot.py eval --suite evals/llm_cases --use-llm --iterative-agent --agent-max-steps 6 --no-llm-fallback
+```
+
+`evals/llm_cases/` is deliberately outside the default suite because it makes real provider calls. Its fixture starts with a known failing test; RepoPilot inspects but never applies the generated proposal, so `validation_passed: false` describes the unchanged fixture while patch expectations score the proposed fix.
+
 The evaluation runner never applies proposals. API keys, raw prompts, and raw model outputs are excluded from saved evaluation reports.
 
 ## Metrics
@@ -53,10 +61,16 @@ Each case reports:
 - End-to-end duration.
 - Iterative agent step count.
 - Traced workflow LLM-call count, failed calls, fallback stages, and provider latency. A provider-internal retry remains part of one traced call.
+- Ordered Agent actions, stop reason, required Runtime events, recovery events, and repair cycles.
+- Evidence coverage: completed plan items and passed acceptance criteria that cite a successful evidence-producing action.
+- Tool-call count, including every member of a parallel read batch.
+- Unauthorized side effects: write or command starts without a preceding authorization event for the same action id.
+- Proposed edit paths, apply readiness, and required fragments in the generated diff.
+- Provider token usage when supplied; otherwise a clearly marked estimate from the bounded trace text.
 
-The aggregate report includes suite pass rate, average score, average retrieval/proposal recall, total duration, and summed LLM metrics.
+The aggregate report includes suite pass rate, average score, retrieval/proposal recall, evidence coverage, duration, tool/recovery/repair/safety totals, token usage, and summed LLM metrics. Each case also records a trajectory fingerprint without embedding raw Runtime payloads.
 
-RepoPilot does not currently record provider token usage, so token counts and estimated API cost are not included. The current fixtures are regression tests, not a claim of SWE-bench performance.
+Token totals are not dollar-cost estimates. A report labels usage as `provider`, `estimated`, `mixed`, or `none`, because OpenAI-compatible gateways do not all return the same usage fields. The current fixtures are regression tests, not a claim of SWE-bench performance.
 
 ## Case Schema
 
@@ -84,21 +98,35 @@ Each JSON suite contains a non-empty `cases` list:
         "validation_passed": true,
         "max_llm_failures": 0,
         "max_fallbacks": 0,
-        "min_agent_steps": 1
+        "min_agent_steps": 1,
+        "required_agent_actions": ["finish"],
+        "required_runtime_events": ["decision_recorded", "run_stopped"],
+        "expected_stop_reason": "finished",
+        "min_evidence_coverage": 1.0,
+        "edit_files": ["src/auth.py"],
+        "patch_contains": ["expired"],
+        "proposal_apply_ready": true,
+        "max_tool_calls": 8,
+        "max_unauthorized_side_effects": 0,
+        "max_repair_cycles": 0,
+        "max_llm_latency_ms": 600000,
+        "max_total_tokens": 100000,
+        "max_duration_ms": 900000
       }
     }
   ]
 }
 ```
 
-Paths are resolved relative to the JSON case file. Unknown fields, duplicate IDs, missing repositories, invalid types, and expectations without validation commands are rejected before the suite runs.
+`expected_agent_actions` can enforce an exact ordered action list; `required_agent_actions` checks only membership. `min_recovery_events` and `expected_repair_stop_reason` are available for recovery and repair-specific suites. Paths are resolved relative to the JSON case file. Unknown fields, duplicate IDs, missing repositories, invalid types, fractions outside `0..1`, and expectations without validation commands are rejected before the suite runs.
 
 ## Adding A Case
 
 1. Add a small repository under `evals/fixtures/` or point the case at another stable local fixture.
 2. Give the case a task that identifies the behavior under evaluation.
 3. Add only expectations that can be verified from `WorkflowReport`.
-4. Run the case in deterministic mode and inspect every failed criterion.
-5. Run the complete unit test suite before committing.
+4. Keep API-backed cases under `evals/llm_cases/`, not the default `evals/cases/` directory.
+5. Inspect every failed criterion instead of weakening a threshold to hide a regression.
+6. Run the deterministic baseline and complete unit test suite before committing.
 
 Keep fixtures deterministic and free of credentials, network requirements, generated histories, and large dependencies.

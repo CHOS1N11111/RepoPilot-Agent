@@ -51,6 +51,9 @@ class LLMCallTrace:
     error: str | None = None
     latency_ms: int | None = None
     context_summary: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 AGENT_DECISION_VERSION = 2
@@ -443,6 +446,7 @@ class WorkflowReport:
     agent_steps: list[AgentStep] = field(default_factory=list)
     agent_run_id: str | None = None
     agent_events: list[Any] = field(default_factory=list)
+    agent_trajectory: dict[str, Any] = field(default_factory=dict)
     agent_state: dict[str, Any] = field(default_factory=dict)
     agent_stop_reason: str = ""
     agent_pending_question: str = ""

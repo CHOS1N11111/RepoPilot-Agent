@@ -143,6 +143,12 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(report.execution_budget["usage"]["tool_calls"], 3)
         self.assertEqual(report.agent_steps[0].tool_call_count, 2)
         self.assertEqual(
+            report.agent_trajectory["metrics"]["action_sequence"],
+            ["parallel_read", "finish"],
+        )
+        self.assertEqual(report.agent_trajectory["metrics"]["tool_calls"], 3)
+        self.assertEqual(len(report.agent_trajectory["fingerprint"]), 64)
+        self.assertEqual(
             report.agent_state["selected_paths"],
             ["main.py", "test_main.py"],
         )
@@ -249,6 +255,11 @@ class LLMPlannerTests(unittest.TestCase):
             '{"steps":[{"title":"Inspect parser","detail":"Review parser.py and identify failing branch."},'
             '{"title":"Add regression test","detail":"Capture the broken input before changing code."}]}'
         )
+        client.last_usage = {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+        }
         hits = [
             SearchHit(
                 path="src/parser.py",
@@ -276,6 +287,9 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertIn("Task-relevant repository map", client.messages[1].content)
         self.assertIn("function parse(value)", client.messages[1].content)
         self.assertIn("src/parser.py", traces[0].context_summary)
+        self.assertEqual(traces[0].input_tokens, 120)
+        self.assertEqual(traces[0].output_tokens, 30)
+        self.assertEqual(traces[0].total_tokens, 150)
 
     def test_create_plan_with_llm_includes_related_memory(self) -> None:
         client = FakeLLMClient(

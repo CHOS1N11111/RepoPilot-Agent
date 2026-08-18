@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from .llm.base import LLMClient
 from .models import WorkflowReport
+from .trajectory import build_agent_trajectory_from_record
 from .workflow import run_workflow
 
 
@@ -29,6 +30,22 @@ class EvalExpectations:
     max_llm_failures: int | None = None
     max_fallbacks: int | None = None
     min_agent_steps: int | None = None
+    expected_agent_actions: list[str] | None = None
+    required_agent_actions: list[str] = field(default_factory=list)
+    required_runtime_events: list[str] = field(default_factory=list)
+    expected_stop_reason: str | None = None
+    min_evidence_coverage: float | None = None
+    edit_files: list[str] = field(default_factory=list)
+    patch_contains: list[str] = field(default_factory=list)
+    proposal_apply_ready: bool | None = None
+    max_tool_calls: int | None = None
+    max_unauthorized_side_effects: int | None = None
+    min_recovery_events: int | None = None
+    max_repair_cycles: int | None = None
+    expected_repair_stop_reason: str | None = None
+    max_llm_latency_ms: int | None = None
+    max_total_tokens: int | None = None
+    max_duration_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,16 @@ class EvalCaseResult:
     llm_latency_ms: int = 0
     relevant_file_recall: float | None = None
     proposal_file_recall: float | None = None
+    action_sequence: list[str] = field(default_factory=list)
+    stop_reason: str = ""
+    tool_calls: int = 0
+    evidence_coverage: float | None = None
+    unauthorized_side_effects: int = 0
+    recovery_events: int = 0
+    repair_cycles: int = 0
+    total_tokens: int = 0
+    token_source: str = "none"
+    trajectory_fingerprint: str = ""
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -95,6 +122,12 @@ class EvalSuiteResult:
     average_score: float
     average_relevant_file_recall: float | None
     average_proposal_file_recall: float | None
+    average_evidence_coverage: float | None
+    total_tool_calls: int
+    total_tokens: int
+    total_unauthorized_side_effects: int
+    total_recovery_events: int
+    total_repair_cycles: int
     total_llm_calls: int
     total_llm_failures: int
     total_fallbacks: int
@@ -123,6 +156,22 @@ EXPECTATION_KEYS = {
     "max_llm_failures",
     "max_fallbacks",
     "min_agent_steps",
+    "expected_agent_actions",
+    "required_agent_actions",
+    "required_runtime_events",
+    "expected_stop_reason",
+    "min_evidence_coverage",
+    "edit_files",
+    "patch_contains",
+    "proposal_apply_ready",
+    "max_tool_calls",
+    "max_unauthorized_side_effects",
+    "min_recovery_events",
+    "max_repair_cycles",
+    "expected_repair_stop_reason",
+    "max_llm_latency_ms",
+    "max_total_tokens",
+    "max_duration_ms",
 }
 
 
@@ -236,6 +285,16 @@ def run_eval_suite(
         average_proposal_file_recall=_average_optional(
             [result.proposal_file_recall for result in case_results]
         ),
+        average_evidence_coverage=_average_optional(
+            [result.evidence_coverage for result in case_results]
+        ),
+        total_tool_calls=sum(result.tool_calls for result in case_results),
+        total_tokens=sum(result.total_tokens for result in case_results),
+        total_unauthorized_side_effects=sum(
+            result.unauthorized_side_effects for result in case_results
+        ),
+        total_recovery_events=sum(result.recovery_events for result in case_results),
+        total_repair_cycles=sum(result.repair_cycles for result in case_results),
         total_llm_calls=sum(result.llm_calls for result in case_results),
         total_llm_failures=sum(result.llm_failures for result in case_results),
         total_fallbacks=sum(result.fallback_count for result in case_results),
@@ -249,10 +308,36 @@ def evaluate_report(case: EvalCase, report: WorkflowReport, duration_ms: int) ->
 
     relevant_paths = [hit.path for hit in report.relevant_files]
     proposal_paths = [item.path for item in report.patch_proposal.files] if report.patch_proposal else []
+    edit_paths = (
+        [_normalize_path(item.path) for item in report.patch_proposal.file_edits]
+        if report.patch_proposal
+        else []
+    )
+    patch_text = (
+        report.patch_proposal.proposed_diff
+        if report.patch_proposal and report.patch_proposal.proposed_diff
+        else report.agent_proposed_diff
+    )
+    patch_text = patch_text or ""
     validation_passed = _validation_passed(report)
     call_traces = [trace for trace in report.llm_traces if _is_provider_call(trace)]
     llm_failures = sum(1 for trace in call_traces if trace.error or not trace.parsed)
+    llm_latency_ms = sum(trace.latency_ms or 0 for trace in call_traces)
     fallback_stages = _fallback_stages(report)
+    trajectory = build_agent_trajectory_from_record(report)
+    trajectory_metrics = dict(trajectory.get("metrics") or {})
+    trajectory_llm = dict(trajectory_metrics.get("llm") or {})
+    action_sequence = list(trajectory_metrics.get("action_sequence") or [])
+    event_counts = dict(trajectory_metrics.get("event_counts") or {})
+    evidence_coverage = trajectory_metrics.get("evidence_coverage")
+    tool_calls = _metric_int(trajectory_metrics.get("tool_calls"))
+    unauthorized_side_effects = _metric_int(
+        trajectory_metrics.get("unauthorized_side_effects")
+    )
+    recovery_events = _metric_int(trajectory_metrics.get("recovery_events"))
+    repair_cycles = _metric_int(trajectory_metrics.get("repair_cycles"))
+    total_tokens = _metric_int(trajectory_llm.get("total_tokens"))
+    token_source = str(trajectory_llm.get("token_source") or "none")
     criteria: list[EvalCriterionResult] = []
     expectations = case.expectations
 
@@ -354,6 +439,149 @@ def evaluate_report(case: EvalCase, report: WorkflowReport, duration_ms: int) ->
             )
         )
 
+    if expectations.expected_agent_actions is not None:
+        criteria.append(
+            EvalCriterionResult(
+                name="expected_agent_actions",
+                passed=action_sequence == expectations.expected_agent_actions,
+                expected=expectations.expected_agent_actions,
+                actual=action_sequence,
+            )
+        )
+
+    for action in expectations.required_agent_actions:
+        criteria.append(
+            EvalCriterionResult(
+                name=f"required_agent_action:{action}",
+                passed=action in action_sequence,
+                expected=True,
+                actual=action in action_sequence,
+                detail=f"sequence={action_sequence}",
+            )
+        )
+
+    for event_type in expectations.required_runtime_events:
+        observed = _metric_int(event_counts.get(event_type))
+        criteria.append(
+            EvalCriterionResult(
+                name=f"required_runtime_event:{event_type}",
+                passed=observed > 0,
+                expected=">=1",
+                actual=observed,
+            )
+        )
+
+    if expectations.expected_stop_reason is not None:
+        actual_stop_reason = str(trajectory_metrics.get("stop_reason") or "")
+        criteria.append(
+            EvalCriterionResult(
+                name="expected_stop_reason",
+                passed=actual_stop_reason == expectations.expected_stop_reason,
+                expected=expectations.expected_stop_reason,
+                actual=actual_stop_reason,
+            )
+        )
+
+    if expectations.min_evidence_coverage is not None:
+        criteria.append(
+            EvalCriterionResult(
+                name="min_evidence_coverage",
+                passed=(
+                    isinstance(evidence_coverage, (int, float))
+                    and not isinstance(evidence_coverage, bool)
+                    and evidence_coverage >= expectations.min_evidence_coverage
+                ),
+                expected=f">={expectations.min_evidence_coverage}",
+                actual=evidence_coverage,
+            )
+        )
+
+    for expected_path in expectations.edit_files:
+        found = expected_path in edit_paths
+        criteria.append(
+            EvalCriterionResult(
+                name=f"edit_file:{expected_path}",
+                passed=found,
+                expected=True,
+                actual=found,
+                detail=f"editable={edit_paths}",
+            )
+        )
+
+    for fragment in expectations.patch_contains:
+        found = fragment in patch_text
+        criteria.append(
+            EvalCriterionResult(
+                name=f"patch_contains:{fragment[:80]}",
+                passed=found,
+                expected=True,
+                actual=found,
+            )
+        )
+
+    if expectations.proposal_apply_ready is not None:
+        actual_apply_ready = bool(report.patch_proposal and report.patch_proposal.apply_ready)
+        criteria.append(
+            EvalCriterionResult(
+                name="proposal_apply_ready",
+                passed=actual_apply_ready == expectations.proposal_apply_ready,
+                expected=expectations.proposal_apply_ready,
+                actual=actual_apply_ready,
+            )
+        )
+
+    _append_maximum_criterion(criteria, "max_tool_calls", expectations.max_tool_calls, tool_calls)
+    _append_maximum_criterion(
+        criteria,
+        "max_unauthorized_side_effects",
+        expectations.max_unauthorized_side_effects,
+        unauthorized_side_effects,
+    )
+    if expectations.min_recovery_events is not None:
+        criteria.append(
+            EvalCriterionResult(
+                name="min_recovery_events",
+                passed=recovery_events >= expectations.min_recovery_events,
+                expected=f">={expectations.min_recovery_events}",
+                actual=recovery_events,
+            )
+        )
+    _append_maximum_criterion(
+        criteria,
+        "max_repair_cycles",
+        expectations.max_repair_cycles,
+        repair_cycles,
+    )
+    if expectations.expected_repair_stop_reason is not None:
+        actual_repair_stop = str(trajectory_metrics.get("repair_stop_reason") or "")
+        criteria.append(
+            EvalCriterionResult(
+                name="expected_repair_stop_reason",
+                passed=actual_repair_stop == expectations.expected_repair_stop_reason,
+                expected=expectations.expected_repair_stop_reason,
+                actual=actual_repair_stop,
+            )
+        )
+    _append_maximum_criterion(
+        criteria,
+        "max_llm_latency_ms",
+        expectations.max_llm_latency_ms,
+        llm_latency_ms,
+    )
+    _append_maximum_criterion(
+        criteria,
+        "max_total_tokens",
+        expectations.max_total_tokens,
+        total_tokens,
+        detail=f"source={token_source}",
+    )
+    _append_maximum_criterion(
+        criteria,
+        "max_duration_ms",
+        expectations.max_duration_ms,
+        duration_ms,
+    )
+
     passed_count = sum(1 for criterion in criteria if criterion.passed)
     return EvalCaseResult(
         case_id=case.case_id,
@@ -375,9 +603,24 @@ def evaluate_report(case: EvalCase, report: WorkflowReport, duration_ms: int) ->
         llm_failures=llm_failures,
         fallback_count=len(fallback_stages),
         fallback_stages=fallback_stages,
-        llm_latency_ms=sum(trace.latency_ms or 0 for trace in call_traces),
+        llm_latency_ms=llm_latency_ms,
         relevant_file_recall=_recall(expectations.relevant_files, relevant_paths),
         proposal_file_recall=_recall(expectations.proposal_files, proposal_paths),
+        action_sequence=action_sequence,
+        stop_reason=str(trajectory_metrics.get("stop_reason") or ""),
+        tool_calls=tool_calls,
+        evidence_coverage=(
+            float(evidence_coverage)
+            if isinstance(evidence_coverage, (int, float))
+            and not isinstance(evidence_coverage, bool)
+            else None
+        ),
+        unauthorized_side_effects=unauthorized_side_effects,
+        recovery_events=recovery_events,
+        repair_cycles=repair_cycles,
+        total_tokens=total_tokens,
+        token_source=token_source,
+        trajectory_fingerprint=str(trajectory.get("fingerprint") or ""),
     )
 
 
@@ -449,6 +692,58 @@ def _parse_case(raw_case: Any, source_path: Path, index: int) -> EvalCase:
         max_llm_failures=_optional_non_negative_int(raw_expectations, "max_llm_failures", location),
         max_fallbacks=_optional_non_negative_int(raw_expectations, "max_fallbacks", location),
         min_agent_steps=_optional_non_negative_int(raw_expectations, "min_agent_steps", location),
+        expected_agent_actions=_optional_string_list(
+            raw_expectations, "expected_agent_actions", location
+        ),
+        required_agent_actions=_string_list(
+            raw_expectations.get("required_agent_actions", []),
+            "required_agent_actions",
+            location,
+        ),
+        required_runtime_events=_string_list(
+            raw_expectations.get("required_runtime_events", []),
+            "required_runtime_events",
+            location,
+        ),
+        expected_stop_reason=_optional_string(
+            raw_expectations, "expected_stop_reason", location
+        ),
+        min_evidence_coverage=_optional_fraction(
+            raw_expectations, "min_evidence_coverage", location
+        ),
+        edit_files=_path_list(
+            raw_expectations.get("edit_files", []), "edit_files", location
+        ),
+        patch_contains=_string_list(
+            raw_expectations.get("patch_contains", []), "patch_contains", location
+        ),
+        proposal_apply_ready=_optional_bool(
+            raw_expectations, "proposal_apply_ready", location
+        ),
+        max_tool_calls=_optional_non_negative_int(
+            raw_expectations, "max_tool_calls", location
+        ),
+        max_unauthorized_side_effects=_optional_non_negative_int(
+            raw_expectations, "max_unauthorized_side_effects", location
+        ),
+        min_recovery_events=_optional_non_negative_int(
+            raw_expectations, "min_recovery_events", location
+        ),
+        max_repair_cycles=_optional_non_negative_int(
+            raw_expectations, "max_repair_cycles", location
+        ),
+        expected_repair_stop_reason=_optional_string(
+            raw_expectations, "expected_repair_stop_reason", location
+        ),
+        max_llm_latency_ms=_optional_non_negative_int(
+            raw_expectations, "max_llm_latency_ms", location
+        ),
+        max_total_tokens=_optional_non_negative_int(
+            raw_expectations, "max_total_tokens", location
+        ),
+        max_duration_ms=_optional_non_negative_int(
+            raw_expectations, "max_duration_ms", location
+        ),
     )
     if _expectation_count(expectations) == 0:
         raise EvalConfigurationError(f"{location}: at least one expectation is required.")
@@ -503,6 +798,36 @@ def _optional_bool(mapping: dict[str, Any], key: str, location: str) -> bool | N
     return value
 
 
+def _optional_string(mapping: dict[str, Any], key: str, location: str) -> str | None:
+    if key not in mapping:
+        return None
+    value = mapping[key]
+    if not isinstance(value, str) or not value.strip():
+        raise EvalConfigurationError(f"{location}: '{key}' must be a non-empty string.")
+    return value.strip()
+
+
+def _optional_string_list(
+    mapping: dict[str, Any], key: str, location: str
+) -> list[str] | None:
+    if key not in mapping:
+        return None
+    return _string_list(mapping[key], key, location)
+
+
+def _optional_fraction(mapping: dict[str, Any], key: str, location: str) -> float | None:
+    if key not in mapping:
+        return None
+    value = mapping[key]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not 0 <= value <= 1
+    ):
+        raise EvalConfigurationError(f"{location}: '{key}' must be a number from 0 to 1.")
+    return float(value)
+
+
 def _optional_non_negative_int(mapping: dict[str, Any], key: str, location: str) -> int | None:
     if key not in mapping:
         return None
@@ -520,6 +845,10 @@ def _expectation_count(expectations: EvalExpectations) -> int:
     return (
         len(expectations.relevant_files)
         + len(expectations.proposal_files)
+        + len(expectations.required_agent_actions)
+        + len(expectations.required_runtime_events)
+        + len(expectations.edit_files)
+        + len(expectations.patch_contains)
         + sum(
             value is not None
             for value in (
@@ -530,7 +859,46 @@ def _expectation_count(expectations: EvalExpectations) -> int:
                 expectations.max_llm_failures,
                 expectations.max_fallbacks,
                 expectations.min_agent_steps,
+                expectations.expected_agent_actions,
+                expectations.expected_stop_reason,
+                expectations.min_evidence_coverage,
+                expectations.proposal_apply_ready,
+                expectations.max_tool_calls,
+                expectations.max_unauthorized_side_effects,
+                expectations.min_recovery_events,
+                expectations.max_repair_cycles,
+                expectations.expected_repair_stop_reason,
+                expectations.max_llm_latency_ms,
+                expectations.max_total_tokens,
+                expectations.max_duration_ms,
             )
+        )
+    )
+
+
+def _metric_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(int(value), 0)
+
+
+def _append_maximum_criterion(
+    criteria: list[EvalCriterionResult],
+    name: str,
+    expected: int | None,
+    actual: int,
+    *,
+    detail: str = "",
+) -> None:
+    if expected is None:
+        return
+    criteria.append(
+        EvalCriterionResult(
+            name=name,
+            passed=actual <= expected,
+            expected=f"<={expected}",
+            actual=actual,
+            detail=detail,
         )
     )
 

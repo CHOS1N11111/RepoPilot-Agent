@@ -78,6 +78,40 @@ class TaskRunStateTests(unittest.TestCase):
             update_task_run(task_run, "repair_pending", "Validation failed.")
             self.assertTrue(task_run.to_public_dict()["can_repair"])
 
+    def test_public_result_rebuilds_latest_agent_trajectory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task_run = create_task_run(tmp, "inspect login", [])
+            task_run.result = {
+                "agent_run_id": "task-runtime",
+                "agent_events": [
+                    {
+                        "event_id": "event-1",
+                        "run_id": "task-runtime",
+                        "sequence": 1,
+                        "event_type": "run_started",
+                        "created_at": "2026-08-18T00:00:00+00:00",
+                        "payload": {},
+                    },
+                    {
+                        "event_id": "event-2",
+                        "run_id": "task-runtime",
+                        "sequence": 2,
+                        "event_type": "run_stopped",
+                        "created_at": "2026-08-18T00:00:01+00:00",
+                        "payload": {"reason": "finished"},
+                    },
+                ],
+                "agent_stop_reason": "finished",
+                "llm_traces": [],
+            }
+
+            public = task_run.to_public_dict()
+
+            trajectory = public["result"]["agent_trajectory"]
+            self.assertEqual(trajectory["run_id"], "task-runtime")
+            self.assertEqual(trajectory["event_count"], 2)
+            self.assertEqual(trajectory["metrics"]["stop_reason"], "finished")
+
     def test_checkpoint_captures_runtime_state_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             task_run = create_task_run(

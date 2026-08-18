@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from .models import MemoryContextItem
+from .trajectory import build_agent_trajectory_from_record
 
 
 _STOP_WORDS = {
@@ -151,8 +152,9 @@ class MemoryStore:
                     """
                     INSERT INTO llm_traces (
                         id, run_id, name, model, prompt_preview, raw_output,
-                        parsed, fallback_used, error, latency_ms, context_summary
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        parsed, fallback_used, error, latency_ms, context_summary,
+                        input_tokens, output_tokens, total_tokens
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         uuid4().hex,
@@ -166,6 +168,9 @@ class MemoryStore:
                         trace.error,
                         trace.latency_ms,
                         trace.context_summary,
+                        trace.input_tokens,
+                        trace.output_tokens,
+                        trace.total_tokens,
                     ),
                 )
             for result in report.validation:
@@ -577,6 +582,8 @@ class MemoryStore:
         data["validation"] = [_row_to_validation(row) for row in validation]
         data["agent_events"] = [_row_to_agent_runtime_event(row) for row in runtime_events]
         data["agent_pending_approval"] = _pending_runtime_approval(data["agent_events"])
+        data["agent_run_id"] = data.get("agent_runtime_run_id")
+        data["agent_trajectory"] = build_agent_trajectory_from_record(data)
         return data
 
     def delete_run(self, run_id: str) -> bool:
@@ -752,6 +759,9 @@ class MemoryStore:
                     error TEXT,
                     latency_ms INTEGER,
                     context_summary TEXT NOT NULL DEFAULT '',
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    total_tokens INTEGER,
                     FOREIGN KEY(run_id) REFERENCES runs(id)
                 );
 
@@ -809,6 +819,9 @@ class MemoryStore:
                 """
             )
             _ensure_column(conn, "llm_traces", "context_summary", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "llm_traces", "input_tokens", "INTEGER")
+            _ensure_column(conn, "llm_traces", "output_tokens", "INTEGER")
+            _ensure_column(conn, "llm_traces", "total_tokens", "INTEGER")
             _ensure_column(conn, "runs", "pinned", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "runs", "agent_runtime_run_id", "TEXT")
 
@@ -866,6 +879,9 @@ def _row_to_trace(row: sqlite3.Row) -> dict[str, Any]:
         "error": row["error"],
         "latency_ms": row["latency_ms"],
         "context_summary": row["context_summary"],
+        "input_tokens": row["input_tokens"],
+        "output_tokens": row["output_tokens"],
+        "total_tokens": row["total_tokens"],
     }
 
 

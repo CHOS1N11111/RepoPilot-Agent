@@ -80,6 +80,8 @@ repopilot serve
 
 ## Web UI
 
+`Trajectory` 页签会展示事件完整性、动作序列、证据覆盖率、工具与 Token 指标，并提供不会重新执行任何动作的只读回放。
+
 本地 Web UI 提供以下功能：
 
 - 选择并同步本地路径或 GitHub URL 对应的仓库。

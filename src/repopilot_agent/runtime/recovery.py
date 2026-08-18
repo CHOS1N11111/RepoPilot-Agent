@@ -723,6 +723,6 @@ def _public_action_arguments(action: RuntimeAction) -> dict[str, Any]:
 
 
 def _redact_public_text(value: object) -> str:
-    from ..agent_context import redact_context_secrets
+    from ..redaction import redact_context_secrets
 
     return redact_context_secrets(str(value or ""))[:1_000]

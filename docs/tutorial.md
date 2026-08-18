@@ -275,6 +275,7 @@ The web UI is local. It gives you the full workflow in tabs:
 
 - Task Run: sandbox lifecycle, durable Agent Input, current phase, pause/resume/cancel controls, event history, and local branch delivery.
 - Summary: plan, Repository Map, proposal, validation, safety, repair feedback, and timeline.
+- Trajectory: aggregate Agent metrics, integrity, ordered actions, and a read-only event replay.
 - LLM I/O: prompt preview, output preview, trace status, and context budget.
 - GitHub: open issues, pull requests, reviews, files, comments, and checks.
 - Diff: current working tree diff or staged diff.
@@ -284,6 +285,8 @@ The web UI is local. It gives you the full workflow in tabs:
 Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
 Enable `Iterative agent` when you want RepoPilot to make several smaller non-writing LLM calls before the main plan/proposal calls. The Summary tab shows each typed decision in `Agent Steps`, including a read-tool count badge for parallel batches, the latest `Agent Working State`, virtual proposal revisions and cumulative diff, and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+
+Open Trajectory for the compact run-level view. The counters show durable events, actual tool calls, evidence coverage, observed tokens, recovery events, and the terminal stop reason. Integrity identifies sequence gaps or duplicates and shows the stable trajectory fingerprint. Use the first, previous, play/pause, next, latest, or range controls to inspect bounded redacted frames. Playback changes only the local browser cursor; it cannot execute, resume, approve, or replay an Agent action. Provider token counts are shown when available, while estimated or mixed totals are labeled by their source.
 
 Open an `agent_step_N` entry in LLM I/O and inspect `Context Budget`. A summary such as `repository_map 2500/2500 chars (truncated)` means that section reached its own limit; `omitted` means the total packet was already full when the lower-priority section was reached; `redacted` means at least one sensitive value was replaced before the request.
 
@@ -543,6 +546,7 @@ In the web UI:
 
 - Open History to inspect saved runs.
 - Open saved run details to inspect persisted LLM trace history.
+- Click `Open Trajectory` in a saved run to load its reconstructed read-only replay.
 - Inspect the Runtime Events section to understand tool execution, replay, or recovery decisions.
 - Pin important runs so they are prioritized in future planning.
 - Delete one run when it is no longer useful.
@@ -565,7 +569,7 @@ python repopilot.py eval
 
 This runs the cases under `evals/cases/` against self-contained fixture repositories. Memory is disabled, proposed edits are never applied, and the command exits with status `1` when a case fails.
 
-The summary shows pass rate, score, relevant-file recall, proposal-file recall, runtime, LLM calls, LLM failures, fallback stages, and provider latency. Inspect failed criteria under each case instead of treating the aggregate score as the only signal.
+The summary shows pass rate, score, retrieval/proposal recall, evidence coverage, tool and recovery counts, unauthorized side effects, repair cycles, runtime, LLM calls, failures, fallback stages, provider latency, and observed tokens. Inspect failed criteria under each case instead of treating the aggregate score as the only signal.
 
 Write the structured report to an ignored local directory:
 
@@ -585,7 +589,15 @@ Include non-writing iterative analysis and virtual proposal actions:
 python repopilot.py eval --use-llm --iterative-agent --agent-max-steps 6 --no-llm-fallback
 ```
 
-LLM reports contain aggregate call metadata but exclude API keys, raw prompts, and raw outputs. See `evals/README.md` before adding or changing cases.
+Run the dedicated opt-in trajectory and patch-quality case:
+
+```bash
+python repopilot.py eval --suite evals/llm_cases --use-llm --iterative-agent --agent-max-steps 6 --no-llm-fallback
+```
+
+This suite makes real provider calls and is intentionally excluded from the default baseline. Its repository fixture contains a known failing test; RepoPilot evaluates the generated proposal without applying it.
+
+LLM reports contain aggregate call metadata, exact provider usage when available, marked estimates otherwise, and a stable trajectory fingerprint. They exclude API keys, raw prompts, raw outputs, and Runtime replay frames. See `evals/README.md` before adding or changing cases.
 
 ## Step 15: Use A Git Worktree Sandbox
 

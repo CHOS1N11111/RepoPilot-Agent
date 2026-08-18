@@ -70,6 +70,49 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("LLM Trace History", self.app_js)
         self.assertIn("trace.prompt_preview", self.app_js)
         self.assertIn("trace.raw_output", self.app_js)
+        self.assertIn("formatTraceUsage", self.app_js)
+        self.assertIn("trace.total_tokens", self.app_js)
+
+    def test_trajectory_tab_replays_safe_workflow_and_history_frames(self) -> None:
+        for element_id in [
+            "trajectoryTab",
+            "trajectoryEvents",
+            "trajectoryTools",
+            "trajectoryEvidence",
+            "trajectoryTokens",
+            "trajectoryTokenSource",
+            "trajectoryRecovery",
+            "trajectoryStop",
+            "trajectoryIntegrity",
+            "trajectoryActionList",
+            "trajectoryFirst",
+            "trajectoryPrevious",
+            "trajectoryPlay",
+            "trajectoryNext",
+            "trajectoryLast",
+            "trajectoryCursor",
+            "trajectoryPosition",
+            "trajectoryFrame",
+        ]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        for function_name in [
+            "function setTrajectory",
+            "function renderTrajectory",
+            "function renderTrajectoryFrame",
+            "function toggleTrajectoryPlayback",
+            "function stopTrajectoryPlayback",
+            "function trajectoryFromEvents",
+        ]:
+            self.assertIn(function_name, self.app_js)
+        self.assertIn("report.agent_trajectory", self.app_js)
+        self.assertIn("taskRun.result?.agent_trajectory", self.app_js)
+        self.assertIn("run.agent_trajectory", self.app_js)
+        self.assertIn('data-open-trajectory="history"', self.app_js)
+        self.assertIn("state.historyTrajectory", self.app_js)
+        self.assertIn(".trajectory-player", self.app_css)
+        self.assertIn(".trajectory-frame-grid", self.app_css)
+        self.assertEqual(self.app_js.count("function activateTab("), 1)
+        self.assertEqual(self.app_js.count("function shortFingerprint("), 1)
 
     def test_repair_budget_controls_are_sent_and_rendered(self) -> None:
         self.assertIn('id="repairMaxAttempts"', self.index_html)

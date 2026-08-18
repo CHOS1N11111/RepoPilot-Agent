@@ -21,6 +21,7 @@ from .execution import (
 )
 from .execution_profile import TaskRunExecutionProfile, execution_profile_from_record
 from .repair_loop import RepairAttemptRecord, repair_attempts_from_records
+from .trajectory import build_agent_trajectory_from_record
 from .worktree_sandbox import WorktreeSandboxError, list_worktree_sandboxes
 
 
@@ -212,6 +213,15 @@ class TaskRun:
             data["resume_checkpoint"] = self.resume_checkpoint
             data["resume_blocked_reason"] = self.resume_blocked_reason
         data["resume_plan"] = resume_plan.to_dict()
+        if isinstance(data.get("result"), dict):
+            result = dict(data["result"])
+            trajectory_record = dict(result)
+            trajectory_record.setdefault("repair_history", data["repair_history"])
+            trajectory_record.setdefault("execution_budget", data["execution_budget"])
+            result["agent_trajectory"] = build_agent_trajectory_from_record(
+                trajectory_record
+            )
+            data["result"] = result
         return data
 
 

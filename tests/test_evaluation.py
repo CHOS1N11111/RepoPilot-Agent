@@ -19,7 +19,9 @@ from repopilot_agent.evaluation import (
     write_eval_report,
 )
 from repopilot_agent.models import (
+    AgentStep,
     FileChangeProposal,
+    FileEditProposal,
     LLMCallTrace,
     PatchProposal,
     PlanStep,
@@ -46,7 +48,25 @@ class EvaluationTests(unittest.TestCase):
                                 "id": "parser",
                                 "repo": "fixture",
                                 "task": "fix parser",
-                                "expect": {"relevant_files": ["main.py"]},
+                                "expect": {
+                                    "relevant_files": ["main.py"],
+                                    "expected_agent_actions": [],
+                                    "required_agent_actions": ["finish"],
+                                    "required_runtime_events": ["run_stopped"],
+                                    "expected_stop_reason": "finished",
+                                    "min_evidence_coverage": 0.5,
+                                    "edit_files": ["main.py"],
+                                    "patch_contains": ["return True"],
+                                    "proposal_apply_ready": True,
+                                    "max_tool_calls": 4,
+                                    "max_unauthorized_side_effects": 0,
+                                    "min_recovery_events": 0,
+                                    "max_repair_cycles": 1,
+                                    "expected_repair_stop_reason": "validation_passed",
+                                    "max_llm_latency_ms": 1000,
+                                    "max_total_tokens": 1000,
+                                    "max_duration_ms": 5000
+                                },
                             }
                         ],
                     }
@@ -60,6 +80,9 @@ class EvaluationTests(unittest.TestCase):
             self.assertEqual(cases[0].case_id, "parser")
             self.assertEqual(cases[0].repo_path, repo.resolve())
             self.assertEqual(cases[0].expectations.relevant_files, ["main.py"])
+            self.assertEqual(cases[0].expectations.expected_agent_actions, [])
+            self.assertEqual(cases[0].expectations.min_evidence_coverage, 0.5)
+            self.assertEqual(cases[0].expectations.edit_files, ["main.py"])
 
     def test_load_eval_cases_rejects_unknown_expectation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -86,6 +109,32 @@ class EvaluationTests(unittest.TestCase):
                 load_eval_cases(suite)
 
             self.assertIn("unknown expectation", str(context.exception))
+
+    def test_load_eval_cases_rejects_out_of_range_trajectory_fraction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fixture").mkdir()
+            suite = root / "suite.json"
+            suite.write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "id": "bad-fraction",
+                                "repo": "fixture",
+                                "task": "inspect parser",
+                                "expect": {"min_evidence_coverage": 1.1},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(EvalConfigurationError) as context:
+                load_eval_cases(suite)
+
+            self.assertIn("number from 0 to 1", str(context.exception))
 
     def test_evaluate_report_scores_criteria_and_real_provider_calls(self) -> None:
         case = EvalCase(
@@ -154,6 +203,169 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result.fallback_count, 1)
         self.assertEqual(result.llm_latency_ms, 17)
         self.assertEqual(result.relevant_file_recall, 1.0)
+
+    def test_evaluate_report_scores_trajectory_patch_safety_and_cost(self) -> None:
+        case = EvalCase(
+            case_id="trajectory-auth",
+            description="Trajectory quality",
+            task="fix expired token",
+            repo_path=Path("fixture").resolve(),
+            validation_commands=["python -m unittest"],
+            expectations=EvalExpectations(
+                expected_agent_actions=["read_file", "finish"],
+                required_agent_actions=["finish"],
+                required_runtime_events=["action_completed", "run_stopped"],
+                expected_stop_reason="finished",
+                min_evidence_coverage=1.0,
+                edit_files=["src/auth.py"],
+                patch_contains=["expired"],
+                proposal_apply_ready=True,
+                max_tool_calls=2,
+                max_unauthorized_side_effects=0,
+                min_recovery_events=0,
+                max_repair_cycles=0,
+                max_llm_latency_ms=20,
+                max_total_tokens=100,
+                max_duration_ms=30,
+            ),
+            source_path=Path("suite.json").resolve(),
+        )
+
+        def event(sequence, event_type, action_id="", action_kind="", observation=None):
+            payload = {}
+            if action_kind:
+                payload["action"] = {
+                    "kind": action_kind,
+                    "arguments": {},
+                    "action_id": action_id,
+                }
+            if observation:
+                payload["observation"] = observation
+            if event_type == "run_stopped":
+                payload["reason"] = "finished"
+            return {
+                "event_id": f"event-{sequence}",
+                "run_id": "eval-runtime",
+                "sequence": sequence,
+                "event_type": event_type,
+                "created_at": f"2026-08-18T00:00:0{sequence}+00:00",
+                "action_id": action_id or None,
+                "payload": payload,
+            }
+
+        events = [
+            event(1, "run_started"),
+            event(2, "decision_recorded", "read-1", "read_file"),
+            event(3, "action_authorized", "read-1", "read_file"),
+            event(4, "action_started", "read-1", "read_file"),
+            event(
+                5,
+                "action_completed",
+                "read-1",
+                "read_file",
+                {
+                    "action_id": "read-1",
+                    "action_kind": "read_file",
+                    "status": "completed",
+                    "summary": "Read authentication source.",
+                },
+            ),
+            event(6, "decision_recorded", "finish-1", "finish"),
+            event(7, "action_authorized", "finish-1", "finish"),
+            event(8, "action_started", "finish-1", "finish"),
+            event(
+                9,
+                "action_completed",
+                "finish-1",
+                "finish",
+                {
+                    "action_id": "finish-1",
+                    "action_kind": "finish",
+                    "status": "completed",
+                    "summary": "Finished.",
+                },
+            ),
+            event(10, "run_stopped"),
+        ]
+        report = WorkflowReport(
+            task=case.task,
+            repo_path=str(case.repo_path),
+            files_scanned=2,
+            patch_proposal=PatchProposal(
+                objective="Reject expired tokens",
+                files=[
+                    FileChangeProposal(
+                        "src/auth.py",
+                        "bugfix",
+                        "Check expiry",
+                        ["Reject expired tokens"],
+                        "high",
+                    )
+                ],
+                risks=[],
+                validation_suggestions=[],
+                ready_for_patch=True,
+                file_edits=[
+                    FileEditProposal(
+                        "src/auth.py",
+                        "return active and not expired\n",
+                        "Reject expired tokens.",
+                    )
+                ],
+                proposed_diff="+ return active and not expired",
+                apply_ready=True,
+            ),
+            agent_steps=[
+                AgentStep(1, "read_file", "Inspect", "src/auth.py", "Read source"),
+                AgentStep(2, "finish", "Done", "", "Finished"),
+            ],
+            agent_run_id="eval-runtime",
+            agent_events=events,
+            agent_state={
+                "plan": [
+                    {
+                        "step_id": "inspect",
+                        "status": "completed",
+                        "evidence_action_ids": ["read-1"],
+                    }
+                ],
+                "acceptance_criteria": [
+                    {
+                        "criterion_id": "analysis",
+                        "status": "passed",
+                        "evidence_action_ids": ["read-1"],
+                    }
+                ],
+            },
+            agent_stop_reason="finished",
+            agent_completion_ready=True,
+            llm_traces=[
+                LLMCallTrace(
+                    name="agent_step_1",
+                    model="fake",
+                    prompt_preview="inspect",
+                    raw_output="{}",
+                    parsed=True,
+                    latency_ms=17,
+                    input_tokens=75,
+                    output_tokens=25,
+                    total_tokens=100,
+                )
+            ],
+        )
+
+        result = evaluate_report(case, report, duration_ms=25)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.score, 100.0)
+        self.assertEqual(result.action_sequence, ["read_file", "finish"])
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertEqual(result.tool_calls, 2)
+        self.assertEqual(result.evidence_coverage, 1.0)
+        self.assertEqual(result.unauthorized_side_effects, 0)
+        self.assertEqual(result.total_tokens, 100)
+        self.assertEqual(result.token_source, "provider")
+        self.assertEqual(len(result.trajectory_fingerprint), 64)
 
     def test_run_eval_suite_continues_after_case_error_and_disables_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -236,6 +448,18 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result.pass_rate, 100.0)
         self.assertEqual(result.average_relevant_file_recall, 1.0)
         self.assertEqual(result.average_proposal_file_recall, 1.0)
+
+    def test_opt_in_llm_trajectory_suite_is_valid_but_not_in_default_cases(self) -> None:
+        llm_cases = load_eval_cases(ROOT / "evals" / "llm_cases")
+        default_cases = load_eval_cases(ROOT / "evals" / "cases")
+
+        self.assertEqual([case.case_id for case in llm_cases], ["expired-token-agent-fix"])
+        self.assertNotIn(llm_cases[0].case_id, {case.case_id for case in default_cases})
+        self.assertEqual(
+            llm_cases[0].repo_path,
+            (ROOT / "evals" / "fixtures" / "trajectory_auth_bug").resolve(),
+        )
+        self.assertEqual(llm_cases[0].expectations.max_unauthorized_side_effects, 0)
 
 
 if __name__ == "__main__":

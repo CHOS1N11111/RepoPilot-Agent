@@ -2580,10 +2580,8 @@ class RepoPilotRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        after_tool_calls = sum(
-            1
-            for event in store.list_events(task_run.run_id)
-            if event.event_type == "action_started"
+        after_tool_calls = _runtime_started_action_count(
+            store.list_events(task_run.run_id)
         )
         task_run.execution_usage = task_run.execution_usage.add(
             agent_steps=len(continued.steps),

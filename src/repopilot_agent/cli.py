@@ -263,13 +263,23 @@ def _print_eval_report(result) -> None:
         print(f"Relevant-file recall: {result.average_relevant_file_recall * 100:.2f}%")
     if result.average_proposal_file_recall is not None:
         print(f"Proposal-file recall: {result.average_proposal_file_recall * 100:.2f}%")
+    if result.average_evidence_coverage is not None:
+        print(f"Evidence coverage: {result.average_evidence_coverage * 100:.2f}%")
     print(f"Duration: {result.duration_ms} ms")
+    print(
+        "Trajectory: "
+        f"{result.total_tool_calls} tool call(s), "
+        f"{result.total_recovery_events} recovery event(s), "
+        f"{result.total_repair_cycles} repair cycle(s), "
+        f"{result.total_unauthorized_side_effects} unauthorized side effect(s)"
+    )
     print(
         "LLM: "
         f"{result.total_llm_calls} traced call(s), "
         f"{result.total_llm_failures} failure(s), "
         f"{result.total_fallbacks} fallback stage(s), "
-        f"{result.total_llm_latency_ms} ms provider latency"
+        f"{result.total_llm_latency_ms} ms provider latency, "
+        f"{result.total_tokens} observed token(s)"
     )
     print()
     print("Cases")

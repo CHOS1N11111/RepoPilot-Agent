@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +15,49 @@ from repopilot_agent.models import LLMCallTrace, PlanMetadata, ValidationResult,
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_existing_trace_table_migrates_token_usage_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.sqlite3"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE llm_traces (
+                        id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        prompt_preview TEXT NOT NULL,
+                        raw_output TEXT NOT NULL,
+                        parsed INTEGER NOT NULL,
+                        fallback_used INTEGER NOT NULL,
+                        error TEXT,
+                        latency_ms INTEGER,
+                        context_summary TEXT NOT NULL DEFAULT ''
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO llm_traces (
+                        id, run_id, name, model, prompt_preview, raw_output,
+                        parsed, fallback_used, context_summary
+                    ) VALUES ('trace-1', 'run-1', 'planner', 'legacy', '', '', 1, 0, '')
+                    """
+                )
+                conn.commit()
+
+            MemoryStore(db_path)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(llm_traces)").fetchall()
+                }
+                row = conn.execute(
+                    "SELECT input_tokens, output_tokens, total_tokens FROM llm_traces"
+                ).fetchone()
+            self.assertTrue({"input_tokens", "output_tokens", "total_tokens"}.issubset(columns))
+            self.assertEqual(row, (None, None, None))
+
     def test_list_task_runs_by_status_returns_all_matching_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = MemoryStore(Path(tmp) / "memory.sqlite3")
@@ -106,6 +151,9 @@ class MemoryStoreTests(unittest.TestCase):
                         parsed=True,
                         latency_ms=12,
                         context_summary="Budget: 9000 chars. Included parser.py.",
+                        input_tokens=90,
+                        output_tokens=10,
+                        total_tokens=100,
                     )
                 ],
             )
@@ -113,6 +161,22 @@ class MemoryStoreTests(unittest.TestCase):
                 "runtime-1",
                 "run_started",
                 payload={"task": "fix parser behavior"},
+            )
+            store.append_agent_runtime_event(
+                "runtime-1",
+                "working_state_updated",
+                payload={
+                    "working_state": {
+                        "plan": [
+                            {
+                                "step_id": "inspect",
+                                "status": "completed",
+                                "evidence_action_ids": ["read-1"],
+                            }
+                        ],
+                        "acceptance_criteria": [],
+                    }
+                },
             )
             store.append_agent_runtime_event(
                 "runtime-1",
@@ -138,8 +202,21 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertFalse(runs[0]["pinned"])
             self.assertEqual(detail["llm_traces"][0]["name"], "planner")
             self.assertIn("Budget: 9000", detail["llm_traces"][0]["context_summary"])
+            self.assertEqual(detail["llm_traces"][0]["input_tokens"], 90)
+            self.assertEqual(detail["llm_traces"][0]["output_tokens"], 10)
+            self.assertEqual(detail["llm_traces"][0]["total_tokens"], 100)
             self.assertEqual(detail["agent_events"][0]["event_type"], "run_started")
             self.assertEqual(detail["agent_pending_approval"]["checkpoint"], "approval-1")
+            self.assertEqual(detail["agent_trajectory"]["run_id"], "runtime-1")
+            self.assertEqual(detail["agent_trajectory"]["event_count"], 3)
+            self.assertEqual(
+                detail["agent_trajectory"]["metrics"]["evidence_eligible_items"],
+                1,
+            )
+            self.assertEqual(
+                detail["agent_trajectory"]["metrics"]["llm"]["token_source"],
+                "provider",
+            )
             self.assertEqual(detail["timeline"][0]["step"], "scan")
             self.assertFalse(detail["pinned"])
 
