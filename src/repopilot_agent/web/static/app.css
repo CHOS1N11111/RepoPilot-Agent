@@ -633,6 +633,13 @@ button:disabled:hover {
   white-space: pre-wrap;
 }
 
+.repository-instruction-guidance pre {
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .hidden {
   display: none;
 }

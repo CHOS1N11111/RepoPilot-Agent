@@ -86,6 +86,10 @@ class AgentContextTests(unittest.TestCase):
                 "Repair attempt 1 of 2 after fingerprint abc123. "
                 "OPENAI_API_KEY=sk-repair-context-secret"
             ),
+            repository_instructions_context=(
+                "Use unittest for this scope. "
+                "GITHUB_TOKEN=ghp_repository_instruction_secret"
+            ),
         )
 
         self.assertLessEqual(len(packet.text), AGENT_CONTEXT_BUDGET.max_chars)
@@ -94,6 +98,7 @@ class AgentContextTests(unittest.TestCase):
             [
                 "working_state",
                 "remaining_budget",
+                "repository_instructions",
                 "repair_control",
                 "acceptance_criteria",
                 "pinned_memory",
@@ -106,6 +111,7 @@ class AgentContextTests(unittest.TestCase):
         )
         self.assertIn("previous parser fix", packet.text)
         self.assertIn("Repair attempt 1 of 2", packet.text)
+        self.assertIn("Use unittest for this scope", packet.text)
         self.assertNotIn("ordinary related run", packet.text)
         self.assertIn("Implementation plan:", packet.text)
         self.assertIn("investigate_repository [in_progress]", packet.text)
@@ -117,6 +123,8 @@ class AgentContextTests(unittest.TestCase):
         self.assertIn("[REDACTED]", packet.text)
         self.assertNotIn("sk-live-secret", packet.text)
         self.assertNotIn("sk-repair-context-secret", packet.text)
+        self.assertNotIn("ghp_repository_instruction_secret", packet.text)
+        self.assertIn("repository_instructions", packet.summary)
         self.assertIn("current_diff", packet.summary)
 
     def test_total_budget_preserves_priority_and_omits_lower_sections(self) -> None:

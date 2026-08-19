@@ -118,6 +118,16 @@ Before each iterative decision, Context Manager v2 rebuilds a prioritized packet
 
 Credential-like values are redacted before prompt construction. This is defense in depth; secrets still belong only in the process environment.
 
+## Hierarchical Repository Instructions
+
+`repository_instructions.py` discovers exact-name `AGENTS.md` files only inside the resolved target repository. The repository root file applies globally. A nested file applies only to its containing directory tree. For each current target set, RepoPilot renders applicable files from the broadest scope to the deepest scope; later, deeper guidance takes precedence when repository rules conflict. Unrelated directory trees are not sent to the model.
+
+Discovery excludes VCS metadata, RepoPilot state, dependency, cache, and build directories. A symlink resolving outside the repository is rejected. Absolute paths and traversal targets are invalid. File count, file bytes, decoded characters, applied source count, issue count, and total rendered context are bounded. Non-UTF-8 and oversized files are skipped with visible reasons. Common credentials are redacted before guidance reaches a prompt, report, CLI, Web response, or saved History record.
+
+Applicable guidance is recalculated before each iterative Agent decision from initial relevant files plus paths the Agent has actually selected. The final applicable set is also supplied to planner, patch proposal, and patch review calls and recorded in each trace's context summary. Workflow reports expose bounded redacted text and provenance metadata: repository-relative path, scope, precedence, SHA-256, character counts, and truncation state. They do not expose the unbounded source body.
+
+Repository guidance is lower-authority contextual input. It may describe implementation conventions, local validation, and file-specific constraints, but it cannot grant Runtime actions, widen editable paths or command allowlists, bypass sandbox or approval checks, become completion evidence, request credentials, or override system and user instructions. RepoPilot does not inherit the parent workspace's `AGENTS.md`; a target repository remains self-contained.
+
 ## Iterative Agent Controller
 
 Every Agent call returns one versioned `AgentDecision` containing:

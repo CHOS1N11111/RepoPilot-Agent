@@ -274,7 +274,7 @@ http://127.0.0.1:8765
 The web UI is local. It gives you the full workflow in tabs:
 
 - Task Run: sandbox lifecycle, durable Agent Input, current phase, pause/resume/cancel controls, event history, and local branch delivery.
-- Summary: plan, Repository Map, proposal, validation, safety, repair feedback, and timeline.
+- Summary: plan, Repository Map, applicable Repository Instructions, proposal, validation, safety, repair feedback, and timeline.
 - Trajectory: aggregate Agent metrics, integrity, ordered actions, and a read-only event replay.
 - LLM I/O: prompt preview, output preview, trace status, and context budget.
 - GitHub: open issues, pull requests, reviews, files, comments, and checks.
@@ -299,6 +299,10 @@ Runtime events are ordered by sequence number. A normal controller cycle records
 The runtime tool registry contains `search_files`, `read_file`, `parallel_read`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `propose_patch`, `inspect_proposed_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The iterative LLM Agent receives virtual proposal tools; only durable sandboxed Task Runs also receive `ask_user` and approval-gated write actions. Real edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
 
 The Repository Map is built locally from scanned files. For Python it uses the standard AST to index classes, functions, methods, signatures, and imports. It also recognizes common JavaScript/TypeScript declarations and relative imports, links source files to tests, and ranks entries against the current task. Planner and proposal prompts receive a bounded map section, while the Summary tab shows the counts and most relevant entries.
+
+RepoPilot also discovers exact-name `AGENTS.md` files inside the selected repository. A root file applies everywhere; a nested file applies only below its containing directory. Applicable files appear in broad-to-specific order in the Summary tab and in saved History, together with scope, precedence, SHA-256, and truncation metadata. The displayed guidance is bounded and credential-redacted. The Agent refreshes the applicable set as it selects new paths, and planner, proposal, and review calls receive the final scoped set.
+
+Repository instructions guide implementation conventions and validation choices, but they are not approvals or permissions. They cannot enable a Runtime tool, widen an editable path, authorize a command, bypass the managed worktree, expose an API key, or override the task. RepoPilot ignores parent-workspace rules, unrelated nested scopes, dependency/build/cache directories, non-UTF-8 files, oversized files, and symlinks that resolve outside the repository.
 
 For approved runtime writes, prefer `apply_patch` over `edit_file`. First read the file and keep the returned `sha256`; then submit exact `old_text`/`new_text` hunks with `expected_occurrences`. RepoPilot reports `conflict` without writing if the hash is stale or a hunk is missing or ambiguous. It rejects invalid Python and JSON before writing, then reads the result back and verifies its hash. The existing Web proposal flow remains server-stored and per-file approved; the structured tool is the lower-level write contract for the unified runtime.
 

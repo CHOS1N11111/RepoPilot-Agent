@@ -133,6 +133,8 @@ class RepoPilotWorkflowTests(unittest.TestCase):
             self.assertEqual(report.agent_trajectory["schema_version"], 1)
             self.assertEqual(report.agent_trajectory["event_count"], 0)
             self.assertEqual(len(report.agent_trajectory["fingerprint"]), 64)
+            self.assertEqual(report.repository_instructions["discovered_count"], 0)
+            self.assertEqual(report.repository_instructions["files"], [])
 
     def test_run_workflow_returns_validation_feedback_for_failed_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

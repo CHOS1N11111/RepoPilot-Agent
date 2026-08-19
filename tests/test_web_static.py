@@ -290,6 +290,15 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("report.repository_map?.symbols_indexed", self.app_js)
         self.assertIn("repositoryMap.relevant_entries", self.app_js)
 
+    def test_summary_and_history_expose_repository_instruction_provenance(self) -> None:
+        self.assertIn('id="repositoryInstructionsList"', self.index_html)
+        self.assertIn("function renderRepositoryInstructions", self.app_js)
+        self.assertIn("report.repository_instructions", self.app_js)
+        self.assertIn("run.repository_instructions", self.app_js)
+        self.assertIn("Bounded redacted guidance", self.app_js)
+        self.assertIn("content_sha256", self.app_js)
+        self.assertIn("repository-instruction-guidance", self.app_css)
+
     def test_validation_aware_execution_controls_and_evidence_are_visible(self) -> None:
         for element_id in [
             "agentMaxToolCalls",

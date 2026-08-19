@@ -30,6 +30,10 @@ from .runtime import (
     render_agent_working_state,
     runtime_started_tool_call_count,
 )
+from .repository_instructions import (
+    discover_repository_instructions,
+    resolve_repository_instructions,
+)
 from .repository_map import build_repository_map, render_repository_map
 from .safety import check_file_edits
 from .scanner import scan_repository
@@ -74,6 +78,11 @@ def run_workflow(
         repository_map,
         task,
         seed_paths=[hit.path for hit in hits],
+    )
+    repository_instruction_set = discover_repository_instructions(root)
+    repository_instruction_context = resolve_repository_instructions(
+        repository_instruction_set,
+        [hit.path for hit in hits],
     )
     file_contents = {repo_file.relative_path: repo_file.content for repo_file in files}
     related_memory = _resolve_memory_context(root, task, use_memory, memory_context)
@@ -133,6 +142,7 @@ def run_workflow(
                         allow_write_actions=allow_agent_writes,
                         managed_worktree_root=managed_worktree_root,
                         resume_existing_state=resume_agent_runtime,
+                        repository_instruction_set=repository_instruction_set,
                     )
                     agent_waiting_for_write = bool(
                         agent_result.pending_approval
@@ -145,6 +155,10 @@ def run_workflow(
                         repository_map,
                         task,
                         seed_paths=[hit.path for hit in hits],
+                    )
+                    repository_instruction_context = resolve_repository_instructions(
+                        repository_instruction_set,
+                        [hit.path for hit in hits],
                     )
                 except LLMError:
                     if not allow_llm_fallback:
@@ -169,6 +183,8 @@ def run_workflow(
                         if agent_result and agent_result.working_state
                         else ""
                     ),
+                    repository_instructions_context=repository_instruction_context.text,
+                    repository_instructions_summary=repository_instruction_context.summary,
                 )
     else:
         plan = create_plan(task, hits, memory_context=related_memory)
@@ -199,6 +215,8 @@ def run_workflow(
                 file_contents=file_contents,
                 traces=llm_traces,
                 repository_map_context=repository_map_context,
+                repository_instructions_context=repository_instruction_context.text,
+                repository_instructions_summary=repository_instruction_context.summary,
             )
     else:
         patch_proposal = propose_patch(task, hits)
@@ -206,6 +224,22 @@ def run_workflow(
 
     patch_proposal = _attach_validation_plan(root, patch_proposal)
     patch_proposal = _attach_safety_check(root, task, patch_proposal)
+    repository_instruction_context = resolve_repository_instructions(
+        repository_instruction_set,
+        [
+            *[hit.path for hit in hits],
+            *(
+                [item.path for item in patch_proposal.files]
+                if patch_proposal
+                else []
+            ),
+            *(
+                [item.path for item in patch_proposal.file_edits]
+                if patch_proposal
+                else []
+            ),
+        ],
+    )
     patch_review = None
     if (
         use_llm
@@ -219,6 +253,8 @@ def run_workflow(
             llm_client=llm_client,
             allow_fallback=allow_llm_fallback,
             traces=llm_traces,
+            repository_instructions_context=repository_instruction_context.text,
+            repository_instructions_summary=repository_instruction_context.summary,
         )
 
     validation = run_validation(root, validation_commands or [])
@@ -286,6 +322,7 @@ def run_workflow(
         validation=validation,
         validation_feedback=validation_feedback,
         memory_context=related_memory,
+        repository_instructions=repository_instruction_context.to_dict(),
         repository_map=repository_map.to_summary(
             task,
             seed_paths=[hit.path for hit in hits],

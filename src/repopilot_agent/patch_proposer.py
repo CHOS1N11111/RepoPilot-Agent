@@ -54,6 +54,8 @@ def propose_patch_with_optional_llm(
     file_contents: dict[str, str] | None = None,
     traces: list[LLMCallTrace] | None = None,
     repository_map_context: str = "",
+    repository_instructions_context: str = "",
+    repository_instructions_summary: str = "",
 ) -> tuple[PatchProposal, PatchProposalMetadata]:
     if llm_client is None:
         return propose_patch(task, hits), PatchProposalMetadata(source="rules")
@@ -67,15 +69,20 @@ def propose_patch_with_optional_llm(
             file_contents or {},
             traces,
             repository_map_context=repository_map_context,
+            repository_instructions_context=repository_instructions_context,
+            repository_instructions_summary=repository_instructions_summary,
         )
     except LLMError as exc:
         if not allow_fallback:
             raise
-        context_summary = build_context_packet(
-            hits,
-            file_contents or {},
-            budget=PATCH_CONTEXT_BUDGET,
-        ).summary
+        context_summary = _merge_context_summaries(
+            build_context_packet(
+                hits,
+                file_contents or {},
+                budget=PATCH_CONTEXT_BUDGET,
+            ).summary,
+            repository_instructions_summary,
+        )
         record_llm_fallback(
             traces,
             "patch_proposal",
@@ -98,6 +105,8 @@ def _propose_llm_patch(
     file_contents: dict[str, str],
     traces: list[LLMCallTrace] | None = None,
     repository_map_context: str = "",
+    repository_instructions_context: str = "",
+    repository_instructions_summary: str = "",
 ) -> PatchProposal:
     context_packet = build_context_packet(hits, file_contents, budget=PATCH_CONTEXT_BUDGET)
     parsed = traced_llm_json_call(
@@ -114,12 +123,16 @@ def _propose_llm_patch(
                     context_packet.summary,
                     context_packet.editable_paths,
                     repository_map_context=repository_map_context,
+                    repository_instructions_context=repository_instructions_context,
                 ),
             ),
         ],
         parse_patch_proposal_json,
         traces,
-        context_summary=context_packet.summary,
+        context_summary=_merge_context_summaries(
+            context_packet.summary,
+            repository_instructions_summary,
+        ),
     )
     file_edits, safety_risks = _filter_file_edits_by_context(parsed["file_edits"], context_packet.editable_paths)
     risks = [*parsed["risks"], *safety_risks]
@@ -142,6 +155,8 @@ def review_patch_with_optional_llm(
     llm_client: LLMClient | None = None,
     allow_fallback: bool = True,
     traces: list[LLMCallTrace] | None = None,
+    repository_instructions_context: str = "",
+    repository_instructions_summary: str = "",
 ) -> PatchReview | None:
     if llm_client is None or not proposal.proposed_diff:
         return None
@@ -157,16 +172,24 @@ def review_patch_with_optional_llm(
                         task,
                         proposal.proposed_diff,
                         proposal.validation_suggestions,
+                        repository_instructions_context,
                     ),
                 ),
             ],
             lambda response: parse_patch_review_json(response, model=llm_client.model),
             traces,
+            context_summary=repository_instructions_summary,
         )
     except LLMError as exc:
         if not allow_fallback:
             raise
-        record_llm_fallback(traces, "patch_review", llm_client.model, str(exc))
+        record_llm_fallback(
+            traces,
+            "patch_review",
+            llm_client.model,
+            str(exc),
+            context_summary=repository_instructions_summary,
+        )
         return PatchReview(
             summary="LLM patch review was unavailable; rely on manual review before applying.",
             risk_level="medium",
@@ -178,6 +201,14 @@ def review_patch_with_optional_llm(
             fallback_used=True,
             error=str(exc),
         )
+
+
+def _merge_context_summaries(primary: str, repository_instructions: str) -> str:
+    return " ".join(
+        value.strip()
+        for value in (primary, repository_instructions)
+        if value and value.strip()
+    )
 
 
 def _build_objective(task: str) -> str:

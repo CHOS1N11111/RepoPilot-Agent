@@ -762,9 +762,16 @@ def parse_patch_review_json(response: str, model: str | None = None) -> PatchRev
 
 def normalize_proposal_path(path: str) -> str:
     normalized = PurePosixPath(path.replace("\\", "/"))
+    windows_path = PureWindowsPath(path)
     parts = normalized.parts
-    if normalized.is_absolute() or ".." in parts or any(part in {"", "."} for part in parts):
-        raise LLMError(f"Unsafe file edit path: {path}")
+    if (
+        normalized.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in parts
+        or any(part in {"", "."} for part in parts)
+    ):
+        raise LLMError(f"Unsafe proposal path: {path}")
     return normalized.as_posix()
 
 
@@ -779,6 +786,7 @@ def _parse_file_change(item: object) -> FileChangeProposal:
 
     if not isinstance(path, str) or not path.strip():
         raise LLMError("Each file proposal must include a non-empty path.")
+    clean_path = normalize_proposal_path(path)
     if change_type not in ALLOWED_CHANGE_TYPES:
         raise LLMError(f"Invalid change_type for {path}: {change_type}")
     if not isinstance(rationale, str) or not rationale.strip():
@@ -792,7 +800,7 @@ def _parse_file_change(item: object) -> FileChangeProposal:
     if not actions:
         raise LLMError(f"File proposal for {path} must include at least one suggested action.")
     return FileChangeProposal(
-        path=path.strip(),
+        path=clean_path,
         change_type=change_type,
         rationale=rationale.strip(),
         suggested_actions=actions,

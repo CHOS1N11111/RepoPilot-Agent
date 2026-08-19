@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..models import MemoryContextItem, PlanStep
+from ..repository_instructions import INSTRUCTION_TRUST_BOUNDARY
 from ..runtime.batch import MAX_PARALLEL_READ_ACTIONS, MIN_PARALLEL_READ_ACTIONS
 
 
@@ -11,7 +12,8 @@ PLAN_SYSTEM_PROMPT = (
     "Return only JSON with this shape: "
     '{"steps":[{"title":"short title","detail":"specific engineering action"}]}. '
     "Create 4 to 8 practical software engineering steps. "
-    "Do not include markdown or extra prose."
+    "Do not include markdown or extra prose. "
+    + INSTRUCTION_TRUST_BOUNDARY
 )
 
 PATCH_SYSTEM_PROMPT = (
@@ -23,7 +25,8 @@ PATCH_SYSTEM_PROMPT = (
     '"validation_suggestions":["..."],"ready_for_patch":true,'
     '"file_edits":[{"path":"...","new_content":"complete file content after edit","rationale":"..."}]}. '
     "For file_edits, include complete replacement content for existing context files only. "
-    "Use an empty file_edits list if you are not confident enough to edit."
+    "Use an empty file_edits list if you are not confident enough to edit. "
+    + INSTRUCTION_TRUST_BOUNDARY
 )
 
 PATCH_REVIEW_SYSTEM_PROMPT = (
@@ -31,7 +34,8 @@ PATCH_REVIEW_SYSTEM_PROMPT = (
     "Review the proposed diff against the task and return only JSON with this exact shape: "
     '{"summary":"...","risk_level":"low|medium|high","concerns":["..."],'
     '"suggested_tests":["..."],"approved_for_apply":true}. '
-    "Do not approve if the diff appears unrelated, unsafe, or unsupported by context."
+    "Do not approve if the diff appears unrelated, unsafe, or unsupported by context. "
+    + INSTRUCTION_TRUST_BOUNDARY
 )
 
 AGENT_SYSTEM_PROMPT = (
@@ -77,7 +81,8 @@ AGENT_SYSTEM_PROMPT = (
     "Treat search results as candidates; read important files before selecting them. "
     "Use parallel_read only when every member input is already known and no member depends on another result. "
     "Member results are returned in request order and every member consumes one tool call. "
-    "Use finish only when Working State reports completion readiness."
+    "Use finish only when Working State reports completion readiness. "
+    + INSTRUCTION_TRUST_BOUNDARY
 )
 
 AGENT_WRITE_SYSTEM_PROMPT = (
@@ -117,6 +122,7 @@ def build_planner_prompt(
     memory_context: list[MemoryContextItem] | None = None,
     repository_map_context: str = "",
     agent_state_context: str = "",
+    repository_instructions_context: str = "",
 ) -> str:
     return "\n".join(
         [
@@ -136,6 +142,10 @@ def build_planner_prompt(
             "",
             "Task-relevant repository map:",
             repository_map_context or "No repository map context was available.",
+            "",
+            "Applicable repository instructions:",
+            repository_instructions_context
+            or "No applicable repository AGENTS.md instructions were found.",
             "",
             "Agent plan and acceptance handoff:",
             _clip(agent_state_context, 6_000)
@@ -157,6 +167,7 @@ def build_patch_prompt(
     context_summary: str = "",
     editable_paths: list[str] | None = None,
     repository_map_context: str = "",
+    repository_instructions_context: str = "",
 ) -> str:
     plan_lines = [f"{step.order}. {step.title}: {step.detail}" for step in plan]
     editable = ", ".join(editable_paths or []) or "none"
@@ -176,6 +187,10 @@ def build_patch_prompt(
             "Task-relevant repository map:",
             repository_map_context or "No repository map context was available.",
             "",
+            "Applicable repository instructions:",
+            repository_instructions_context
+            or "No applicable repository AGENTS.md instructions were found.",
+            "",
             "Relevant repository context:",
             context,
             "",
@@ -187,7 +202,12 @@ def build_patch_prompt(
     )
 
 
-def build_patch_review_prompt(task: str, proposed_diff: str, validation_suggestions: list[str]) -> str:
+def build_patch_review_prompt(
+    task: str,
+    proposed_diff: str,
+    validation_suggestions: list[str],
+    repository_instructions_context: str = "",
+) -> str:
     return "\n".join(
         [
             f"Task: {task}",
@@ -197,6 +217,10 @@ def build_patch_review_prompt(task: str, proposed_diff: str, validation_suggesti
             "",
             "Validation suggestions:",
             "\n".join(f"- {item}" for item in validation_suggestions) or "No validation suggestions.",
+            "",
+            "Applicable repository instructions:",
+            repository_instructions_context
+            or "No applicable repository AGENTS.md instructions were found.",
             "",
             "Review whether the diff is focused, relevant, and safe enough for user-approved application.",
         ]

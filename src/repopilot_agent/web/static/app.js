@@ -1529,6 +1529,9 @@ function renderReport(report, payload) {
     report.agent_validation_results
   );
   $("repositoryMapList").innerHTML = renderRepositoryMap(report.repository_map);
+  $("repositoryInstructionsList").innerHTML = renderRepositoryInstructions(
+    report.repository_instructions
+  );
   $("acceptanceCriteriaList").innerHTML = renderAcceptanceCriteria(
     report.acceptance_criteria || [],
     report.completion_evidence
@@ -1842,6 +1845,37 @@ function renderRepositoryMap(repositoryMap) {
     </div>`;
   }).join("");
   return metrics + (entries || item("No task-specific map entries were ranked."));
+}
+
+function renderRepositoryInstructions(repositoryInstructions) {
+  const value = repositoryInstructions || {};
+  const files = Array.isArray(value.files) ? value.files : [];
+  const issues = Array.isArray(value.issues) ? value.issues : [];
+  if (!files.length && !issues.length) {
+    return item("No applicable repository AGENTS.md instructions were found.");
+  }
+  const summary = value.summary
+    ? `<div class="item"><p>${escapeHtml(value.summary)}</p></div>`
+    : "";
+  const sources = files.map((file) => {
+    const scope = file.scope === "." ? "repository-wide" : `${file.scope}/**`;
+    const hash = shortFingerprint(String(file.content_sha256 || ""));
+    return `<div class="item">
+      <div class="item-title">${escapeHtml(file.path || "AGENTS.md")}
+        <span class="tag">scope ${escapeHtml(scope)}</span>
+        <span class="tag">precedence ${escapeHtml(file.precedence || "?")}</span>
+        ${file.truncated ? '<span class="tag warn">truncated</span>' : ""}
+      </div>
+      <p><small>SHA-256 ${escapeHtml(hash)}</small></p>
+    </div>`;
+  }).join("");
+  const skipped = issues.map((issue) => `<li>${escapeHtml(issue.path || "AGENTS.md")}: ${escapeHtml(issue.reason || "skipped")}</li>`).join("");
+  const guidance = value.text
+    ? `<div class="item repository-instruction-guidance">
+        <details><summary>Bounded redacted guidance</summary><pre>${escapeHtml(value.text)}</pre></details>
+      </div>`
+    : "";
+  return `${summary}${sources}${guidance}${skipped ? `<div class="item"><strong>Skipped files</strong><ul>${skipped}</ul></div>` : ""}`;
 }
 
 function renderAcceptanceCriteria(criteria, completionEvidence) {
@@ -2621,6 +2655,8 @@ function renderHistoryDetail(run) {
       <div class="item-title">Proposal Diff</div>
       <pre>${escapeHtml(run.proposal?.proposed_diff || "No proposed diff saved.")}</pre>
     </div>
+    <h3>Repository Instructions</h3>
+    ${renderRepositoryInstructions(run.repository_instructions)}
     <div class="item">
       <div class="item-title">LLM Trace History</div>
       ${traces || "<p>No LLM traces saved.</p>"}

@@ -75,6 +75,8 @@ def create_plan_with_optional_llm(
     memory_context: list[MemoryContextItem] | None = None,
     repository_map_context: str = "",
     agent_state_context: str = "",
+    repository_instructions_context: str = "",
+    repository_instructions_summary: str = "",
 ) -> tuple[list[PlanStep], PlanMetadata]:
     if llm_client is None:
         return create_plan(task, hits, memory_context=memory_context), PlanMetadata(source="rules")
@@ -88,11 +90,16 @@ def create_plan_with_optional_llm(
             memory_context=memory_context,
             repository_map_context=repository_map_context,
             agent_state_context=agent_state_context,
+            repository_instructions_context=repository_instructions_context,
+            repository_instructions_summary=repository_instructions_summary,
         )
     except LLMError as exc:
         if not allow_fallback:
             raise
-        context_summary = build_context_packet(hits, budget=PLANNER_CONTEXT_BUDGET).summary
+        context_summary = _merge_context_summaries(
+            build_context_packet(hits, budget=PLANNER_CONTEXT_BUDGET).summary,
+            repository_instructions_summary,
+        )
         record_llm_fallback(traces, "planner", llm_client.model, str(exc), context_summary=context_summary)
         return (
             create_plan(task, hits, memory_context=memory_context),
@@ -109,6 +116,8 @@ def _create_llm_plan(
     memory_context: list[MemoryContextItem] | None = None,
     repository_map_context: str = "",
     agent_state_context: str = "",
+    repository_instructions_context: str = "",
+    repository_instructions_summary: str = "",
 ) -> list[PlanStep]:
     context_packet = build_context_packet(hits, budget=PLANNER_CONTEXT_BUDGET)
     return traced_llm_json_call(
@@ -125,10 +134,22 @@ def _create_llm_plan(
                     memory_context=memory_context,
                     repository_map_context=repository_map_context,
                     agent_state_context=agent_state_context,
+                    repository_instructions_context=repository_instructions_context,
                 ),
             ),
         ],
         parse_plan_steps_json,
         traces,
-        context_summary=context_packet.summary,
+        context_summary=_merge_context_summaries(
+            context_packet.summary,
+            repository_instructions_summary,
+        ),
+    )
+
+
+def _merge_context_summaries(primary: str, repository_instructions: str) -> str:
+    return " ".join(
+        value.strip()
+        for value in (primary, repository_instructions)
+        if value and value.strip()
     )

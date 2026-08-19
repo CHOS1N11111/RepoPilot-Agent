@@ -428,6 +428,33 @@ def _print_report(report) -> None:
         print("- No relevant files found from the current query.")
     print()
 
+    print("Repository instructions")
+    repository_instructions = report.repository_instructions or {}
+    instruction_files = repository_instructions.get("files") or []
+    if instruction_files:
+        for instruction in instruction_files:
+            scope = instruction.get("scope") or "."
+            precedence = instruction.get("precedence") or "?"
+            truncated = ", truncated" if instruction.get("truncated") else ""
+            print(
+                f"- {instruction.get('path', 'AGENTS.md')} "
+                f"[scope: {scope}, precedence: {precedence}{truncated}]"
+            )
+            if instruction.get("content_sha256"):
+                print(f"  SHA-256: {instruction['content_sha256']}")
+        if repository_instructions.get("text"):
+            print("  Bounded redacted guidance:")
+            for line in str(repository_instructions["text"]).splitlines():
+                print(f"    {line}")
+    else:
+        print("- No applicable repository AGENTS.md instructions found.")
+    for issue in repository_instructions.get("issues") or []:
+        print(
+            f"- Skipped {issue.get('path', 'AGENTS.md')}: "
+            f"{issue.get('reason', 'unknown reason')}"
+        )
+    print()
+
     print("Related memory")
     if report.memory_context:
         for memory in report.memory_context:

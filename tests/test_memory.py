@@ -58,6 +58,40 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertTrue({"input_tokens", "output_tokens", "total_tokens"}.issubset(columns))
             self.assertEqual(row, (None, None, None))
 
+    def test_existing_runs_table_migrates_repository_instructions_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.sqlite3"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE runs (
+                        id TEXT PRIMARY KEY,
+                        repo_path TEXT NOT NULL,
+                        task TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        summary TEXT NOT NULL,
+                        proposal_id TEXT,
+                        plan_source TEXT,
+                        proposal_source TEXT,
+                        review_source TEXT,
+                        applied INTEGER NOT NULL DEFAULT 0,
+                        pinned INTEGER NOT NULL DEFAULT 0,
+                        timeline_json TEXT NOT NULL,
+                        agent_runtime_run_id TEXT
+                    )
+                    """
+                )
+                conn.commit()
+
+            MemoryStore(db_path)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+                }
+            self.assertIn("repository_instructions_json", columns)
+
     def test_list_task_runs_by_status_returns_all_matching_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = MemoryStore(Path(tmp) / "memory.sqlite3")
@@ -141,6 +175,17 @@ class MemoryStoreTests(unittest.TestCase):
                     "action_kind": "apply_patch",
                     "payload_hash": "a" * 64,
                 },
+                repository_instructions={
+                    "text": "Bounded root guidance.",
+                    "files": [
+                        {
+                            "path": "AGENTS.md",
+                            "scope": ".",
+                            "precedence": 1,
+                            "content_sha256": "b" * 64,
+                        }
+                    ],
+                },
                 summary="RepoPilot analyzed the task.",
                 llm_traces=[
                     LLMCallTrace(
@@ -200,6 +245,10 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(runs[0]["task"], "fix parser behavior")
             self.assertEqual(runs[0]["agent_runtime_run_id"], "runtime-1")
             self.assertFalse(runs[0]["pinned"])
+            self.assertEqual(
+                runs[0]["repository_instructions"]["files"][0]["path"],
+                "AGENTS.md",
+            )
             self.assertEqual(detail["llm_traces"][0]["name"], "planner")
             self.assertIn("Budget: 9000", detail["llm_traces"][0]["context_summary"])
             self.assertEqual(detail["llm_traces"][0]["input_tokens"], 90)
@@ -219,6 +268,10 @@ class MemoryStoreTests(unittest.TestCase):
             )
             self.assertEqual(detail["timeline"][0]["step"], "scan")
             self.assertFalse(detail["pinned"])
+            self.assertEqual(
+                detail["repository_instructions"]["text"],
+                "Bounded root guidance.",
+            )
 
     def test_find_related_runs_returns_bounded_memory_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

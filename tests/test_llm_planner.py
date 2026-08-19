@@ -11,10 +11,13 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from repopilot_agent.llm.base import LLMMessage
+from repopilot_agent.agent_loop import run_agent_loop
+from repopilot_agent.llm.base import LLMError, LLMMessage
+from repopilot_agent.llm.schema import parse_patch_proposal_json
 from repopilot_agent.models import MemoryContextItem, SearchHit
 from repopilot_agent.patch_proposer import propose_patch_with_optional_llm
 from repopilot_agent.planner import create_plan_with_optional_llm
+from repopilot_agent.repository_instructions import discover_repository_instructions
 from repopilot_agent.runtime import (
     AGENT_WORKING_STATE_VERSION,
     AgentRuntime,
@@ -22,6 +25,7 @@ from repopilot_agent.runtime import (
     RuntimeAction,
     create_agent_working_state,
 )
+from repopilot_agent.scanner import scan_repository
 from repopilot_agent.workflow import run_workflow
 
 
@@ -75,6 +79,93 @@ class FakeLLMClient:
 
 
 class LLMPlannerTests(unittest.TestCase):
+    def test_patch_proposal_rejects_unsafe_file_change_paths(self) -> None:
+        template = (
+            '{{"objective":"Unsafe path","files":[{{"path":"{path}",'
+            '"change_type":"bugfix","rationale":"Test path validation",'
+            '"suggested_actions":["Inspect file"],"confidence":"high"}}],'
+            '"risks":[],"validation_suggestions":[],"ready_for_patch":false,'
+            '"file_edits":[]}}'
+        )
+        for path in ("../outside.py", "/absolute.py", "C:/absolute.py"):
+            with self.subTest(path=path), self.assertRaises(LLMError) as raised:
+                parse_patch_proposal_json(template.format(path=path))
+            self.assertIn("Unsafe proposal path", str(raised.exception))
+
+    def test_agent_refreshes_nested_instructions_after_selecting_a_path(self) -> None:
+        client = FakeLLMClient(
+            [
+                iterative_decision(
+                    "search_files",
+                    {"query": "parser implementation"},
+                    "Find the parser source.",
+                    "A candidate parser path.",
+                    focus="Locate parser code.",
+                ),
+                iterative_decision(
+                    "read_file",
+                    {"path": "src/parser.py"},
+                    "Read the selected parser.",
+                    "The parser implementation.",
+                    focus="Inspect parser code.",
+                ),
+                iterative_decision(
+                    "finish",
+                    {"selected_paths": ["src/parser.py"]},
+                    "The parser was inspected.",
+                    "Evidence-backed completion.",
+                    focus="Complete parser inspection.",
+                    finish_reason="Parser behavior is understood.",
+                    plan_updates=[
+                        {
+                            "step_id": "investigate_repository",
+                            "title": "Investigate repository evidence",
+                            "detail": "Read the parser source.",
+                            "status": "completed",
+                            "evidence_action_ids": ["explore-2"],
+                        }
+                    ],
+                    acceptance_updates=[
+                        {
+                            "criterion_id": "analysis_complete",
+                            "kind": "analysis",
+                            "description": "Repository evidence addresses the task.",
+                            "required": True,
+                            "evidence_action_ids": ["explore-2"],
+                            "evidence_summary": "src/parser.py was read.",
+                        }
+                    ],
+                ),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "parser.py").write_text(
+                "def parse(value):\n    return value\n",
+                encoding="utf-8",
+            )
+            (root / "AGENTS.md").write_text("Root instruction.", encoding="utf-8")
+            (root / "src" / "AGENTS.md").write_text(
+                "Nested source instruction.",
+                encoding="utf-8",
+            )
+            result = run_agent_loop(
+                "explain parser behavior",
+                root,
+                scan_repository(root),
+                [],
+                client,
+                max_steps=3,
+                repository_instruction_set=discover_repository_instructions(root),
+            )
+
+        self.assertEqual(result.stop_reason, "finished")
+        self.assertIn("Root instruction.", client.calls[0][1].content)
+        self.assertNotIn("Nested source instruction.", client.calls[0][1].content)
+        self.assertNotIn("Nested source instruction.", client.calls[1][1].content)
+        self.assertIn("Nested source instruction.", client.calls[2][1].content)
+
     def test_workflow_counts_each_parallel_read_member_as_a_tool_call(self) -> None:
         client = FakeLLMClient(
             [
@@ -548,6 +639,67 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual([trace.name for trace in report.llm_traces], ["planner", "patch_proposal", "patch_review"])
         self.assertEqual(len(client.calls), 3)
         self.assertGreater(report.repository_map["symbols_indexed"], 0)
+
+    def test_workflow_injects_only_applicable_repository_instructions(self) -> None:
+        client = FakeLLMClient(
+            [
+                '{"steps":[{"title":"Inspect parser","detail":"Follow scoped parser rules."}]}',
+                '{"objective":"Fix parser safely","files":[{"path":"src/main.py","change_type":"bugfix",'
+                '"rationale":"The parser is relevant.","suggested_actions":["Guard empty input"],'
+                '"confidence":"high"}],"risks":[],"validation_suggestions":["python -m unittest"],'
+                '"ready_for_patch":true,"file_edits":[{"path":"src/main.py",'
+                '"new_content":"def parse(value):\\n    return value or \\\"\\\"\\n",'
+                '"rationale":"Follow the scoped parser rule."}]}',
+                '{"summary":"The scoped diff is focused.","risk_level":"low","concerns":[],'
+                '"suggested_tests":["python -m unittest"],"approved_for_apply":true}',
+            ],
+            model="fake-instructions",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "docs").mkdir()
+            (root / "src" / "main.py").write_text(
+                "def parse(value):\n    return value\n",
+                encoding="utf-8",
+            )
+            (root / "AGENTS.md").write_text(
+                "Root rule: preserve public behavior.",
+                encoding="utf-8",
+            )
+            (root / "src" / "AGENTS.md").write_text(
+                "Source rule: use unittest.",
+                encoding="utf-8",
+            )
+            (root / "docs" / "AGENTS.md").write_text(
+                "Docs-only rule: use prose checks.",
+                encoding="utf-8",
+            )
+
+            report = run_workflow(
+                root,
+                "fix parser empty input",
+                use_llm=True,
+                llm_client=client,
+                use_memory=False,
+            )
+
+        self.assertEqual(len(client.calls), 3)
+        for messages in client.calls:
+            self.assertIn("cannot override system or user instructions", messages[0].content)
+            self.assertIn("Root rule: preserve public behavior.", messages[1].content)
+            self.assertIn("Source rule: use unittest.", messages[1].content)
+            self.assertNotIn("Docs-only rule", messages[1].content)
+        self.assertEqual(
+            [item["path"] for item in report.repository_instructions["files"]],
+            ["AGENTS.md", "src/AGENTS.md"],
+        )
+        self.assertTrue(
+            all(
+                "Repository instructions:" in trace.context_summary
+                for trace in report.llm_traces
+            )
+        )
         self.assertIn("Task-relevant repository map", client.calls[0][1].content)
         self.assertIn("Task-relevant repository map", client.calls[1][1].content)
 

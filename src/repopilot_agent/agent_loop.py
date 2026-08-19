@@ -6,7 +6,11 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from .agent_context import AgentContextPacket, build_agent_context_packet
+from .agent_context import (
+    AGENT_CONTEXT_BUDGET,
+    AgentContextPacket,
+    build_agent_context_packet,
+)
 from .execution import (
     AcceptanceCriterion,
     ExecutionBudget,
@@ -31,6 +35,10 @@ from .models import (
     SearchHit,
 )
 from .repair_loop import STOP_REPEATED_PROPOSAL, agent_write_proposal_fingerprint
+from .repository_instructions import (
+    RepositoryInstructionSet,
+    resolve_repository_instructions,
+)
 from .repository_map import RepositoryMap, render_repository_map
 from .runtime import (
     MAX_PARALLEL_READ_ACTIONS,
@@ -106,6 +114,7 @@ def run_agent_loop(
     prior_steps: list[AgentStep] | None = None,
     repair_context: str = "",
     blocked_repair_proposal_fingerprints: set[str] | None = None,
+    repository_instruction_set: RepositoryInstructionSet | None = None,
 ) -> AgentLoopResult:
     if max_steps <= 0:
         raise LLMError("Agent max steps must be greater than 0.")
@@ -255,6 +264,15 @@ def run_agent_loop(
                 acceptance_criteria=acceptance_criteria,
                 remaining_budget=remaining_budget,
                 repair_context=repair_context,
+                repository_instructions_context=(
+                    resolve_repository_instructions(
+                        repository_instruction_set,
+                        _merge_context_paths(selected_paths, initial_hits),
+                        max_chars=AGENT_CONTEXT_BUDGET.repository_instructions_chars,
+                    ).text
+                    if repository_instruction_set is not None
+                    else ""
+                ),
             )
             decision = _choose_next_decision(
                 task,

@@ -70,6 +70,19 @@ class CLIOutputTests(unittest.TestCase):
                 "diff": "--- a/src/main.py\n+++ b/src/main.py\n",
                 "diff_truncated": False,
             },
+            repository_instructions={
+                "text": "Root rule: use focused tests.",
+                "files": [
+                    {
+                        "path": "AGENTS.md",
+                        "scope": ".",
+                        "precedence": 1,
+                        "content_sha256": "c" * 64,
+                        "truncated": False,
+                    }
+                ],
+                "issues": [],
+            },
         )
 
         output = io.StringIO()
@@ -92,6 +105,9 @@ class CLIOutputTests(unittest.TestCase):
         self.assertIn("Payload SHA-256: " + ("a" * 64), rendered)
         self.assertIn("File scope: src/main.py", rendered)
         self.assertIn('"kind": "apply_patch"', rendered)
+        self.assertIn("Repository instructions", rendered)
+        self.assertIn("AGENTS.md [scope: ., precedence: 1]", rendered)
+        self.assertIn("Root rule: use focused tests.", rendered)
 
 
 if __name__ == "__main__":

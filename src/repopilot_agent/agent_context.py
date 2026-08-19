@@ -19,6 +19,7 @@ class AgentContextBudget:
     max_chars: int = 20_000
     working_state_chars: int = 2_400
     remaining_budget_chars: int = 700
+    repository_instructions_chars: int = 3_600
     repair_control_chars: int = 1_000
     acceptance_criteria_chars: int = 1_400
     pinned_memory_chars: int = 1_800
@@ -70,6 +71,7 @@ def build_agent_context_packet(
     acceptance_criteria: list[AcceptanceCriterion] | None = None,
     remaining_budget: dict[str, int] | None = None,
     repair_context: str = "",
+    repository_instructions_context: str = "",
     budget: AgentContextBudget = AGENT_CONTEXT_BUDGET,
 ) -> AgentContextPacket:
     """Build the bounded context packet supplied to one Agent decision call."""
@@ -93,58 +95,66 @@ def build_agent_context_packet(
             _render_remaining_budget(remaining_budget),
         ),
         (
+            "repository_instructions",
+            "Repository Instructions",
+            3,
+            budget.repository_instructions_chars,
+            repository_instructions_context
+            or "No applicable repository AGENTS.md instructions were found.",
+        ),
+        (
             "repair_control",
             "Repair Control",
-            3,
+            4,
             budget.repair_control_chars,
             repair_context or "No post-validation repair is active.",
         ),
         (
             "acceptance_criteria",
             "Acceptance Criteria",
-            4,
+            5,
             budget.acceptance_criteria_chars,
             _render_acceptance_criteria(acceptance_criteria),
         ),
         (
             "pinned_memory",
             "Pinned Memory",
-            5,
+            6,
             budget.pinned_memory_chars,
             _render_pinned_memory(memory_context),
         ),
         (
             "repository_map",
             "Task-Relevant Repository Map",
-            6,
+            7,
             budget.repository_map_chars,
             repository_map_context or "No repository map context is available.",
         ),
         (
             "current_diff",
             "Current Git Diff",
-            7,
+            8,
             budget.current_diff_chars,
             current_diff or "No current staged or unstaged Git diff is available.",
         ),
         (
             "recent_observations",
             "Recent Detailed Observations",
-            8,
+            9,
             budget.recent_observations_chars,
             _render_recent_observations(recent_steps),
         ),
         (
             "older_evidence",
             "Summarized Older Evidence",
-            9,
+            10,
             budget.older_evidence_chars,
             _render_older_evidence(older_steps),
         ),
         (
             "initial_context",
             "Initial Ranked Repository Context",
-            10,
+            11,
             budget.initial_context_chars,
             _render_initial_context(initial_hits),
         ),

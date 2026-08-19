@@ -461,6 +461,7 @@ class WorkflowReport:
     validation: list[ValidationResult] = field(default_factory=list)
     validation_feedback: ValidationFeedback | None = None
     memory_context: list[MemoryContextItem] = field(default_factory=list)
+    repository_instructions: dict[str, Any] = field(default_factory=dict)
     repository_map: dict[str, Any] = field(default_factory=dict)
     acceptance_criteria: list[dict[str, Any]] = field(default_factory=list)
     execution_budget: dict[str, Any] = field(default_factory=dict)

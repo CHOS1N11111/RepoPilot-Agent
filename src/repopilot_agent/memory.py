@@ -108,8 +108,8 @@ class MemoryStore:
                 INSERT INTO runs (
                     id, repo_path, task, mode, created_at, summary, proposal_id,
                     plan_source, proposal_source, review_source, applied, pinned, timeline_json,
-                    agent_runtime_run_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    agent_runtime_run_id, repository_instructions_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -126,6 +126,7 @@ class MemoryStore:
                     0,
                     _json(timeline or []),
                     getattr(report, "agent_run_id", None),
+                    _json(getattr(report, "repository_instructions", {}) or {}),
                 ),
             )
             if proposal:
@@ -528,7 +529,7 @@ class MemoryStore:
                 """
                 SELECT id, repo_path, task, mode, created_at, summary, proposal_id,
                        plan_source, proposal_source, review_source, applied, pinned, timeline_json,
-                       agent_runtime_run_id
+                       agent_runtime_run_id, repository_instructions_json
                 FROM runs
                 ORDER BY created_at DESC
                 LIMIT ?
@@ -543,7 +544,7 @@ class MemoryStore:
                 """
                 SELECT id, repo_path, task, mode, created_at, summary, proposal_id,
                        plan_source, proposal_source, review_source, applied, pinned, timeline_json,
-                       agent_runtime_run_id
+                       agent_runtime_run_id, repository_instructions_json
                 FROM runs
                 WHERE id = ?
                 """,
@@ -732,7 +733,8 @@ class MemoryStore:
                     applied INTEGER NOT NULL DEFAULT 0,
                     pinned INTEGER NOT NULL DEFAULT 0,
                     timeline_json TEXT NOT NULL,
-                    agent_runtime_run_id TEXT
+                    agent_runtime_run_id TEXT,
+                    repository_instructions_json TEXT NOT NULL DEFAULT '{}'
                 );
 
                 CREATE TABLE IF NOT EXISTS proposals (
@@ -824,6 +826,12 @@ class MemoryStore:
             _ensure_column(conn, "llm_traces", "total_tokens", "INTEGER")
             _ensure_column(conn, "runs", "pinned", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(conn, "runs", "agent_runtime_run_id", "TEXT")
+            _ensure_column(
+                conn,
+                "runs",
+                "repository_instructions_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
 
     @contextmanager
     def _connect(self):
@@ -851,6 +859,7 @@ def _row_to_run(row: sqlite3.Row) -> dict[str, Any]:
         "applied": bool(row["applied"]),
         "pinned": bool(row["pinned"]),
         "agent_runtime_run_id": row["agent_runtime_run_id"],
+        "repository_instructions": _loads(row["repository_instructions_json"], {}),
         "timeline": _loads(row["timeline_json"], []),
     }
 
