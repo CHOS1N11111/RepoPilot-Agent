@@ -8,151 +8,198 @@
   </head>
   <body>
     <header class="app-header">
-      <div>
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">RP</span>
         <h1>RepoPilot Agent</h1>
-        <p>Local coding workflow, LLM planning, GitHub awareness, and diff review.</p>
       </div>
-      <button id="refreshAll" class="secondary">Refresh</button>
+      <button id="refreshAll" class="secondary icon-button" type="button" title="Refresh current view" aria-label="Refresh current view">&#8635;</button>
     </header>
 
     <main class="layout">
       <section class="panel control-panel">
-        <h2>Run Workflow</h2>
-        <label>
-          Repository source
-          <select id="repoSource">
-            <option value="local">Local path</option>
-            <option value="github">GitHub URL</option>
-            <option value="auto">Auto detect</option>
-          </select>
-        </label>
-        <label>
-          Repository path
-          <input id="repoPath" value="." />
-        </label>
+        <div class="panel-heading">
+          <span class="section-label">New run</span>
+          <h2>Repository task</h2>
+        </div>
+        <div class="repository-row">
+          <label class="repository-source-field">
+            Source
+            <select id="repoSource">
+              <option value="local">Local</option>
+              <option value="github">GitHub</option>
+              <option value="auto">Auto</option>
+            </select>
+          </label>
+          <label>
+            Repository
+            <input id="repoPath" value="." />
+          </label>
+        </div>
         <label id="githubUrlWrap" class="hidden">
-          GitHub repository URL
+          GitHub URL
           <input id="githubUrl" placeholder="https://github.com/owner/repo" />
         </label>
         <label>
-          Branch
-          <input id="repoBranch" placeholder="default branch" />
-        </label>
-        <label>
-          Worktree sandbox
-          <select id="sandboxSelect">
-            <option value="">No managed sandbox</option>
-          </select>
-        </label>
-        <div class="toolbar">
-          <button id="syncRepository" class="secondary">Sync Repository</button>
-          <button id="createSandbox" class="secondary">Create Sandbox</button>
-          <button id="refreshSandboxes" class="secondary">Refresh Sandboxes</button>
-          <button id="removeSandbox" class="secondary danger-button" disabled>Remove Sandbox</button>
-        </div>
-        <p id="repoSourceLine" class="status-line">Using local repository path.</p>
-        <p id="sandboxLine" class="status-line">No managed worktree sandbox selected.</p>
-        <label>
           Task
-          <textarea id="taskInput" rows="7">fix search relevance for login behavior</textarea>
+          <textarea id="taskInput" rows="6" placeholder="Describe a repository task"></textarea>
         </label>
-        <label>
-          Validation command
-          <input id="validationInput" value="python -m unittest discover -s tests" />
-        </label>
-
-        <div class="switch-row">
+        <div class="run-mode-field">
+          <span class="field-label">Run mode</span>
+          <div class="segmented-control" role="group" aria-label="Run mode">
+            <button class="mode-option active" type="button" data-run-mode="workflow" aria-pressed="true">Analyze</button>
+            <button class="mode-option" type="button" data-run-mode="proposal" aria-pressed="false">Proposal</button>
+            <button class="mode-option" type="button" data-run-mode="task" aria-pressed="false">Sandbox</button>
+          </div>
+        </div>
+        <div class="core-options">
           <label class="checkbox">
             <input id="useLlm" type="checkbox" />
             Use LLM
           </label>
-          <label class="checkbox">
-            <input id="disableFallback" type="checkbox" />
-            Disable fallback
-          </label>
-          <label class="checkbox">
-            <input id="disableMemory" type="checkbox" />
-            Disable memory
-          </label>
-          <label class="checkbox">
-            <input id="iterativeAgent" type="checkbox" />
-            Iterative agent
-          </label>
-          <label class="checkbox">
-            <input id="autoRepair" type="checkbox" checked />
-            Auto-generate repairs
-          </label>
+          <span id="runModeStatus" class="status-chip">Analysis</span>
         </div>
+        <button id="runPrimary" class="primary-action" type="button">Run analysis</button>
+        <p id="statusLine" class="status-line primary-status" role="status">Ready.</p>
 
-        <label>
-          Model
-          <select id="modelSelect">
-            <option value="gpt-5.3">gpt-5.3</option>
-            <option value="gpt-5.4">gpt-5.4</option>
-            <option value="gpt-5.5">gpt-5.5</option>
-            <option value="custom">Custom</option>
-          </select>
-        </label>
-        <label id="customModelWrap" class="hidden">
-          Custom model
-          <input id="customModel" placeholder="provider-model-name" />
-        </label>
-        <label>
-          API endpoint URL
-          <input id="baseUrl" placeholder="https://api.openai.com/v1/chat/completions" />
-        </label>
-        <label>
-          API key
-          <input id="apiKey" type="password" placeholder="Only sent to this local server for this run" />
-        </label>
-        <label>
-          LLM timeout seconds
-          <input id="timeoutSeconds" type="number" min="1" step="1" value="120" />
-        </label>
-        <label>
-          Agent max steps
-          <input id="agentMaxSteps" type="number" min="1" max="12" step="1" value="6" />
-        </label>
-        <label>
-          Agent max tool calls
-          <input id="agentMaxToolCalls" type="number" min="1" max="24" step="1" value="12" />
-        </label>
-        <label>
-          Validation command limit
-          <input id="maxValidationCommands" type="number" min="1" max="16" step="1" value="4" />
-        </label>
-        <label>
-          Execution time budget (seconds)
-          <input id="executionTimeoutSeconds" type="number" min="1" max="3600" step="1" value="600" />
-        </label>
-        <label>
-          Repair max attempts
-          <input id="repairMaxAttempts" type="number" min="0" max="5" step="1" value="2" />
-        </label>
-        <div class="button-row">
-          <button id="testLlm" class="secondary" type="button">Test LLM Connection</button>
-        </div>
-        <p id="llmTestLine" class="status-line">LLM connection not tested.</p>
+        <div class="settings-list">
+          <details id="repositorySettings" class="settings-section">
+            <summary>
+              <span>Repository options</span>
+              <small>Branch and worktrees</small>
+            </summary>
+            <div class="settings-body">
+              <label>
+                Branch
+                <input id="repoBranch" placeholder="default branch" />
+              </label>
+              <label>
+                Worktree sandbox
+                <select id="sandboxSelect">
+                  <option value="">No managed sandbox</option>
+                </select>
+              </label>
+              <div class="toolbar compact-actions">
+                <button id="syncRepository" class="secondary" type="button">Sync</button>
+                <button id="createSandbox" class="secondary" type="button">New Worktree</button>
+                <button id="refreshSandboxes" class="secondary" type="button">Refresh</button>
+                <button id="removeSandbox" class="secondary danger-button" type="button" disabled>Remove</button>
+              </div>
+              <p id="repoSourceLine" class="status-line">Using local repository path.</p>
+              <p id="sandboxLine" class="status-line">No managed worktree sandbox selected.</p>
+            </div>
+          </details>
 
-        <div class="button-row">
-          <button id="startTaskRun">Start Sandboxed Task</button>
-          <button id="runWorkflow">Run RepoPilot</button>
-          <button id="generateProposal" class="secondary">Generate Proposal</button>
+          <details id="llmSettings" class="settings-section">
+            <summary>
+              <span>LLM &amp; Agent</span>
+              <small id="llmSettingsStatus">Rules only</small>
+            </summary>
+            <div class="settings-body">
+              <div class="switch-row">
+                <label class="checkbox">
+                  <input id="disableFallback" type="checkbox" />
+                  Disable fallback
+                </label>
+                <label class="checkbox">
+                  <input id="disableMemory" type="checkbox" />
+                  Disable memory
+                </label>
+                <label class="checkbox">
+                  <input id="iterativeAgent" type="checkbox" />
+                  Iterative agent
+                </label>
+                <label class="checkbox">
+                  <input id="autoRepair" type="checkbox" checked />
+                  Auto repairs
+                </label>
+              </div>
+              <label>
+                Model
+                <select id="modelSelect">
+                  <option value="gpt-5.3">gpt-5.3</option>
+                  <option value="gpt-5.4">gpt-5.4</option>
+                  <option value="gpt-5.5">gpt-5.5</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label id="customModelWrap" class="hidden">
+                Custom model
+                <input id="customModel" placeholder="provider-model-name" />
+              </label>
+              <label>
+                API endpoint URL
+                <input id="baseUrl" placeholder="https://api.openai.com/v1/chat/completions" />
+              </label>
+              <label>
+                API key
+                <input id="apiKey" type="password" placeholder="Request-scoped" />
+              </label>
+              <div class="settings-grid">
+                <label>
+                  LLM timeout
+                  <input id="timeoutSeconds" type="number" min="1" step="1" value="120" />
+                </label>
+                <label>
+                  Agent steps
+                  <input id="agentMaxSteps" type="number" min="1" max="12" step="1" value="6" />
+                </label>
+                <label>
+                  Tool calls
+                  <input id="agentMaxToolCalls" type="number" min="1" max="24" step="1" value="12" />
+                </label>
+              </div>
+              <button id="testLlm" class="secondary" type="button">Test connection</button>
+              <p id="llmTestLine" class="status-line">LLM connection not tested.</p>
+            </div>
+          </details>
+
+          <details id="validationSettings" class="settings-section">
+            <summary>
+              <span>Validation &amp; repair</span>
+              <small>Command and limits</small>
+            </summary>
+            <div class="settings-body">
+              <label>
+                Validation command
+                <input id="validationInput" placeholder="python -m unittest discover -s tests" />
+              </label>
+              <div class="settings-grid">
+                <label>
+                  Command limit
+                  <input id="maxValidationCommands" type="number" min="1" max="16" step="1" value="4" />
+                </label>
+                <label>
+                  Time budget
+                  <input id="executionTimeoutSeconds" type="number" min="1" max="3600" step="1" value="600" />
+                </label>
+                <label>
+                  Repair attempts
+                  <input id="repairMaxAttempts" type="number" min="0" max="5" step="1" value="2" />
+                </label>
+              </div>
+            </div>
+          </details>
         </div>
-        <p id="statusLine" class="status-line">Ready.</p>
       </section>
 
       <section class="panel output-panel">
-        <div class="tabs">
-          <button class="tab" data-tab="taskRun">Task Run</button>
-          <button class="tab active" data-tab="summary">Summary</button>
-          <button class="tab" data-tab="trajectory">Trajectory</button>
-          <button class="tab" data-tab="llm">LLM I/O</button>
-          <button class="tab" data-tab="github">GitHub</button>
-          <button class="tab" data-tab="diff">Diff</button>
-          <button class="tab" data-tab="delivery">Delivery</button>
-          <button class="tab" data-tab="history">History</button>
-          <button class="tab" data-tab="json">JSON</button>
+        <div class="workspace-nav">
+          <div class="tabs" role="tablist" aria-label="Primary workspace views">
+            <button class="tab primary-tab active" type="button" role="tab" data-tab="summary" aria-controls="summaryTab" aria-selected="true">Summary</button>
+            <button class="tab primary-tab" type="button" role="tab" data-tab="taskRun" aria-controls="taskRunTab" aria-selected="false">Task Run</button>
+            <button class="tab primary-tab" type="button" role="tab" data-tab="diff" aria-controls="diffTab" aria-selected="false">Diff</button>
+          </div>
+          <details id="viewMenu" class="view-menu">
+            <summary><span>More</span><small id="secondaryViewLabel"></small></summary>
+            <div class="view-menu-popover">
+              <button class="tab secondary-tab" type="button" data-tab="trajectory">Trajectory</button>
+              <button class="tab secondary-tab" type="button" data-tab="llm">LLM I/O</button>
+              <button class="tab secondary-tab" type="button" data-tab="github">GitHub</button>
+              <button class="tab secondary-tab" type="button" data-tab="delivery">Delivery</button>
+              <button class="tab secondary-tab" type="button" data-tab="history">History</button>
+              <button class="tab secondary-tab" type="button" data-tab="json">JSON</button>
+            </div>
+          </details>
         </div>
 
         <section id="taskRunTab" class="tab-content">
@@ -171,6 +218,7 @@
             <button id="checkTaskRunReadiness" class="secondary" disabled>Check Readiness</button>
             <button id="resumeTaskRun" class="secondary" disabled>Resume</button>
             <button id="cancelTaskRun" class="secondary danger-button" disabled>Cancel</button>
+            <button id="openTaskAttention" class="secondary attention-button" type="button" hidden>Review action</button>
           </div>
           <p id="taskRunResumeLine" class="status-line"></p>
           <section id="taskRunInput" class="task-run-input" hidden>
@@ -183,92 +231,155 @@
               <span id="taskRunInputStatus" class="status-line"></span>
             </div>
           </section>
-          <h2>Recovery Readiness</h2>
-          <div id="taskRunRecoveryReadiness" class="timeline"></div>
-          <h2>Saved Execution Profile</h2>
-          <div id="taskRunExecutionProfile" class="timeline"></div>
-          <h2>Sandbox</h2>
-          <pre id="taskRunSandbox" class="code-block compact">Not created</pre>
-          <h2>Latest Checkpoint</h2>
-          <div id="taskRunLatestCheckpoint" class="stack"></div>
-          <h2>Checkpoint History</h2>
-          <div id="taskRunCheckpoints" class="timeline"></div>
-          <h2>Run Events</h2>
-          <div id="taskRunEvents" class="timeline"></div>
-          <h2>Acceptance Criteria</h2>
-          <div id="taskRunCriteria" class="stack"></div>
-          <h2>Execution Budget</h2>
-          <div id="taskRunBudget" class="stack"></div>
-          <h2>Completion Evidence</h2>
-          <div id="taskRunEvidence" class="stack"></div>
-          <h2>Repair Loop</h2>
-          <div id="taskRunRepairLoop" class="stack"></div>
-          <h2>Local Feature Branch</h2>
-          <div class="task-run-delivery">
-            <input id="taskRunBranch" placeholder="feature/repopilot-task" />
-            <button id="createTaskBranch" class="secondary" disabled>Create Branch</button>
+          <div class="result-disclosures">
+            <details id="taskRunRecoveryDetails" class="result-disclosure">
+              <summary>Recovery &amp; environment</summary>
+              <div class="disclosure-body">
+                <h2>Recovery Readiness</h2>
+                <div id="taskRunRecoveryReadiness" class="timeline"></div>
+                <h2>Saved Execution Profile</h2>
+                <div id="taskRunExecutionProfile" class="timeline"></div>
+                <h2>Sandbox</h2>
+                <pre id="taskRunSandbox" class="code-block compact">Not created</pre>
+              </div>
+            </details>
+            <details id="taskRunActivityDetails" class="result-disclosure">
+              <summary>Checkpoints &amp; events</summary>
+              <div class="disclosure-body">
+                <h2>Latest Checkpoint</h2>
+                <div id="taskRunLatestCheckpoint" class="stack"></div>
+                <h2>Checkpoint History</h2>
+                <div id="taskRunCheckpoints" class="timeline"></div>
+                <h2>Run Events</h2>
+                <div id="taskRunEvents" class="timeline"></div>
+              </div>
+            </details>
+            <details id="taskRunEvidenceDetails" class="result-disclosure">
+              <summary>Evidence &amp; repair</summary>
+              <div class="disclosure-body">
+                <h2>Acceptance Criteria</h2>
+                <div id="taskRunCriteria" class="stack"></div>
+                <h2>Execution Budget</h2>
+                <div id="taskRunBudget" class="stack"></div>
+                <h2>Completion Evidence</h2>
+                <div id="taskRunEvidence" class="stack"></div>
+                <h2>Repair Loop</h2>
+                <div id="taskRunRepairLoop" class="stack"></div>
+              </div>
+            </details>
+            <details id="taskRunDeliveryDetails" class="result-disclosure">
+              <summary>Local delivery</summary>
+              <div class="disclosure-body">
+                <h2>Feature Branch</h2>
+                <div class="task-run-delivery">
+                  <input id="taskRunBranch" placeholder="feature/repopilot-task" />
+                  <button id="createTaskBranch" class="secondary" disabled>Create Branch</button>
+                </div>
+                <p id="taskRunDelivery" class="status-line">No delivery branch created.</p>
+              </div>
+            </details>
           </div>
-          <p id="taskRunDelivery" class="status-line">No delivery branch created.</p>
         </section>
 
         <section id="summaryTab" class="tab-content active">
-          <div class="metrics">
-            <div><span id="filesScanned">0</span><small>files scanned</small></div>
-            <div><span id="symbolsIndexed">0</span><small>symbols indexed</small></div>
-            <div><span id="planSource">rules</span><small>plan source</small></div>
-            <div><span id="proposalSource">rules</span><small>proposal source</small></div>
+          <div id="summaryEmpty" class="empty-state">
+            <strong>No run selected</strong>
+            <span>Results will appear here.</span>
           </div>
-          <h2>Timeline</h2>
-          <div id="timelineList" class="timeline"></div>
-          <h2>Agent Steps</h2>
-          <div id="agentStepList" class="stack"></div>
-          <h2>Agent Working State</h2>
-          <div id="agentWorkingState" class="timeline"></div>
-          <h2>Runtime Events</h2>
-          <div id="runtimeEventList" class="timeline"></div>
-          <h2>Pending Runtime Approval</h2>
-          <div id="runtimeApproval"></div>
-          <div class="toolbar">
-            <button id="approveRuntimeWrite" class="secondary" disabled>Approve Exact Action</button>
-            <button id="rejectRuntimeWrite" class="secondary danger-button" disabled>Reject</button>
-            <span id="runtimeApprovalStatus" class="status-line">No managed Runtime action is waiting.</span>
-          </div>
-          <h2>Sandbox Write Result</h2>
-          <div id="runtimeWriteResult" class="stack"></div>
-          <h2>Agent Validation Cycle</h2>
-          <div id="agentValidationCycle" class="stack"></div>
-          <h2>Repository Map</h2>
-          <div id="repositoryMapList" class="stack"></div>
-          <h2>Repository Instructions</h2>
-          <div id="repositoryInstructionsList" class="stack"></div>
-          <h2>Acceptance Criteria</h2>
-          <div id="acceptanceCriteriaList" class="stack"></div>
-          <h2>Execution Budget</h2>
-          <div id="executionBudgetList" class="stack"></div>
-          <h2>Completion Evidence</h2>
-          <div id="completionEvidenceList" class="stack"></div>
-          <h2>Plan</h2>
-          <ol id="planList" class="stack"></ol>
-          <h2>Proposed Changes</h2>
-          <div id="proposalList" class="stack"></div>
-          <h2>Proposal Preview</h2>
-          <pre id="proposalOutput" class="code-block compact"></pre>
-          <div class="toolbar">
-            <button id="applyProposal" class="secondary" disabled>Apply Proposal</button>
-            <button id="revertProposal" class="secondary danger-button" disabled>Revert Applied Proposal</button>
-            <span id="approvalStatus" class="status-line">No apply-ready file edits.</span>
-            <span id="rollbackStatus" class="status-line">No rollback snapshot available.</span>
-          </div>
-          <h2>Proposed Diff</h2>
-          <pre id="proposedDiffOutput" class="diff-block compact"></pre>
-          <h2>Validation</h2>
-          <div id="validationList" class="stack"></div>
-          <h2>Validation Feedback</h2>
-          <div id="validationFeedbackList" class="stack"></div>
-          <h2>Repair Loop</h2>
-          <div id="repairLoopList" class="stack"></div>
-          <div class="toolbar">
-            <button id="generateRepairProposal" class="secondary" disabled>Generate Repair Proposal</button>
+          <div id="summaryResults" class="summary-results hidden">
+            <div id="runSummary" class="run-summary"></div>
+            <div class="metrics summary-metrics">
+              <div><span id="filesScanned">0</span><small>files</small></div>
+              <div><span id="symbolsIndexed">0</span><small>symbols</small></div>
+              <div><span id="planSource">rules</span><small>plan</small></div>
+              <div><span id="proposalSource">rules</span><small>proposal</small></div>
+            </div>
+
+            <section class="primary-result-section">
+              <h2>Plan</h2>
+              <ol id="planList" class="stack"></ol>
+            </section>
+            <section class="primary-result-section">
+              <h2>Proposed Changes</h2>
+              <div id="proposalList" class="stack"></div>
+              <div class="toolbar approval-toolbar">
+                <button id="applyProposal" class="secondary" disabled>Apply Proposal</button>
+                <button id="revertProposal" class="secondary danger-button" disabled>Revert</button>
+                <span id="approvalStatus" class="status-line">No apply-ready file edits.</span>
+                <span id="rollbackStatus" class="status-line">No rollback snapshot available.</span>
+              </div>
+            </section>
+            <section class="primary-result-section">
+              <h2>Proposed Diff</h2>
+              <pre id="proposedDiffOutput" class="diff-block compact"></pre>
+            </section>
+            <section class="primary-result-section">
+              <h2>Validation</h2>
+              <div id="validationList" class="stack"></div>
+            </section>
+
+            <div class="result-disclosures">
+              <details id="runtimeDetails" class="result-disclosure">
+                <summary>Runtime actions</summary>
+                <div class="disclosure-body">
+                  <h2>Pending Approval</h2>
+                  <div id="runtimeApproval"></div>
+                  <div class="toolbar">
+                    <button id="approveRuntimeWrite" class="secondary" disabled>Approve Exact Action</button>
+                    <button id="rejectRuntimeWrite" class="secondary danger-button" disabled>Reject</button>
+                    <span id="runtimeApprovalStatus" class="status-line">No managed Runtime action is waiting.</span>
+                  </div>
+                  <h2>Sandbox Write Result</h2>
+                  <div id="runtimeWriteResult" class="stack"></div>
+                  <h2>Agent Validation Cycle</h2>
+                  <div id="agentValidationCycle" class="stack"></div>
+                </div>
+              </details>
+              <details id="agentDetails" class="result-disclosure">
+                <summary>Agent activity</summary>
+                <div class="disclosure-body">
+                  <h2>Timeline</h2>
+                  <div id="timelineList" class="timeline"></div>
+                  <h2>Agent Steps</h2>
+                  <div id="agentStepList" class="stack"></div>
+                  <h2>Working State</h2>
+                  <div id="agentWorkingState" class="timeline"></div>
+                  <h2>Runtime Events</h2>
+                  <div id="runtimeEventList" class="timeline"></div>
+                </div>
+              </details>
+              <details id="contextDetails" class="result-disclosure">
+                <summary>Context &amp; evidence</summary>
+                <div class="disclosure-body">
+                  <h2>Repository Map</h2>
+                  <div id="repositoryMapList" class="stack"></div>
+                  <h2>Repository Instructions</h2>
+                  <div id="repositoryInstructionsList" class="stack"></div>
+                  <h2>Acceptance Criteria</h2>
+                  <div id="acceptanceCriteriaList" class="stack"></div>
+                  <h2>Execution Budget</h2>
+                  <div id="executionBudgetList" class="stack"></div>
+                  <h2>Completion Evidence</h2>
+                  <div id="completionEvidenceList" class="stack"></div>
+                </div>
+              </details>
+              <details id="proposalDetails" class="result-disclosure">
+                <summary>Raw proposal</summary>
+                <div class="disclosure-body">
+                  <pre id="proposalOutput" class="code-block compact"></pre>
+                </div>
+              </details>
+              <details id="repairDetails" class="result-disclosure">
+                <summary>Validation feedback &amp; repair</summary>
+                <div class="disclosure-body">
+                  <div id="validationFeedbackList" class="stack"></div>
+                  <div id="repairLoopList" class="stack"></div>
+                  <div class="toolbar">
+                    <button id="generateRepairProposal" class="secondary" disabled>Generate Repair Proposal</button>
+                  </div>
+                </div>
+              </details>
+            </div>
           </div>
         </section>
 

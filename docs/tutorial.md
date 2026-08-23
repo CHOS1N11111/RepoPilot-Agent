@@ -271,24 +271,23 @@ Open:
 http://127.0.0.1:8765
 ```
 
-The web UI is local. It gives you the full workflow in tabs:
+The initial workspace keeps repository input, task input, run mode, LLM enablement, one primary action, and current status visible. Choose `Analyze`, `Proposal`, or `Sandbox`; the primary button runs that selected workflow. Branch and worktree controls are under `Repository options`, provider and Agent controls are under `LLM & Agent`, and validation budgets are under `Validation & repair`.
 
-- Task Run: sandbox lifecycle, durable Agent Input, current phase, pause/resume/cancel controls, event history, and local branch delivery.
-- Summary: plan, Repository Map, applicable Repository Instructions, proposal, validation, safety, repair feedback, and timeline.
-- Trajectory: aggregate Agent metrics, integrity, ordered actions, and a read-only event replay.
-- LLM I/O: prompt preview, output preview, trace status, and context budget.
-- GitHub: open issues, pull requests, reviews, files, comments, and checks.
-- Diff: current working tree diff or staged diff.
-- Delivery: PR readiness, suggested commit message, pull request draft, and explicit PR creation.
-- History: saved local runs, memory reuse, pinning, deletion, and clearing.
+Three views remain in the primary navigation:
 
-Before running an LLM workflow from the web UI, fill in the model, API endpoint URL, API key, and timeout fields or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test LLM Connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
+- Summary: run summary, key metrics, plan, proposed changes, diff, validation, and approval actions. Agent activity, context and evidence, Runtime details, raw proposal data, and repair feedback are collapsed until opened or needed.
+- Task Run: sandbox phase, current status, interruption controls, durable Agent Input, and pause/resume/cancel controls. Recovery, checkpoints, evidence, repair, and local delivery use secondary disclosures.
+- Diff: current working tree or staged diff.
 
-Enable `Iterative agent` when you want RepoPilot to make several smaller non-writing LLM calls before the main plan/proposal calls. The Summary tab shows each typed decision in `Agent Steps`, including a read-tool count badge for parallel batches, the latest `Agent Working State`, virtual proposal revisions and cumulative diff, and typed `Runtime Events`; the LLM I/O Trace tab shows each `agent_step_N` prompt and raw output.
+Open `More` for Trajectory, LLM I/O, GitHub, Delivery, History, and JSON. These secondary views load their repository data when opened instead of loading every hidden panel at startup.
 
-Open Trajectory for the compact run-level view. The counters show durable events, actual tool calls, evidence coverage, observed tokens, recovery events, and the terminal stop reason. Integrity identifies sequence gaps or duplicates and shows the stable trajectory fingerprint. Use the first, previous, play/pause, next, latest, or range controls to inspect bounded redacted frames. Playback changes only the local browser cursor; it cannot execute, resume, approve, or replay an Agent action. Provider token counts are shown when available, while estimated or mixed totals are labeled by their source.
+Before running an LLM workflow from the web UI, enable `Use LLM` and open `LLM & Agent`. Fill in the model, API endpoint URL, API key, and timeout or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
-Open an `agent_step_N` entry in LLM I/O and inspect `Context Budget`. A summary such as `repository_map 2500/2500 chars (truncated)` means that section reached its own limit; `omitted` means the total packet was already full when the lower-priority section was reached; `redacted` means at least one sensitive value was replaced before the request.
+Enable `Iterative agent` under `LLM & Agent` when you want RepoPilot to make several smaller non-writing LLM calls before the main plan/proposal calls. Open `Summary > Agent activity` for each typed decision, parallel read counts, Working State, and Runtime events. Open `More > LLM I/O > Trace` for each `agent_step_N` prompt and raw output.
+
+Open `More > Trajectory` for the compact run-level view. The counters show durable events, actual tool calls, evidence coverage, observed tokens, recovery events, and the terminal stop reason. Integrity identifies sequence gaps or duplicates and shows the stable trajectory fingerprint. Use the first, previous, play/pause, next, latest, or range controls to inspect bounded redacted frames. Playback changes only the local browser cursor; it cannot execute, resume, approve, or replay an Agent action. Provider token counts are shown when available, while estimated or mixed totals are labeled by their source.
+
+Open an `agent_step_N` entry under `More > LLM I/O` and inspect `Context Budget`. A summary such as `repository_map 2500/2500 chars (truncated)` means that section reached its own limit; `omitted` means the total packet was already full when the lower-priority section was reached; `redacted` means at least one sensitive value was replaced before the request.
 
 Agent Working State is a compact controller snapshot rather than a transcript. Version 4 adds up to 12 virtual-edit metadata records to version 3's bounded plan, acceptance, focus, findings, questions, expected evidence, lifecycle, and selected-path fields. Each virtual-edit record contains only its path, real and virtual hashes, revision, cumulative hunk count, conflict status, and inspection state. RepoPilot seeds one investigation step plus preliminary acceptance criteria, applies structured updates deterministically, and records initial, per-action, and terminal snapshots. Questions are matched case-insensitively, duplicate findings/questions are suppressed, and only bounded values plus the eight newest observation summaries and action ids are retained. Version 1 through 3 snapshots remain readable with empty later fields. Complete virtual file contents are process-local rather than restored from Working State; complete command output, API keys, and provider endpoints are also excluded. Saved History derives the latest state from persisted `working_state_updated` events and the latest bounded virtual diff observation.
 
@@ -298,15 +297,15 @@ Runtime events are ordered by sequence number. A normal controller cycle records
 
 The runtime tool registry contains `search_files`, `read_file`, `parallel_read`, `inspect_repository_map`, `inspect_git_status`, `inspect_diff`, `propose_patch`, `inspect_proposed_diff`, `apply_patch`, `edit_file`, `run_command`, `validate`, `ask_user`, and `finish`. The iterative LLM Agent receives virtual proposal tools; only durable sandboxed Task Runs also receive `ask_user` and approval-gated write actions. Real edit and command tools require an explicit allowed path or exact command plus action approval, and RepoPilot never exposes commit or push as runtime tools.
 
-The Repository Map is built locally from scanned files. For Python it uses the standard AST to index classes, functions, methods, signatures, and imports. It also recognizes common JavaScript/TypeScript declarations and relative imports, links source files to tests, and ranks entries against the current task. Planner and proposal prompts receive a bounded map section, while the Summary tab shows the counts and most relevant entries.
+The Repository Map is built locally from scanned files. For Python it uses the standard AST to index classes, functions, methods, signatures, and imports. It also recognizes common JavaScript/TypeScript declarations and relative imports, links source files to tests, and ranks entries against the current task. Planner and proposal prompts receive a bounded map section, while `Summary > Context & evidence` shows the counts and most relevant entries.
 
-RepoPilot also discovers exact-name `AGENTS.md` files inside the selected repository. A root file applies everywhere; a nested file applies only below its containing directory. Applicable files appear in broad-to-specific order in the Summary tab and in saved History, together with scope, precedence, SHA-256, and truncation metadata. The displayed guidance is bounded and credential-redacted. The Agent refreshes the applicable set as it selects new paths, and planner, proposal, and review calls receive the final scoped set.
+RepoPilot also discovers exact-name `AGENTS.md` files inside the selected repository. A root file applies everywhere; a nested file applies only below its containing directory. Applicable files appear in broad-to-specific order under `Summary > Context & evidence` and in saved History, together with scope, precedence, SHA-256, and truncation metadata. The displayed guidance is bounded and credential-redacted. The Agent refreshes the applicable set as it selects new paths, and planner, proposal, and review calls receive the final scoped set.
 
 Repository instructions guide implementation conventions and validation choices, but they are not approvals or permissions. They cannot enable a Runtime tool, widen an editable path, authorize a command, bypass the managed worktree, expose an API key, or override the task. RepoPilot ignores parent-workspace rules, unrelated nested scopes, dependency/build/cache directories, non-UTF-8 files, oversized files, and symlinks that resolve outside the repository.
 
 For approved runtime writes, prefer `apply_patch` over `edit_file`. First read the file and keep the returned `sha256`; then submit exact `old_text`/`new_text` hunks with `expected_occurrences`. RepoPilot reports `conflict` without writing if the hash is stale or a hunk is missing or ambiguous. It rejects invalid Python and JSON before writing, then reads the result back and verifies its hash. The existing Web proposal flow remains server-stored and per-file approved; the structured tool is the lower-level write contract for the unified runtime.
 
-Use `Repair max attempts` to cap how many failed-validation repair proposal rounds RepoPilot can create for a proposal chain. The default is `2`, and `0` disables repair proposal generation while still showing validation failure analysis.
+Use `Repair attempts` under `Validation & repair` to cap how many failed-validation repair proposal rounds RepoPilot can create for a proposal chain. The default is `2`, and `0` disables repair proposal generation while still showing validation failure analysis.
 
 ## Step 5: Choose A Repository Source
 
@@ -314,16 +313,16 @@ RepoPilot supports local paths and GitHub URLs.
 
 For a local repository:
 
-1. Set Repository source to `Local path`.
+1. Set Source to `Local`.
 2. Enter a path such as `.`.
 3. Run the workflow.
 
 For a GitHub repository:
 
-1. Set Repository source to `GitHub URL`.
+1. Set Source to `GitHub`.
 2. Enter a URL such as `https://github.com/owner/repo`.
-3. Optionally enter a branch.
-4. Click `Sync Repository`.
+3. Open `Repository options` and optionally enter a branch.
+4. Click `Sync`.
 5. Run the workflow after the repository is cloned into the local cache.
 
 GitHub repositories are cloned under `.repopilot/repos/` by default. You can override that location:
@@ -367,14 +366,14 @@ $env:GH_TOKEN = "your-github-token"
 
 ## Step 7: Generate A Proposal
 
-Use `Generate Proposal` when you want RepoPilot to prepare an apply-ready proposal without immediately running the full workflow.
+Use the `Proposal` run mode when you want RepoPilot to prepare an apply-ready proposal without starting a durable sandbox task.
 
 In the web UI:
 
 1. Enter a task.
 2. Enable LLM if you want model-backed edits.
-3. Add optional validation commands.
-4. Click `Generate Proposal`.
+3. Open `Validation & repair` to add optional validation commands.
+4. Select `Proposal`, then click `Generate proposal`.
 5. Inspect the Summary tab and proposed diff.
 
 The proposal is stored server-side with a `proposal_id`. The browser cannot submit arbitrary file edits for apply; it can only ask the local server to apply selected file edits from a known proposal. Proposal sessions are also saved in `.repopilot/memory.sqlite3`, so the web server can restore a generated proposal after restart when the request includes the same repository input.
@@ -548,14 +547,14 @@ It also stores proposal sessions, rollback metadata, LLM trace history, runtime 
 
 In the web UI:
 
-- Open History to inspect saved runs.
+- Open `More > History` to inspect saved runs.
 - Open saved run details to inspect persisted LLM trace history.
 - Click `Open Trajectory` in a saved run to load its reconstructed read-only replay.
-- Inspect the Runtime Events section to understand tool execution, replay, or recovery decisions.
+- Inspect `Summary > Agent activity > Runtime Events` to understand tool execution, replay, or recovery decisions.
 - Pin important runs so they are prioritized in future planning.
 - Delete one run when it is no longer useful.
 - Clear history for the current repository.
-- Check Disable memory for a clean-context run.
+- Check `Disable memory` under `LLM & Agent` for a clean-context run.
 
 CLI clean-context run:
 

@@ -20,6 +20,9 @@ const state = {
   trajectoryIndex: 0,
   trajectoryTimer: null,
   historyTrajectory: null,
+  runMode: "workflow",
+  loadedViews: new Set(),
+  sandboxesLoaded: false,
 };
 
 const TASK_RUN_PHASES = ["Sandbox", "Explore", "Approval", "Apply", "Validate", "Complete"];
@@ -30,6 +33,10 @@ document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
     activateTab(button.dataset.tab || "summary");
   });
+});
+
+document.querySelectorAll("[data-run-mode]").forEach((button) => {
+  button.addEventListener("click", () => selectRunMode(button.dataset.runMode || "workflow"));
 });
 
 document.querySelectorAll(".subtab").forEach((button) => {
@@ -43,9 +50,24 @@ document.querySelectorAll(".subtab").forEach((button) => {
 
 $("modelSelect").addEventListener("change", () => {
   $("customModelWrap").classList.toggle("hidden", $("modelSelect").value !== "custom");
+  updateLlmSettingsUi();
+});
+$("customModel").addEventListener("input", updateLlmSettingsUi);
+$("useLlm").addEventListener("change", () => {
+  updateLlmSettingsUi();
+  if ($("useLlm").checked) {
+    $("llmSettings").open = true;
+  }
 });
 $("repoSource").addEventListener("change", updateRepositorySourceUi);
 $("sandboxSelect").addEventListener("change", selectSandbox);
+$("repositorySettings").addEventListener("toggle", () => {
+  if ($("repositorySettings").open && !state.sandboxesLoaded) {
+    refreshSandboxes().catch((error) => {
+      $("sandboxLine").textContent = `Sandbox status unavailable: ${error.message}`;
+    });
+  }
+});
 document.addEventListener("change", (event) => {
   const target = event.target;
   if (!target?.dataset?.approvalPath) {
@@ -59,15 +81,14 @@ document.addEventListener("change", (event) => {
   updateApprovalState();
 });
 
-$("runWorkflow").addEventListener("click", runWorkflow);
-$("generateProposal").addEventListener("click", generateProposal);
-$("startTaskRun").addEventListener("click", startTaskRun);
+$("runPrimary").addEventListener("click", runSelectedMode);
 $("pauseTaskRun").addEventListener("click", pauseTaskRun);
 $("checkTaskRunReadiness").addEventListener("click", checkTaskRunRecoveryReadiness);
 $("resumeTaskRun").addEventListener("click", resumeTaskRun);
 $("cancelTaskRun").addEventListener("click", cancelTaskRun);
 $("submitTaskRunInput").addEventListener("click", submitTaskRunInput);
 $("createTaskBranch").addEventListener("click", createTaskBranch);
+$("openTaskAttention").addEventListener("click", openTaskAttention);
 $("approveRuntimeWrite").addEventListener("click", approveRuntimeWrite);
 $("rejectRuntimeWrite").addEventListener("click", rejectRuntimeWrite);
 $("testLlm").addEventListener("click", testLlmConnection);
@@ -96,9 +117,7 @@ $("trajectoryCursor").addEventListener("input", () => {
   state.trajectoryIndex = Number.parseInt($("trajectoryCursor").value, 10) || 0;
   renderTrajectoryFrame();
 });
-$("refreshAll").addEventListener("click", async () => {
-  await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory(), pollTaskRun()]);
-});
+$("refreshAll").addEventListener("click", refreshCurrentView);
 
 function activateTab(name) {
   const panel = $(`${name}Tab`);
@@ -106,17 +125,100 @@ function activateTab(name) {
   if (!panel || !button) {
     return;
   }
-  document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.classList.remove("active");
+    tab.setAttribute("aria-selected", "false");
+  });
   document.querySelectorAll(".tab-content").forEach((item) => item.classList.remove("active"));
   button.classList.add("active");
+  button.setAttribute("aria-selected", "true");
   panel.classList.add("active");
+  const secondary = button.classList.contains("secondary-tab");
+  $("viewMenu").classList.toggle("active", secondary);
+  $("secondaryViewLabel").textContent = secondary ? button.textContent.trim() : "";
+  $("viewMenu").open = false;
   if (name !== "trajectory") {
     stopTrajectoryPlayback();
   }
+  loadViewData(name).catch(() => {});
 }
 
 function selectedModel() {
   return $("modelSelect").value === "custom" ? $("customModel").value.trim() : $("modelSelect").value;
+}
+
+const RUN_MODES = {
+  workflow: { label: "Run analysis", status: "Analysis", action: runWorkflow },
+  proposal: { label: "Generate proposal", status: "Proposal", action: generateProposal },
+  task: { label: "Start sandbox task", status: "Sandbox", action: startTaskRun },
+};
+
+function selectRunMode(mode) {
+  state.runMode = RUN_MODES[mode] ? mode : "workflow";
+  document.querySelectorAll("[data-run-mode]").forEach((button) => {
+    const active = button.dataset.runMode === state.runMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  $("runPrimary").textContent = RUN_MODES[state.runMode].label;
+  $("runModeStatus").textContent = RUN_MODES[state.runMode].status;
+}
+
+async function runSelectedMode() {
+  if (!$("taskInput").value.trim()) {
+    setStatus("Task is required.");
+    $("taskInput").focus();
+    return;
+  }
+  const button = $("runPrimary");
+  button.disabled = true;
+  try {
+    await RUN_MODES[state.runMode].action();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function updateLlmSettingsUi() {
+  const enabled = $("useLlm").checked;
+  const model = selectedModel() || "custom model";
+  $("llmSettingsStatus").textContent = enabled ? model : "Rules only";
+}
+
+async function loadViewData(name, { force = false } = {}) {
+  const loaders = {
+    diff: () => loadDiff(false),
+    github: loadGithub,
+    history: loadHistory,
+    taskRun: () => state.taskRun ? pollTaskRun() : loadLatestTaskRun(),
+  };
+  const loader = loaders[name];
+  if (!loader || (!force && state.loadedViews.has(name))) {
+    return;
+  }
+  state.loadedViews.add(name);
+  try {
+    await loader();
+  } catch (error) {
+    state.loadedViews.delete(name);
+    if (name === "diff") {
+      $("diffOutput").textContent = `Diff unavailable: ${error.message}`;
+    } else if (name === "github") {
+      $("githubContent").innerHTML = item(`GitHub status unavailable: ${escapeHtml(error.message)}`);
+    }
+    throw error;
+  }
+}
+
+async function refreshCurrentView() {
+  const active = document.querySelector(".tab-content.active")?.id?.replace(/Tab$/, "") || "summary";
+  setStatus("Refreshing current view...");
+  const refreshes = [loadViewData(active, { force: true })];
+  if ($("repositorySettings").open) {
+    refreshes.push(refreshSandboxes());
+  }
+  await Promise.allSettled(refreshes);
+  setStatus("Current view refreshed.");
 }
 
 async function runWorkflow() {
@@ -130,6 +232,7 @@ async function runWorkflow() {
     }
     state.lastReport = report;
     renderReport(report, payload);
+    activateTab("summary");
     setStatus("Workflow complete.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
@@ -147,6 +250,7 @@ async function generateProposal() {
     }
     state.lastReport = report;
     renderReport(report, payload);
+    activateTab("summary");
     setStatus("Proposal ready for review.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
@@ -317,6 +421,16 @@ async function createTaskBranch() {
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
+}
+
+function openTaskAttention() {
+  const status = String(state.taskRun?.status || "");
+  if (status === "awaiting_approval") {
+    $("runtimeDetails").open = true;
+  } else {
+    $("repairDetails").open = true;
+  }
+  activateTab("summary");
 }
 
 function currentRuntimeApproval() {
@@ -537,6 +651,19 @@ function renderTaskRun(taskRun) {
   $("resumeTaskRun").disabled = !taskRun.can_resume;
   $("cancelTaskRun").disabled = !taskRun.can_cancel;
   $("createTaskBranch").disabled = !taskRun.can_create_branch;
+  const attentionLabels = {
+    awaiting_approval: "Review approval",
+    review_pending: "Review changes",
+    repair_pending: "Review repair",
+  };
+  $("openTaskAttention").hidden = !attentionLabels[status];
+  $("openTaskAttention").textContent = attentionLabels[status] || "Review action";
+  if (status === "interrupted") {
+    $("taskRunRecoveryDetails").open = true;
+  }
+  if (["failed", "repair_pending"].includes(status)) {
+    $("taskRunEvidenceDetails").open = true;
+  }
   renderTaskRunInput(taskRun);
   $("taskRunDelivery").textContent = taskRun.delivery_branch
     ? `Local branch ${taskRun.delivery_branch} is ready for manual review, commit, and push.`
@@ -996,6 +1123,9 @@ async function applyProposal() {
     $("diffOutput").textContent = result.diff || "No diff.";
     $("validationList").innerHTML = renderValidation(result.validation || []);
     $("validationFeedbackList").innerHTML = renderValidationFeedback(result.validation_feedback, result);
+    if (result.validation_feedback) {
+      $("repairDetails").open = true;
+    }
     const autoRepairRunning = ["diagnosing", "replanning"].includes(result.task_run?.status);
     state.repairParentId = result.validation_feedback && !result.repair_budget_exhausted
       && !result.repair_stop_reason && !autoRepairRunning ? state.proposalId : null;
@@ -1077,6 +1207,7 @@ async function generateRepairProposal() {
     }
     state.lastReport = report;
     renderReport(report, buildWorkflowPayload());
+    activateTab("summary");
     if (report.task_run) updateTaskRun(report.task_run);
     setStatus("Repair proposal ready for review.");
   } catch (error) {
@@ -1136,8 +1267,15 @@ async function syncRepository() {
       throw new Error(data.error);
     }
     updateRepositorySourceStatus(data.repository_source);
+    state.loadedViews.clear();
+    state.sandboxesLoaded = false;
     setStatus(data.repository_source?.message || "Repository synced.");
-    await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+    await Promise.allSettled([
+      loadViewData(
+        document.querySelector(".tab-content.active")?.id?.replace(/Tab$/, "") || "summary",
+        { force: true }
+      ),
+    ]);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -1156,8 +1294,14 @@ async function createSandbox() {
     state.sandboxes = data.sandboxes || [data.sandbox];
     renderSandboxOptions(data.sandbox?.path || "");
     activateSandbox(data.sandbox);
+    state.sandboxesLoaded = true;
     setStatus("Worktree sandbox created and selected.");
-    await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+    await Promise.allSettled([
+      loadViewData(
+        document.querySelector(".tab-content.active")?.id?.replace(/Tab$/, "") || "summary",
+        { force: true }
+      ),
+    ]);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -1173,6 +1317,7 @@ async function refreshSandboxes() {
     throw new Error(data.error);
   }
   state.sandboxes = data.sandboxes || [];
+  state.sandboxesLoaded = true;
   const currentPath = state.sandbox?.path || $("repoPath").value.trim();
   const selected = state.sandboxes.find((sandbox) => sandbox.path === currentPath) || null;
   state.sandbox = selected;
@@ -1270,7 +1415,12 @@ async function removeSandbox() {
     renderSandboxStatus(null);
     resetProposalForRepositoryChange();
     setStatus("Worktree sandbox removed.");
-    await Promise.allSettled([loadGithub(), loadDiff(false), loadHistory()]);
+    await Promise.allSettled([
+      loadViewData(
+        document.querySelector(".tab-content.active")?.id?.replace(/Tab$/, "") || "summary",
+        { force: true }
+      ),
+    ]);
   } catch (error) {
     setStatus(`Error: ${error.message}`);
   }
@@ -1313,6 +1463,9 @@ function resetProposalForRepositoryChange() {
   state.rollbackAvailable = false;
   state.proposalApplied = false;
   state.approvedPaths = new Set();
+  state.loadedViews.clear();
+  $("summaryEmpty").classList.remove("hidden");
+  $("summaryResults").classList.add("hidden");
   $("applyProposal").disabled = true;
   $("revertProposal").disabled = true;
   $("generateRepairProposal").disabled = true;
@@ -1501,6 +1654,9 @@ function renderReport(report, payload) {
   state.rollbackAvailable = Boolean(report.rollback_available);
   state.proposalApplied = false;
   state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));
+  $("summaryEmpty").classList.add("hidden");
+  $("summaryResults").classList.remove("hidden");
+  $("runSummary").textContent = report.summary || "Repository analysis complete.";
   updateRepositorySourceStatus(report.repository_source);
   $("filesScanned").textContent = report.files_scanned;
   $("symbolsIndexed").textContent = report.repository_map?.symbols_indexed || 0;
@@ -1522,6 +1678,9 @@ function renderReport(report, payload) {
     ? report.agent_pending_approval
     : pendingApprovalFromEvents(report.agent_events || []);
   $("runtimeApproval").innerHTML = renderRuntimeApproval(runtimeApproval);
+  if (runtimeApproval) {
+    $("runtimeDetails").open = true;
+  }
   updateRuntimeApprovalControls(runtimeApproval);
   $("runtimeWriteResult").innerHTML = renderRuntimeWriteResult(report.agent_write_result);
   $("agentValidationCycle").innerHTML = renderAgentValidationCycle(
@@ -1558,6 +1717,9 @@ function renderReport(report, payload) {
     : "No rollback snapshot available.";
   $("validationList").innerHTML = renderValidation(report.validation);
   $("validationFeedbackList").innerHTML = renderValidationFeedback(report.validation_feedback, report);
+  if (report.validation_feedback || report.repair_stop_reason || report.repair_budget_exhausted) {
+    $("repairDetails").open = true;
+  }
   $("generateRepairProposal").disabled = !state.repairParentId;
   $("llmInput").textContent = buildLlmInputPreview(report, payload);
   $("llmOutput").textContent = buildLlmOutputPreview(report);
@@ -1573,7 +1735,6 @@ function renderReport(report, payload) {
           report.agent_stop_reason || ""
         )
   );
-  loadHistory().catch(() => {});
 }
 
 function hasTrajectory(value) {
@@ -2847,6 +3008,9 @@ document.addEventListener("click", (event) => {
   if (!(target instanceof HTMLElement)) {
     return;
   }
+  if ($("viewMenu").open && !$("viewMenu").contains(target)) {
+    $("viewMenu").open = false;
+  }
   if (target.matches("[data-task]")) {
     $("taskInput").value = target.dataset.task || "";
     setStatus("Task loaded into input.");
@@ -2999,17 +3163,6 @@ function capitalize(value) {
 }
 
 setTrajectory(null);
-loadGithub().catch((error) => {
-  $("githubContent").innerHTML = item(`GitHub status unavailable: ${escapeHtml(error.message)}`);
-});
-loadDiff(false).catch((error) => {
-  $("diffOutput").textContent = `Diff unavailable: ${error.message}`;
-});
 updateRepositorySourceUi();
-refreshSandboxes().catch((error) => {
-  $("sandboxLine").textContent = `Sandbox status unavailable: ${error.message}`;
-});
-loadLatestTaskRun().catch(() => {
-  $("taskRunMessage").textContent = "Saved task-run state is unavailable for this repository.";
-});
-loadHistory().catch(() => {});
+selectRunMode("workflow");
+updateLlmSettingsUi();

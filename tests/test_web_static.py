@@ -22,6 +22,59 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn('id="approvalStatus"', self.index_html)
         self.assertIn("No apply-ready file edits.", self.index_html)
 
+    def test_initial_workspace_prioritizes_core_controls_and_views(self) -> None:
+        for element_id in [
+            "repoSource",
+            "repoPath",
+            "taskInput",
+            "useLlm",
+            "runPrimary",
+            "statusLine",
+            "repositorySettings",
+            "llmSettings",
+            "validationSettings",
+            "viewMenu",
+            "summaryEmpty",
+            "summaryResults",
+        ]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        self.assertEqual(self.index_html.count('class="tab primary-tab'), 3)
+        self.assertEqual(self.index_html.count('class="tab secondary-tab'), 6)
+        for mode in ["workflow", "proposal", "task"]:
+            self.assertIn(f'data-run-mode="{mode}"', self.index_html)
+        for disclosure_id in [
+            "runtimeDetails",
+            "agentDetails",
+            "contextDetails",
+            "proposalDetails",
+            "repairDetails",
+            "taskRunRecoveryDetails",
+            "taskRunActivityDetails",
+            "taskRunEvidenceDetails",
+            "taskRunDeliveryDetails",
+        ]:
+            self.assertIn(f'<details id="{disclosure_id}"', self.index_html)
+        self.assertNotIn('id="runWorkflow"', self.index_html)
+        self.assertNotIn('id="generateProposal"', self.index_html)
+        self.assertNotIn('id="startTaskRun"', self.index_html)
+        self.assertIn("const RUN_MODES", self.app_js)
+        self.assertIn("async function runSelectedMode", self.app_js)
+        self.assertIn("async function loadViewData", self.app_js)
+        startup = self.app_js.rsplit("setTrajectory(null);", 1)[-1]
+        self.assertNotIn("loadGithub()", startup)
+        self.assertNotIn("loadDiff(false)", startup)
+        self.assertNotIn("loadHistory()", startup)
+        self.assertNotIn("loadLatestTaskRun()", startup)
+        for selector in [
+            ".segmented-control",
+            ".settings-section",
+            ".workspace-nav",
+            ".view-menu-popover",
+            ".result-disclosure",
+            ".empty-state",
+        ]:
+            self.assertIn(selector, self.app_css)
+
     def test_proposal_rendering_exposes_per_file_approval_controls(self) -> None:
         self.assertIn("function renderProposals", self.app_js)
         self.assertIn("data-approval-path", self.app_js)
@@ -150,7 +203,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
 
     def test_task_run_ui_exposes_orchestration_and_delivery_controls(self) -> None:
         for element_id in [
-            "startTaskRun",
+            "runPrimary",
             "taskRunStatus",
             "taskRunPhases",
             "pauseTaskRun",
@@ -169,6 +222,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
             "taskRunInputStatus",
             "taskRunBranch",
             "createTaskBranch",
+            "openTaskAttention",
         ]:
             self.assertIn(f'id="{element_id}"', self.index_html)
         for endpoint in [
@@ -183,6 +237,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         ]:
             self.assertIn(endpoint, self.app_js)
         self.assertIn("startTaskRunPolling", self.app_js)
+        self.assertIn('task: { label: "Start sandbox task", status: "Sandbox", action: startTaskRun }', self.app_js)
         self.assertIn("function renderTaskRunCheckpoints", self.app_js)
         self.assertIn("async function checkTaskRunRecoveryReadiness", self.app_js)
         self.assertIn("function renderTaskRunRecoveryReadiness", self.app_js)
