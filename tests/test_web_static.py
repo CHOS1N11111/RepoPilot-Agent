@@ -22,6 +22,18 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn('id="approvalStatus"', self.index_html)
         self.assertIn("No apply-ready file edits.", self.index_html)
 
+    def test_brand_menu_links_profile_and_repository(self) -> None:
+        for element_id in ["brandMenu", "brandMenuToggle", "brandLinks"]:
+            self.assertIn(f'id="{element_id}"', self.index_html)
+        self.assertIn('aria-controls="brandLinks"', self.index_html)
+        self.assertIn('href="https://github.com/CHOS1N11111"', self.index_html)
+        self.assertIn('href="https://github.com/CHOS1N11111/RepoPilot-Agent"', self.index_html)
+        self.assertEqual(self.index_html.count('target="_blank" rel="noopener noreferrer"'), 2)
+        self.assertIn("function setBrandMenuOpen", self.app_js)
+        self.assertIn('$("brandMenuToggle").addEventListener("click"', self.app_js)
+        self.assertIn(".brand-menu:hover .brand-links", self.app_css)
+        self.assertIn(".brand-menu.open .brand-links", self.app_css)
+
     def test_initial_workspace_prioritizes_core_controls_and_views(self) -> None:
         for element_id in [
             "repoSource",

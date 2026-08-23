@@ -8,9 +8,32 @@
   </head>
   <body>
     <header class="app-header">
-      <div class="brand-lockup">
-        <span class="brand-mark" aria-hidden="true">RP</span>
-        <h1>RepoPilot Agent</h1>
+      <div id="brandMenu" class="brand-menu">
+        <h1>
+          <button
+            id="brandMenuToggle"
+            class="brand-trigger"
+            type="button"
+            aria-expanded="false"
+            aria-haspopup="true"
+            aria-controls="brandLinks"
+            title="Open GitHub links"
+          >
+            <span class="brand-mark" aria-hidden="true">RP</span>
+            <span class="brand-name">RepoPilot Agent</span>
+            <span class="brand-caret" aria-hidden="true"></span>
+          </button>
+        </h1>
+        <nav id="brandLinks" class="brand-links" aria-label="RepoPilot GitHub links">
+          <a class="brand-link" href="https://github.com/CHOS1N11111" target="_blank" rel="noopener noreferrer">
+            <span>GitHub profile</span>
+            <small>CHOS1N11111</small>
+          </a>
+          <a class="brand-link" href="https://github.com/CHOS1N11111/RepoPilot-Agent" target="_blank" rel="noopener noreferrer">
+            <span>Repository</span>
+            <small>RepoPilot-Agent</small>
+          </a>
+        </nav>
       </div>
       <button id="refreshAll" class="secondary icon-button" type="button" title="Refresh current view" aria-label="Refresh current view">&#8635;</button>
     </header>

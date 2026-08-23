@@ -29,6 +29,28 @@ const TASK_RUN_PHASES = ["Sandbox", "Explore", "Approval", "Apply", "Validate", 
 
 const $ = (id) => document.getElementById(id);
 
+function setBrandMenuOpen(open) {
+  $("brandMenu").classList.toggle("open", open);
+  $("brandMenuToggle").setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+$("brandMenuToggle").addEventListener("click", () => {
+  setBrandMenuOpen(!$("brandMenu").classList.contains("open"));
+});
+
+$("brandLinks").addEventListener("click", (event) => {
+  if (event.target.closest?.("a")) {
+    setBrandMenuOpen(false);
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("brandMenu").classList.contains("open")) {
+    setBrandMenuOpen(false);
+    $("brandMenuToggle").focus();
+  }
+});
+
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
     activateTab(button.dataset.tab || "summary");
@@ -3010,6 +3032,9 @@ document.addEventListener("click", (event) => {
   }
   if ($("viewMenu").open && !$("viewMenu").contains(target)) {
     $("viewMenu").open = false;
+  }
+  if ($("brandMenu").classList.contains("open") && !$("brandMenu").contains(target)) {
+    setBrandMenuOpen(false);
   }
   if (target.matches("[data-task]")) {
     $("taskInput").value = target.dataset.task || "";
