@@ -16,6 +16,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         cls.index_html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         cls.app_js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
         cls.app_css = (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        cls.diff_js = (STATIC_DIR / "diff-view.js").read_text(encoding="utf-8")
 
     def test_apply_toolbar_exposes_approval_status(self) -> None:
         self.assertIn('id="applyProposal"', self.index_html)
@@ -51,7 +52,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         ]:
             self.assertIn(f'id="{element_id}"', self.index_html)
         self.assertEqual(self.index_html.count('class="tab primary-tab'), 3)
-        self.assertEqual(self.index_html.count('class="tab secondary-tab'), 6)
+        self.assertEqual(self.index_html.count('class="tab secondary-tab'), 4)
         for mode in ["workflow", "proposal", "task"]:
             self.assertIn(f'data-run-mode="{mode}"', self.index_html)
         for disclosure_id in [
@@ -90,9 +91,9 @@ class WebApprovalUiContractTests(unittest.TestCase):
     def test_proposal_rendering_exposes_per_file_approval_controls(self) -> None:
         self.assertIn("function renderProposals", self.app_js)
         self.assertIn("data-approval-path", self.app_js)
-        self.assertIn("Approve this file for apply", self.app_js)
+        self.assertIn("Selected for apply", self.diff_js)
         self.assertIn("apply-ready", self.app_js)
-        self.assertIn("No direct file edit was generated for this file.", self.app_js)
+        self.assertIn("No direct file edit was generated for this file.", self.diff_js)
 
     def test_checkbox_changes_update_approved_paths_and_button_state(self) -> None:
         self.assertIn('document.addEventListener("change"', self.app_js)
@@ -105,7 +106,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("const approvedPaths = approvedFilePaths();", self.app_js)
         self.assertIn("...buildRepositoryPayload(),", self.app_js)
         self.assertIn("approved_paths: approvedPaths", self.app_js)
-        self.assertIn("with ${approvedPaths.length} approved file edit(s)", self.app_js)
+        self.assertIn("${approvedPaths.length} selected file edit(s)", self.app_js)
 
     def test_revert_request_sends_repository_payload_for_session_restore(self) -> None:
         self.assertIn("async function revertProposal", self.app_js)
@@ -290,7 +291,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn('event.event_type === "input_required"', self.app_js)
         self.assertIn("latestInputEvent?.payload?.observation?.data?.question", self.app_js)
         self.assertIn("Pending question", self.app_js)
-        self.assertIn("Pending Runtime Approval", self.app_js)
+        self.assertIn("Pending write", self.app_js)
         self.assertIn("Payload SHA-256", self.app_js)
         self.assertIn("Exact action", self.app_js)
         self.assertIn("Exact diff", self.app_js)

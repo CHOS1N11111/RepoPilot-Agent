@@ -35,11 +35,14 @@
           </a>
         </nav>
       </div>
-      <button id="refreshAll" class="secondary icon-button" type="button" title="Refresh current view" aria-label="Refresh current view">&#8635;</button>
+      <div class="header-tools">
+        <button id="toggleControls" class="secondary icon-button" type="button" title="Hide run settings" aria-label="Hide run settings" aria-expanded="true" aria-controls="runControls"><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#panel-left" /></svg></button>
+        <button class="tab utility-tab" type="button" data-tab="history" title="History" aria-label="History"><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#history" /></svg><span>History</span></button>
+      </div>
     </header>
 
     <main class="layout">
-      <section class="panel control-panel">
+      <section id="runControls" class="panel control-panel">
         <div class="panel-heading">
           <span class="section-label">New run</span>
           <h2>Repository task</h2>
@@ -53,8 +56,8 @@
               <option value="auto">Auto</option>
             </select>
           </label>
-          <label>
-            Repository
+          <label id="repoPathField">
+            <span id="repoPathLabel">Repository path</span>
             <input id="repoPath" value="." />
           </label>
         </div>
@@ -70,8 +73,8 @@
           <span class="field-label">Run mode</span>
           <div class="segmented-control" role="group" aria-label="Run mode">
             <button class="mode-option active" type="button" data-run-mode="workflow" aria-pressed="true">Analyze</button>
-            <button class="mode-option" type="button" data-run-mode="proposal" aria-pressed="false">Proposal</button>
-            <button class="mode-option" type="button" data-run-mode="task" aria-pressed="false">Sandbox</button>
+            <button class="mode-option" type="button" data-run-mode="proposal" aria-pressed="false">Propose</button>
+            <button class="mode-option" type="button" data-run-mode="task" aria-pressed="false">Run in sandbox</button>
           </div>
         </div>
         <div class="core-options">
@@ -79,7 +82,7 @@
             <input id="useLlm" type="checkbox" />
             Use LLM
           </label>
-          <span id="runModeStatus" class="status-chip">Analysis</span>
+          <label class="checkbox"><input id="useMemory" type="checkbox" checked />Use memory</label>
         </div>
         <button id="runPrimary" class="primary-action" type="button">Run analysis</button>
         <p id="statusLine" class="status-line primary-status" role="status">Ready.</p>
@@ -104,8 +107,8 @@
               <div class="toolbar compact-actions">
                 <button id="syncRepository" class="secondary" type="button">Sync</button>
                 <button id="createSandbox" class="secondary" type="button">New Worktree</button>
-                <button id="refreshSandboxes" class="secondary" type="button">Refresh</button>
-                <button id="removeSandbox" class="secondary danger-button" type="button" disabled>Remove</button>
+                <button id="refreshSandboxes" class="secondary icon-button" type="button" title="Refresh worktrees" aria-label="Refresh worktrees"><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#refresh-cw" /></svg></button>
+                <button id="removeSandbox" class="secondary danger-button icon-button" type="button" title="Remove selected worktree" aria-label="Remove selected worktree" disabled><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#trash-2" /></svg></button>
               </div>
               <p id="repoSourceLine" class="status-line">Using local repository path.</p>
               <p id="sandboxLine" class="status-line">No managed worktree sandbox selected.</p>
@@ -118,22 +121,14 @@
               <small id="llmSettingsStatus">Rules only</small>
             </summary>
             <div class="settings-body">
-              <div class="switch-row">
+              <div class="switch-row" id="llmOptions" hidden>
                 <label class="checkbox">
-                  <input id="disableFallback" type="checkbox" />
-                  Disable fallback
-                </label>
-                <label class="checkbox">
-                  <input id="disableMemory" type="checkbox" />
-                  Disable memory
+                  <input id="allowFallback" type="checkbox" checked />
+                  Allow fallback
                 </label>
                 <label class="checkbox">
                   <input id="iterativeAgent" type="checkbox" />
                   Iterative agent
-                </label>
-                <label class="checkbox">
-                  <input id="autoRepair" type="checkbox" checked />
-                  Auto repairs
                 </label>
               </div>
               <label>
@@ -159,20 +154,20 @@
               </label>
               <div class="settings-grid">
                 <label>
-                  LLM timeout
+                  LLM timeout (s)
                   <input id="timeoutSeconds" type="number" min="1" step="1" value="120" />
                 </label>
-                <label>
+                <label class="agent-option" hidden>
                   Agent steps
                   <input id="agentMaxSteps" type="number" min="1" max="12" step="1" value="6" />
                 </label>
-                <label>
+                <label class="agent-option" hidden>
                   Tool calls
                   <input id="agentMaxToolCalls" type="number" min="1" max="24" step="1" value="12" />
                 </label>
               </div>
               <button id="testLlm" class="secondary" type="button">Test connection</button>
-              <p id="llmTestLine" class="status-line">LLM connection not tested.</p>
+              <p id="llmTestLine" class="status-line" role="status">LLM connection not tested.</p>
             </div>
           </details>
 
@@ -182,6 +177,7 @@
               <small>Command and limits</small>
             </summary>
             <div class="settings-body">
+              <label class="checkbox"><input id="autoRepair" type="checkbox" checked />Automatic repair proposals</label>
               <label>
                 Validation command
                 <input id="validationInput" placeholder="python -m unittest discover -s tests" />
@@ -192,10 +188,10 @@
                   <input id="maxValidationCommands" type="number" min="1" max="16" step="1" value="4" />
                 </label>
                 <label>
-                  Time budget
+                  Time budget (s)
                   <input id="executionTimeoutSeconds" type="number" min="1" max="3600" step="1" value="600" />
                 </label>
-                <label>
+                <label id="repairLimitField">
                   Repair attempts
                   <input id="repairMaxAttempts" type="number" min="0" max="5" step="1" value="2" />
                 </label>
@@ -208,28 +204,40 @@
       <section class="panel output-panel">
         <div class="workspace-nav">
           <div class="tabs" role="tablist" aria-label="Primary workspace views">
-            <button class="tab primary-tab active" type="button" role="tab" data-tab="summary" aria-controls="summaryTab" aria-selected="true">Summary</button>
-            <button class="tab primary-tab" type="button" role="tab" data-tab="taskRun" aria-controls="taskRunTab" aria-selected="false">Task Run</button>
-            <button class="tab primary-tab" type="button" role="tab" data-tab="diff" aria-controls="diffTab" aria-selected="false">Diff</button>
+            <button class="tab primary-tab active" type="button" role="tab" data-tab="summary" aria-controls="summaryTab" aria-selected="true">Overview</button>
+            <button class="tab primary-tab" type="button" role="tab" data-tab="diff" aria-controls="diffTab" aria-selected="false">Changes</button>
+            <button class="tab primary-tab" type="button" role="tab" data-tab="taskRun" aria-controls="taskRunTab" aria-selected="false">Activity</button>
           </div>
           <details id="viewMenu" class="view-menu">
-            <summary><span>More</span><small id="secondaryViewLabel"></small></summary>
+            <summary title="Additional views"><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#ellipsis" /></svg><span id="secondaryViewLabel">More</span></summary>
             <div class="view-menu-popover">
               <button class="tab secondary-tab" type="button" data-tab="trajectory">Trajectory</button>
               <button class="tab secondary-tab" type="button" data-tab="llm">LLM I/O</button>
               <button class="tab secondary-tab" type="button" data-tab="github">GitHub</button>
-              <button class="tab secondary-tab" type="button" data-tab="delivery">Delivery</button>
-              <button class="tab secondary-tab" type="button" data-tab="history">History</button>
               <button class="tab secondary-tab" type="button" data-tab="json">JSON</button>
             </div>
           </details>
+          <button id="refreshAll" class="secondary icon-button" type="button" title="Refresh current view" aria-label="Refresh current view" disabled><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#refresh-cw" /></svg></button>
         </div>
 
-        <section id="taskRunTab" class="tab-content">
+        <div id="viewFeedback" class="view-feedback" hidden>
+          <p id="viewStatus" class="status-line" role="status"></p>
+          <button id="retryView" class="secondary icon-button" type="button" title="Retry loading this view" aria-label="Retry loading this view" hidden><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#rotate-ccw" /></svg></button>
+        </div>
+        <section id="workspaceContext" class="workspace-context" tabindex="-1" hidden>
+          <div class="workspace-heading"><h2 id="workspaceTask"></h2><span id="workspaceStatus" class="status-badge"></span></div>
+          <p id="workspaceRepository" class="repository-context"></p>
+          <div class="workspace-actions">
+            <button id="workspaceAction" type="button" hidden>Review changes</button>
+            <button id="openDelivery" class="tab context-tab secondary" type="button" data-tab="delivery">Prepare delivery</button>
+          </div>
+        </section>
+
+        <section id="taskRunTab" class="tab-content" tabindex="-1">
           <div class="task-run-header">
             <div>
-              <small>Run</small>
-              <strong id="taskRunId">Not started</strong>
+              <strong id="taskRunTitle">Sandbox task</strong>
+              <small id="taskRunId">Not started</small>
             </div>
             <span id="taskRunStatus" class="task-run-status">idle</span>
           </div>
@@ -295,7 +303,7 @@
               <div class="disclosure-body">
                 <h2>Feature Branch</h2>
                 <div class="task-run-delivery">
-                  <input id="taskRunBranch" placeholder="feature/repopilot-task" />
+                <input id="taskRunBranch" aria-label="Feature branch name" placeholder="feature/repopilot-task" />
                   <button id="createTaskBranch" class="secondary" disabled>Create Branch</button>
                 </div>
                 <p id="taskRunDelivery" class="status-line">No delivery branch created.</p>
@@ -309,32 +317,39 @@
             <strong>No run selected</strong>
             <span>Results will appear here.</span>
           </div>
-          <div id="summaryResults" class="summary-results hidden">
+          <div id="summaryResults" class="summary-results hidden" tabindex="-1">
             <div id="runSummary" class="run-summary"></div>
-            <div class="metrics summary-metrics">
-              <div><span id="filesScanned">0</span><small>files</small></div>
-              <div><span id="symbolsIndexed">0</span><small>symbols</small></div>
-              <div><span id="planSource">rules</span><small>plan</small></div>
-              <div><span id="proposalSource">rules</span><small>proposal</small></div>
+            <div class="decision-metrics">
+              <div><strong id="changedFileCount">0</strong><span>proposed files</span></div>
+              <div><strong id="validationCount">Not run</strong><span>validation</span></div>
+              <div><strong id="blockerCount">0</strong><span>blockers</span></div>
             </div>
+            <div id="summaryBlockers" class="summary-blockers" hidden></div>
 
-            <section class="primary-result-section">
-              <h2>Plan</h2>
-              <ol id="planList" class="stack"></ol>
-            </section>
-            <section class="primary-result-section">
+            <details id="runtimeDetails" class="result-disclosure pending-review" tabindex="-1" hidden>
+              <summary>Pending approval</summary>
+              <div class="disclosure-body">
+                <div class="toolbar runtime-controls">
+                  <button id="approveRuntimeWrite" disabled>Approve Exact Action</button>
+                  <button id="rejectRuntimeWrite" class="secondary danger-button" disabled>Reject</button>
+                </div>
+                <p id="runtimeApprovalStatus" class="status-line">No managed Runtime action is waiting.</p>
+                <div id="runtimeApproval"></div>
+              </div>
+            </details>
+
+            <section id="proposalReview" class="primary-result-section" tabindex="-1">
               <h2>Proposed Changes</h2>
+              <p id="proposalObjective" class="section-note"></p>
               <div id="proposalList" class="stack"></div>
+              <div id="proposalChecks"></div>
               <div class="toolbar approval-toolbar">
-                <button id="applyProposal" class="secondary" disabled>Apply Proposal</button>
-                <button id="revertProposal" class="secondary danger-button" disabled>Revert</button>
+                <button id="applyProposal" disabled>Apply selected files</button>
+                <button id="revertProposal" class="secondary danger-button" disabled>Revert applied changes</button>
                 <span id="approvalStatus" class="status-line">No apply-ready file edits.</span>
                 <span id="rollbackStatus" class="status-line">No rollback snapshot available.</span>
               </div>
-            </section>
-            <section class="primary-result-section">
-              <h2>Proposed Diff</h2>
-              <pre id="proposedDiffOutput" class="diff-block compact"></pre>
+              <details class="raw-diff"><summary>Raw proposed diff</summary><pre id="proposedDiffOutput" class="diff-block compact"></pre></details>
             </section>
             <section class="primary-result-section">
               <h2>Validation</h2>
@@ -342,16 +357,13 @@
             </section>
 
             <div class="result-disclosures">
-              <details id="runtimeDetails" class="result-disclosure">
-                <summary>Runtime actions</summary>
+              <details id="planDetails" class="result-disclosure">
+                <summary>Plan</summary>
+                <div class="disclosure-body"><ol id="planList" class="plan-list"></ol></div>
+              </details>
+              <details id="runtimeResultsDetails" class="result-disclosure">
+                <summary>Execution results</summary>
                 <div class="disclosure-body">
-                  <h2>Pending Approval</h2>
-                  <div id="runtimeApproval"></div>
-                  <div class="toolbar">
-                    <button id="approveRuntimeWrite" class="secondary" disabled>Approve Exact Action</button>
-                    <button id="rejectRuntimeWrite" class="secondary danger-button" disabled>Reject</button>
-                    <span id="runtimeApprovalStatus" class="status-line">No managed Runtime action is waiting.</span>
-                  </div>
                   <h2>Sandbox Write Result</h2>
                   <div id="runtimeWriteResult" class="stack"></div>
                   <h2>Agent Validation Cycle</h2>
@@ -374,6 +386,13 @@
               <details id="contextDetails" class="result-disclosure">
                 <summary>Context &amp; evidence</summary>
                 <div class="disclosure-body">
+                  <dl class="analysis-metadata">
+                    <div><dt>Files scanned</dt><dd id="filesScanned">0</dd></div>
+                    <div><dt>Symbols</dt><dd id="symbolsIndexed">0</dd></div>
+                    <div><dt>Plan source</dt><dd id="planSource">rules</dd></div>
+                    <div><dt>Proposal source</dt><dd id="proposalSource">rules</dd></div>
+                  </dl>
+                  <div id="memoryContext"></div>
                   <h2>Repository Map</h2>
                   <div id="repositoryMapList" class="stack"></div>
                   <h2>Repository Instructions</h2>
@@ -392,7 +411,7 @@
                   <pre id="proposalOutput" class="code-block compact"></pre>
                 </div>
               </details>
-              <details id="repairDetails" class="result-disclosure">
+              <details id="repairDetails" class="result-disclosure" tabindex="-1">
                 <summary>Validation feedback &amp; repair</summary>
                 <div class="disclosure-body">
                   <div id="validationFeedbackList" class="stack"></div>
@@ -468,26 +487,32 @@
 
         <section id="diffTab" class="tab-content">
           <div class="toolbar">
-            <button id="loadDiff" class="secondary">Load Working Diff</button>
-            <button id="loadStagedDiff" class="secondary">Load Staged Diff</button>
+            <div class="segmented-control diff-modes" role="group" aria-label="Git changes">
+              <button id="loadDiff" class="mode-option active" type="button" aria-pressed="true">Working tree</button>
+              <button id="loadStagedDiff" class="mode-option" type="button" aria-pressed="false">Staged</button>
+            </div>
+            <button id="openChangesDelivery" class="secondary" type="button">Prepare delivery</button>
           </div>
-          <pre id="diffOutput" class="diff-block"></pre>
+          <div id="workingDiff"></div>
+          <details id="rawWorkingDiff" class="raw-diff" hidden><summary>Raw Git diff</summary><pre id="diffOutput" class="diff-block"></pre></details>
         </section>
 
-        <section id="deliveryTab" class="tab-content">
+        <section id="deliveryTab" class="tab-content" tabindex="-1">
+          <h2>Delivery</h2>
           <div class="toolbar">
             <button id="loadPrReadiness" class="secondary">Check PR Readiness</button>
-            <button id="generateDelivery" class="secondary">Generate Delivery Draft</button>
-            <button id="createPullRequest" class="secondary" disabled>Create Pull Request</button>
+            <button id="generateDelivery">Generate delivery draft</button>
+            <button id="createPullRequest" disabled>Create Pull Request</button>
           </div>
           <div id="prReadinessContent" class="stack"></div>
           <div id="deliveryContent" class="stack"></div>
         </section>
 
-        <section id="historyTab" class="tab-content">
+        <section id="historyTab" class="tab-content" tabindex="-1">
+          <h2>History</h2>
           <div class="toolbar">
-            <button id="loadHistory" class="secondary">Load History</button>
-            <button id="clearHistory" class="secondary danger-button">Clear History</button>
+            <button id="loadHistory" class="secondary icon-button" title="Refresh history" aria-label="Refresh history"><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#refresh-cw" /></svg></button>
+            <details class="action-menu"><summary title="History actions" aria-label="History actions"><svg class="ui-icon" aria-hidden="true"><use href="/vendor/icons.svg#ellipsis" /></svg></summary><div><button id="clearHistory" class="secondary danger-button">Clear history</button></div></details>
           </div>
           <div id="historyContent" class="stack"></div>
           <h2>Run Detail</h2>
@@ -500,6 +525,8 @@
       </section>
     </main>
 
+    <script src="/vendor/diff.min.js"></script>
+    <script src="/diff-view.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

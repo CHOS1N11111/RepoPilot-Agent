@@ -271,21 +271,21 @@ Open:
 http://127.0.0.1:8765
 ```
 
-The initial workspace keeps repository input, task input, run mode, LLM enablement, one primary action, and current status visible. Choose `Analyze`, `Proposal`, or `Sandbox`; the primary button runs that selected workflow. Branch and worktree controls are under `Repository options`, provider and Agent controls are under `LLM & Agent`, and validation budgets are under `Validation & repair`.
+The initial workspace keeps repository input, task input, run mode, LLM and memory enablement, one primary action, and current status visible. Choose `Analyze`, `Propose`, or `Run in sandbox`; the primary button runs that selected workflow. Branch and worktree controls are under `Repository options`, provider and Agent controls are under `LLM & Agent`, and validation budgets are under `Validation & repair`. `Allow fallback` and `Use memory` use positive on/off settings. Time limits are labeled in seconds. The header settings button collapses or restores the run controls; on narrow screens they collapse when a run opens its results.
 
 Three views remain in the primary navigation:
 
-- Summary: run summary, key metrics, plan, proposed changes, diff, validation, and approval actions. Agent activity, context and evidence, Runtime details, raw proposal data, and repair feedback are collapsed until opened or needed.
-- Task Run: sandbox phase, current status, interruption controls, durable Agent Input, and pause/resume/cancel controls. Recovery, checkpoints, evidence, repair, and local delivery use secondary disclosures.
-- Diff: current working tree or staged diff.
+- Overview: task and repository context, pending approvals, proposed file count, validation results, blockers, and file-by-file review. Plans, analysis metrics, context and evidence, execution records, and raw data use secondary disclosures. Review actions scroll to the relevant approval, file review, or repair section.
+- Changes: working tree or staged changes, selected with the segmented control. Each file includes line numbers, additions and deletions, and a path-copy action. The raw Git diff remains available below the structured view.
+- Activity: sandbox phase, current status, interruption controls, durable Agent Input, and pause/resume/cancel controls. Recovery, checkpoints, evidence, repair, and local delivery use secondary disclosures.
 
-Open `More` for Trajectory, LLM I/O, GitHub, Delivery, History, and JSON. These secondary views load their repository data when opened instead of loading every hidden panel at startup.
+Open `More` for Trajectory, LLM I/O, GitHub, and JSON. History has a persistent header entry. `Prepare delivery` appears in the task context when applied changes or a completed sandbox task are available, and is also available from Changes for existing Git work. Repository data loads when its view is opened. Refresh is available only for views with a data loader; loading failures remain visible and offer a retry. Diff parsing and icons are bundled locally and require no CDN.
 
 Changing the repository source, path, URL, branch, or selected worktree clears the previous results, approvals, and delivery draft. A running task remains on the server, but its controls are detached from the new selection. Reload a view or generate a draft for the selected repository before continuing. File approval choices survive updates to the same proposal; revised edit contents require renewed approval choices.
 
 Before running an LLM workflow from the web UI, enable `Use LLM` and open `LLM & Agent`. Fill in the model, API endpoint URL, API key, and timeout or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
-Enable `Iterative agent` under `LLM & Agent` when you want RepoPilot to make several smaller non-writing LLM calls before the main plan/proposal calls. Open `Summary > Agent activity` for each typed decision, parallel read counts, Working State, and Runtime events. Open `More > LLM I/O > Trace` for each `agent_step_N` prompt and raw output.
+Enable `Iterative agent` under `LLM & Agent` when you want RepoPilot to make several smaller non-writing LLM calls before the main plan/proposal calls. Open `Overview > Agent activity` for each typed decision, parallel read counts, Working State, and Runtime events. Open `More > LLM I/O > Trace` for each `agent_step_N` prompt and raw output.
 
 Open `More > Trajectory` for the compact run-level view. The counters show durable events, actual tool calls, evidence coverage, observed tokens, recovery events, and the terminal stop reason. Integrity identifies sequence gaps or duplicates and shows the stable trajectory fingerprint. Use the first, previous, play/pause, next, latest, or range controls to inspect bounded redacted frames. Playback changes only the local browser cursor; it cannot execute, resume, approve, or replay an Agent action. Provider token counts are shown when available, while estimated or mixed totals are labeled by their source.
 
@@ -427,18 +427,18 @@ The browser sends the current LLM settings with the approval request so continua
 When the proposal looks correct:
 
 1. Review the apply-ready file checkboxes in `Proposed Changes`.
-2. Leave only the files you want to approve checked.
-3. Click `Apply Proposal`.
+2. Select the files to include. Selection is not approval to write.
+3. Click `Apply N files`, which displays the selected count.
 4. Confirm the browser prompt.
 5. RepoPilot writes only the approved server-stored proposal edits.
 6. RepoPilot runs configured or recommended validation commands.
-7. Open the Diff tab to inspect the final working tree diff.
+7. Open Changes to inspect the final working tree diff.
 
 RepoPilot does not commit, push, or open pull requests automatically.
 
 If you want to undo the applied proposal before committing:
 
-1. Click `Revert Applied Proposal`.
+1. Click `Revert applied changes`.
 2. Confirm the browser prompt.
 3. RepoPilot restores files from the internal pre-apply rollback snapshot.
 4. Open the Diff tab again to confirm the working tree returned to the expected state.
@@ -649,13 +649,13 @@ Use this flow when you want RepoPilot to manage the complete Agent lifecycle ins
 1. Start from a clean source repository with the desired base commit checked out.
 2. Enter the task and optional validation command.
 3. Configure and test the LLM connection when model-backed edits are needed.
-4. Click `Start Sandboxed Task`.
-5. Open the Task Run tab and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
-6. At `awaiting_input`, answer the exact question in Agent Input; at `awaiting_approval`, inspect the acceptance criteria, execution budget, Summary, LLM I/O, and proposed Diff tabs.
-7. If Summary shows a write under `Pending Runtime Approval`, inspect it and click `Approve Exact Write` or `Reject`. An approved write changes only the managed worktree and records its resulting diff.
+4. Select `Run in sandbox` and click `Start sandbox task`.
+5. Open Activity and follow `Sandbox`, `Explore`, `Approval`, `Apply`, `Validate`, and `Complete`.
+6. At `awaiting_input`, answer the exact question in Agent Input. At `awaiting_approval`, click `Review approval` to open the exact action in Overview.
+7. Inspect the file or command scope and exact diff under `Pending approval`, then click `Approve Exact Write` or `Reject`. The checkpoint, payload hash, and full action remain under `Approval record and exact action`. An approved write changes only the managed worktree and records its resulting diff.
 8. If a configured command then appears, inspect it and click `Run Exact Validation` or `Reject`. Each command gets a separate approval and bounded result.
-9. If the run produced the compatible server-stored proposal flow instead, select approved files and click `Apply Proposal`; that existing path runs its configured validation commands.
-10. Leave `Auto-generate repairs` enabled for the compatible proposal path to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
+9. If the run produced the compatible server-stored proposal flow instead, select files and click `Apply N files`; that path runs its configured validation commands. This file-selection UI is hidden while an exact Runtime action is awaiting approval.
+10. Leave `Automatic repair proposals` enabled for the compatible proposal path to let RepoPilot diagnose failed validation and prepare the next bounded proposal automatically. Disable it when you want to use the manual repair button.
 11. Inspect the final working Diff. Local branch creation remains available only after a fully completed task, not at `review_pending`.
 
 Each task receives its own detached managed worktree. RepoPilot automatically selects that path in the repository controls, so proposal application, validation, rollback, Git inspection, and diff display all target the sandbox rather than the source worktree.

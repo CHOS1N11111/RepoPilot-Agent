@@ -5,6 +5,8 @@ const { test } = require("node:test");
 const vm = require("node:vm");
 
 const source = readFileSync(path.join(__dirname, "../../src/repopilot_agent/web/static/app.js"), "utf8");
+const diffSource = readFileSync(path.join(__dirname, "../../src/repopilot_agent/web/static/diff-view.js"), "utf8");
+const diffLibrary = require("../../src/repopilot_agent/web/static/vendor/diff.min.js");
 
 function createApp() {
   const elements = new Map();
@@ -16,6 +18,7 @@ function createApp() {
     if (!elements.has(id)) {
       const classes = new Set();
       const events = new Map();
+      const attributes = new Map();
       elements.set(id, {
         value: "", textContent: "", innerHTML: "", disabled: false, hidden: false,
         checked: false, dataset: {}, events,
@@ -26,7 +29,10 @@ function createApp() {
           toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name),
         },
         addEventListener: (name, callback) => events.set(name, callback),
-        setAttribute() {}, appendChild() {}, focus() {},
+        setAttribute: (name, value) => attributes.set(name, value),
+        getAttribute: (name) => attributes.get(name),
+        appendChild() {}, focus() {},
+        scrollIntoView() {},
         replaceChildren() { this.textContent = ""; this.innerHTML = ""; },
       });
     }
@@ -46,6 +52,7 @@ function createApp() {
       clearInterval: (id) => timers.delete(id),
     },
     URLSearchParams,
+    Diff: diffLibrary,
     fetch: async (url, options) => {
       requests.push({ url, payload: options?.body ? JSON.parse(options.body) : null });
       const response = await context.respond(url, options);
@@ -56,10 +63,14 @@ function createApp() {
   element("repoSource").value = "local";
   element("repoPath").value = "/repo-A";
   element("modelSelect").value = "test-model";
+  element("useMemory").checked = true;
+  element("allowFallback").checked = true;
+  vm.runInContext(diffSource, context, { filename: "diff-view.js" });
   vm.runInContext(source, context, { filename: "app.js" });
   return {
     app: context,
     state: vm.runInContext("state", context),
+    diffView: vm.runInContext("DiffView", context),
     element, requests, timers,
     change(id, value) {
       element(id).value = value;
@@ -276,4 +287,145 @@ test("PR creation rejection replaces cached readiness with server blockers", asy
   await app.createPullRequest();
   assert.equal(state.delivery.pr_readiness.ready, false);
   assert.equal(element("createPullRequest").disabled, true);
+});
+
+test("a static summary cannot report a successful refresh without loading data", async () => {
+  const { app, element, requests } = createApp();
+  await app.refreshCurrentView();
+  assert.equal(requests.length, 0);
+  assert.equal(element("refreshAll").disabled, true);
+  assert.match(element("viewStatus").textContent, /no live data/);
+});
+
+test("failed history refresh stays failed and can be retried", async () => {
+  const { app, state, element } = createApp();
+  state.activeView = "history";
+  app.respond = () => { throw new Error("History offline"); };
+  await assert.rejects(app.loadViewData("history"), /History offline/);
+  assert.equal(element("viewStatus").dataset.tone, "danger");
+  assert.equal(state.loadedViews.has("history"), false);
+  assert.equal(element("retryView").hidden, false);
+  app.respond = () => ({ runs: [] });
+  await state.retryAction();
+  assert.equal(element("viewStatus").textContent, "View updated.");
+  assert.equal(element("retryView").hidden, true);
+});
+
+test("rapid working and staged loads keep the newest selection and response", async () => {
+  const { app, state, element } = createApp();
+  const working = deferred();
+  app.respond = () => working.promise;
+  const oldLoad = app.loadDiff(false);
+  app.respond = () => ({ diff: "Staged diff" });
+  await app.loadDiff(true);
+  working.resolve({ diff: "Older working diff" });
+  await oldLoad;
+  assert.equal(state.diffStaged, true);
+  assert.equal(element("loadStagedDiff").getAttribute("aria-pressed"), "true");
+  assert.equal(element("diffOutput").textContent, "Staged diff");
+});
+
+test("connection testing prevents duplicate requests and exposes retry after failure", async () => {
+  const { app, element, requests } = createApp();
+  const response = deferred();
+  app.respond = () => response.promise;
+  const first = app.testLlmConnection();
+  await app.testLlmConnection();
+  assert.equal(requests.length, 1);
+  assert.equal(element("testLlm").disabled, true);
+  response.resolve({ error: "Endpoint offline" });
+  await first;
+  assert.equal(element("testLlm").disabled, false);
+  assert.equal(element("llmTestLine").dataset.tone, "danger");
+  assert.equal(element("retryView").hidden, false);
+});
+
+test("new sandbox runs re-enable the launch button after resetting repository context", async () => {
+  const { app, state, element } = createApp();
+  element("taskInput").value = "Review task";
+  app.selectRunMode("task");
+  app.respond = () => ({ task_run: { run_id: "run-B", source_repo: "/repo-A", status: "awaiting_approval", result: report() } });
+  await app.runSelectedMode();
+  assert.equal(state.taskRun.run_id, "run-B");
+  assert.equal(element("runPrimary").disabled, false);
+});
+
+test("positive settings preserve payload meaning and ignore hidden GitHub URLs", () => {
+  const { app, element } = createApp();
+  element("githubUrl").value = "https://github.com/other/repo";
+  element("useMemory").checked = false;
+  element("allowFallback").checked = false;
+  element("iterativeAgent").checked = true;
+  let payload = app.buildWorkflowPayload();
+  assert.equal(payload.use_memory, false);
+  assert.equal(payload.no_llm_fallback, true);
+  assert.equal(payload.iterative_agent, false);
+  assert.equal(payload.github_url, "");
+  element("repoSource").value = "github";
+  element("useLlm").checked = true;
+  payload = app.buildWorkflowPayload();
+  assert.equal(payload.github_url, "https://github.com/other/repo");
+  assert.equal(payload.iterative_agent, true);
+});
+
+test("pending exact approval hides compatible apply controls while preserving selection", () => {
+  const { app, state, element } = createApp();
+  const pending = report();
+  pending.agent_pending_approval = { checkpoint: "checkpoint-A", action_kind: "write", file_scope: ["a.py"] };
+  state.lastReport = pending;
+  state.taskRun = { status: "awaiting_approval", can_approve_runtime: true };
+  app.renderReport(pending, app.buildWorkflowPayload());
+  assert.equal(element("proposalReview").hidden, true);
+  assert.equal(element("runtimeDetails").hidden, false);
+  assert.equal(element("applyProposal").disabled, true);
+  assert.equal(element("approveRuntimeWrite").disabled, false);
+  assert.deepEqual([...state.approvedPaths], ["a.py", "b.py"]);
+});
+
+test("executing an approval disables both grant and rejection until it finishes", async () => {
+  const { app, state, element } = createApp();
+  state.lastReport = { ...report(), agent_pending_approval: { checkpoint: "pending", action_kind: "write" } };
+  state.taskRun = { can_approve_runtime: true };
+  const completion = deferred();
+  const action = app.withBusy("approveRuntimeWrite", "Executing...", () => completion.promise);
+  assert.equal(element("approveRuntimeWrite").disabled, true);
+  assert.equal(element("rejectRuntimeWrite").disabled, true);
+  assert.match(element("runtimeApprovalStatus").textContent, /Executing/);
+  completion.resolve();
+  await action;
+  assert.equal(element("approveRuntimeWrite").disabled, false);
+  assert.equal(element("rejectRuntimeWrite").disabled, false);
+});
+
+test("diff review attaches selection to unified patch files and escapes code", () => {
+  const { diffView } = createApp();
+  const patch = diffLibrary.createTwoFilesPatch("a/a.py", "b/a.py", "old\n", '<img src=x onerror="attack()">\n');
+  const html = diffView.render(patch, { files: [{ path: "a.py" }], edits: [{ path: "a.py" }], selected: new Set(["a.py"]) });
+  assert.equal((html.match(/class="diff-file"/g) || []).length, 1);
+  assert.match(html, /data-approval-path="a.py" checked/);
+  assert.match(html, /&lt;img src=x onerror=&quot;attack\(\)&quot;&gt;/);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /class="diff-line addition"/);
+  assert.match(html, /class="diff-line deletion"/);
+});
+
+test("diff review preserves binary, rename and file mode information", () => {
+  const { diffView } = createApp();
+  const binary = 'diff --git a/image.png b/image.png\nindex 1111111..2222222 100644\nBinary files a/image.png and b/image.png differ\n';
+  const rename = 'diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n';
+  const mode = 'diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n';
+  const html = diffView.render(binary + rename + mode);
+  assert.match(html, /Binary change/);
+  assert.match(html, /Renamed/);
+  assert.match(html, /From a\/old.txt/);
+  assert.match(html, /Mode 100644 to 100755/);
+});
+
+test("malformed diffs remain readable as escaped raw text", () => {
+  const { diffView } = createApp();
+  const malformed = '@@ invalid patch <script>attack()</script>';
+  const html = diffView.render(malformed);
+  assert.match(html, /diff-fallback/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.doesNotMatch(html, /<script>/);
 });
