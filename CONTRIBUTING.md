@@ -67,6 +67,12 @@ Run the complete test suite:
 python -m unittest discover -s tests
 ```
 
+Frontend behavior tests use Node.js 22 or newer, without npm dependencies. The Python suite includes them when Node.js is installed, and CI always runs them. To run them directly:
+
+```bash
+node --test tests/web/test_app.cjs
+```
+
 Compile-check the launcher, package, and tests:
 
 ```bash

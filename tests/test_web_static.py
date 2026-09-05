@@ -124,7 +124,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("function editableProposalPaths", self.app_js)
         self.assertIn("visiblePaths", self.app_js)
         self.assertIn(".filter((path) => !visiblePaths.size || visiblePaths.has(path));", self.app_js)
-        self.assertIn("state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));", self.app_js)
+        self.assertIn("new Set(editableProposalPaths(proposal))", self.app_js)
 
     def test_approval_controls_have_dedicated_styles(self) -> None:
         self.assertIn(".approval-row", self.app_css)
@@ -211,7 +211,7 @@ class WebApprovalUiContractTests(unittest.TestCase):
         self.assertIn("/api/sandbox/list", self.app_js)
         self.assertIn("/api/sandbox/remove", self.app_js)
         self.assertIn("Permanently discard them", self.app_js)
-        self.assertIn("resetProposalForRepositoryChange", self.app_js)
+        self.assertIn("resetRepositoryContext", self.app_js)
 
     def test_task_run_ui_exposes_orchestration_and_delivery_controls(self) -> None:
         for element_id in [

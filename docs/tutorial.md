@@ -281,6 +281,8 @@ Three views remain in the primary navigation:
 
 Open `More` for Trajectory, LLM I/O, GitHub, Delivery, History, and JSON. These secondary views load their repository data when opened instead of loading every hidden panel at startup.
 
+Changing the repository source, path, URL, branch, or selected worktree clears the previous results, approvals, and delivery draft. A running task remains on the server, but its controls are detached from the new selection. Reload a view or generate a draft for the selected repository before continuing. File approval choices survive updates to the same proposal; revised edit contents require renewed approval choices.
+
 Before running an LLM workflow from the web UI, enable `Use LLM` and open `LLM & Agent`. Fill in the model, API endpoint URL, API key, and timeout or start the server from a shell that already has the matching environment variables. Use the complete Chat Completions endpoint, for example `https://api.openai.com/v1/chat/completions`; RepoPilot does not append `/chat/completions` to the value you enter. Click `Test connection` first. A successful test means the provider accepted the OpenAI-compatible chat completions request; a failed test shows a redacted diagnostic message without storing your API key.
 
 Enable `Iterative agent` under `LLM & Agent` when you want RepoPilot to make several smaller non-writing LLM calls before the main plan/proposal calls. Open `Summary > Agent activity` for each typed decision, parallel read counts, Working State, and Runtime events. Open `More > LLM I/O > Trace` for each `agent_step_N` prompt and raw output.

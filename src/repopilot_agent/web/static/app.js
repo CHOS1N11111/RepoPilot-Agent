@@ -2,7 +2,10 @@ const state = {
   lastReport: null,
   github: null,
   delivery: null,
+  deliveryRepository: null,
+  repositoryGeneration: 0,
   proposalId: null,
+  proposalReviewKey: null,
   repairParentId: null,
   rollbackAvailable: false,
   proposalApplied: false,
@@ -81,7 +84,10 @@ $("useLlm").addEventListener("change", () => {
     $("llmSettings").open = true;
   }
 });
-$("repoSource").addEventListener("change", updateRepositorySourceUi);
+$("repoSource").addEventListener("change", handleRepositoryChange);
+["repoPath", "githubUrl", "repoBranch"].forEach((id) => {
+  $(id).addEventListener("input", handleRepositoryChange);
+});
 $("sandboxSelect").addEventListener("change", selectSandbox);
 $("repositorySettings").addEventListener("toggle", () => {
   if ($("repositorySettings").open && !state.sandboxesLoaded) {
@@ -249,6 +255,7 @@ async function runWorkflow() {
 
   try {
     const report = await postJson("/api/run", payload);
+    if (!report) return;
     if (report.error) {
       throw new Error(report.error);
     }
@@ -267,6 +274,7 @@ async function generateProposal() {
 
   try {
     const report = await postJson("/api/propose", payload);
+    if (!report) return;
     if (report.error) {
       throw new Error(report.error);
     }
@@ -286,9 +294,12 @@ async function startTaskRun() {
     return;
   }
   setStatus("Starting sandboxed task run...");
+  resetRepositoryContext();
+  state.loadedViews.add("taskRun");
   activateTab("taskRun");
   try {
     const data = await postJson("/api/task-runs/start", payload);
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -310,6 +321,7 @@ async function pauseTaskRun() {
   setStatus("Requesting task pause...");
   try {
     const data = await postJson("/api/task-runs/pause", taskRunControlPayload());
+    if (!data) return;
     if (data.error) throw new Error(data.error);
     updateTaskRun(data.task_run);
     startTaskRunPolling();
@@ -361,6 +373,7 @@ async function resumeTaskRun() {
       confirm_resume: true,
       ...exactConfirmation,
     });
+    if (!data) return;
     if (data.recovery_readiness) {
       state.taskRunRecoveryReadiness = data.recovery_readiness;
     }
@@ -389,6 +402,7 @@ async function checkTaskRunRecoveryReadiness() {
         ...taskRunControlPayload(),
       }
     );
+    if (!data) return null;
     if (data.error) throw new Error(data.error);
     if (data.task_run) updateTaskRun(data.task_run);
     state.taskRunRecoveryReadiness = data.recovery_readiness || null;
@@ -410,6 +424,7 @@ async function cancelTaskRun() {
   setStatus("Requesting task cancellation...");
   try {
     const data = await postJson("/api/task-runs/cancel", taskRunControlPayload());
+    if (!data) return;
     if (data.error) throw new Error(data.error);
     updateTaskRun(data.task_run);
     startTaskRunPolling();
@@ -437,6 +452,7 @@ async function createTaskBranch() {
       branch_name: branchName,
       confirm_create: true,
     });
+    if (!data) return;
     if (data.error) throw new Error(data.error);
     updateTaskRun(data.task_run);
     setStatus(`Created local branch ${data.branch}.`);
@@ -495,6 +511,7 @@ async function approveRuntimeWrite() {
       file_scope: request.file_scope || [],
       command_allowlist: request.command_allowlist || [],
     });
+    if (!data) return;
     if (data.error) {
       if (data.task_run) updateTaskRun(data.task_run);
       throw new Error(data.error);
@@ -530,6 +547,7 @@ async function rejectRuntimeWrite() {
       checkpoint: request.checkpoint,
       reason: "Rejected in the RepoPilot Web UI.",
     });
+    if (!data) return;
     if (data.error) {
       if (data.task_run) updateTaskRun(data.task_run);
       throw new Error(data.error);
@@ -564,6 +582,7 @@ async function pollTaskRun() {
     source_repo: current.source_repo,
   });
   const data = await getJson(`/api/task-runs/status?${params.toString()}`);
+  if (!data) return;
   if (data.error) throw new Error(data.error);
   if (state.taskRun?.run_id !== data.task_run?.run_id) return;
   updateTaskRun(data.task_run);
@@ -571,6 +590,7 @@ async function pollTaskRun() {
 
 async function loadLatestTaskRun() {
   const data = await getJson(`/api/task-runs?${repositoryQuery()}&limit=1`);
+  if (!data) return;
   if (data.error) throw new Error(data.error);
   const latest = (data.task_runs || [])[0];
   if (!latest) {
@@ -655,7 +675,7 @@ function adoptTaskRunSandbox(taskRun) {
   renderSandboxOptions(sandbox.path);
   renderSandboxStatus(sandbox);
   updateRepositorySourceUi();
-  resetProposalForRepositoryChange();
+  resetRepositoryContext({ preserveTaskRun: true });
 }
 
 function renderTaskRun(taskRun) {
@@ -1060,6 +1080,7 @@ async function submitTaskRunInput() {
       question_hash: request.question_hash,
       answer,
     });
+    if (!data) return;
     if (data.error) {
       if (data.task_run) updateTaskRun(data.task_run);
       throw new Error(data.error);
@@ -1096,6 +1117,7 @@ async function testLlmConnection() {
   $("llmTestLine").textContent = "Testing model endpoint...";
   try {
     const data = await postJson("/api/llm/test", buildLlmPayload());
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1135,6 +1157,7 @@ async function applyProposal() {
       proposal_id: state.proposalId,
       approved_paths: approvedPaths,
     });
+    if (!result) return;
     if (result.error) {
       if (result.safety_check) {
         $("proposalList").innerHTML += renderSafetyCheck(result.safety_check);
@@ -1186,6 +1209,7 @@ async function revertProposal() {
       ...taskRunLinkPayload(),
       proposal_id: state.proposalId,
     });
+    if (!result) return;
     if (result.error) {
       if (result.timeline) {
         renderTimeline(result.timeline);
@@ -1224,6 +1248,7 @@ async function generateRepairProposal() {
       ...taskRunLinkPayload(),
       proposal_id: state.repairParentId,
     });
+    if (!report) return;
     if (report.error) {
       throw new Error(report.error);
     }
@@ -1285,11 +1310,12 @@ async function syncRepository() {
   setStatus("Syncing repository...");
   try {
     const data = await postJson("/api/repository/sync", buildRepositoryPayload());
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
     updateRepositorySourceStatus(data.repository_source);
-    state.loadedViews.clear();
+    resetRepositoryContext();
     state.sandboxesLoaded = false;
     setStatus(data.repository_source?.message || "Repository synced.");
     await Promise.allSettled([
@@ -1310,6 +1336,7 @@ async function createSandbox() {
       ...buildRepositoryPayload(),
       ref: "HEAD",
     });
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1335,6 +1362,7 @@ async function refreshSandboxes() {
     ? new URLSearchParams({ repo: state.sandbox.source_repo, repo_source: "local" })
     : new URLSearchParams(repositoryQuery());
   const data = await getJson(`/api/sandbox/list?${params.toString()}`);
+  if (!data) return;
   if (data.error) {
     throw new Error(data.error);
   }
@@ -1345,7 +1373,7 @@ async function refreshSandboxes() {
   state.sandbox = selected;
   if (previousSandbox && !selected) {
     restoreSandboxSource(previousSandbox);
-    resetProposalForRepositoryChange();
+    resetRepositoryContext();
   }
   renderSandboxOptions(selected?.path || "");
   renderSandboxStatus(selected);
@@ -1361,7 +1389,7 @@ function selectSandbox() {
       restoreSandboxSource(previousSandbox);
     }
     renderSandboxStatus(null);
-    resetProposalForRepositoryChange();
+    resetRepositoryContext();
     return;
   }
   activateSandbox(sandbox);
@@ -1378,7 +1406,7 @@ function activateSandbox(sandbox) {
   $("repoBranch").value = "";
   updateRepositorySourceUi();
   renderSandboxStatus(sandbox);
-  resetProposalForRepositoryChange();
+  resetRepositoryContext();
 }
 
 function restoreSandboxSource(sandbox) {
@@ -1407,6 +1435,7 @@ async function removeSandbox() {
       confirm_remove: true,
       force: false,
     });
+    if (!data) return;
     if (data.error && data.dirty) {
       const discard = window.confirm(
         "This sandbox has uncommitted changes. Permanently discard them and remove the sandbox?"
@@ -1421,6 +1450,7 @@ async function removeSandbox() {
         confirm_remove: true,
         force: true,
       });
+      if (!data) return;
     }
     if (data.error) {
       throw new Error(data.error);
@@ -1435,7 +1465,7 @@ async function removeSandbox() {
     updateRepositorySourceUi();
     renderSandboxOptions("");
     renderSandboxStatus(null);
-    resetProposalForRepositoryChange();
+    resetRepositoryContext();
     setStatus("Worktree sandbox removed.");
     await Promise.allSettled([
       loadViewData(
@@ -1478,31 +1508,72 @@ function renderSandboxStatus(sandbox) {
   ).slice(0, 12)}; ${stateLabel}.`;
 }
 
-function resetProposalForRepositoryChange() {
+function handleRepositoryChange() {
+  state.sandbox = null;
+  state.sandboxes = [];
+  state.sandboxesLoaded = false;
+  renderSandboxOptions("");
+  renderSandboxStatus(null);
+  updateRepositorySourceUi();
+  resetRepositoryContext();
+  setStatus("Repository selection changed.");
+}
+
+function resetRepositoryContext({ preserveTaskRun = false } = {}) {
+  state.repositoryGeneration += 1;
   state.lastReport = null;
+  state.github = null;
+  state.delivery = null;
+  state.deliveryRepository = null;
   state.proposalId = null;
+  state.proposalReviewKey = null;
   state.repairParentId = null;
   state.rollbackAvailable = false;
   state.proposalApplied = false;
   state.approvedPaths = new Set();
   state.loadedViews.clear();
+  state.historyTrajectory = null;
+  stopTrajectoryPlayback();
+  setTrajectory(null);
+  if (!preserveTaskRun) {
+    stopTaskRunPolling();
+    state.taskRun = null;
+    state.taskRunPayload = null;
+    state.taskRunSandboxPath = null;
+    state.taskRunRenderedProposalId = null;
+    state.taskRunRecoveryKey = null;
+    state.taskRunRecoveryReadiness = null;
+    renderTaskRun({ status: "idle", message: "No sandboxed task is active." });
+    $("taskRunPhases").replaceChildren();
+    $("taskRunBranch").value = "";
+    $("taskRunInputAnswer").value = "";
+  }
+  [
+    "diffOutput", "githubContent", "prReadinessContent", "deliveryContent",
+    "historyContent", "historyDetail", "llmInput", "llmOutput", "llmReview",
+    "llmTraceList", "jsonOutput",
+  ].forEach((id) => $(id).replaceChildren());
   $("summaryEmpty").classList.remove("hidden");
   $("summaryResults").classList.add("hidden");
   $("applyProposal").disabled = true;
   $("revertProposal").disabled = true;
   $("generateRepairProposal").disabled = true;
+  updateCreatePullRequestState(null);
+  updateRuntimeApprovalControls(null);
   updateApprovalState();
 }
 
 async function loadGithub() {
   $("githubContent").innerHTML = item("Loading GitHub status...");
   const data = await getJson(`/api/github/status?${repositoryQuery()}&limit=8`);
+  if (!data) return;
   state.github = data;
   renderGithub(data);
 }
 
 async function loadDiff(staged) {
   const data = await getJson(`/api/git/diff?${repositoryQuery()}&staged=${staged ? "true" : "false"}`);
+  if (!data) return;
   $("diffOutput").textContent = data.diff || data.error || "No diff.";
   updateRepositorySourceStatus(data.repository_source);
 }
@@ -1514,11 +1585,13 @@ async function generateDelivery() {
       ...buildRepositoryPayload(),
       validation_notes: buildValidationNotes(),
     });
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
     state.delivery = data;
     renderDelivery(data);
+    state.deliveryRepository = buildRepositoryPayload();
     setStatus("Delivery draft ready.");
   } catch (error) {
     setStatus(`Error: ${error.message}`);
@@ -1527,8 +1600,10 @@ async function generateDelivery() {
 
 async function loadPrReadiness() {
   setStatus("Checking PR readiness...");
+  updateCreatePullRequestState(null);
   try {
     const data = await postJson("/api/github/pr/readiness", buildRepositoryPayload());
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1537,6 +1612,7 @@ async function loadPrReadiness() {
     updateCreatePullRequestState(data.pr_readiness);
     setStatus(data.pr_readiness?.ready ? "PR readiness passed." : "PR readiness needs attention.");
   } catch (error) {
+    updateCreatePullRequestState(null);
     $("prReadinessContent").innerHTML = item(`PR readiness unavailable: ${escapeHtml(error.message)}`);
     setStatus(`Error: ${error.message}`);
   }
@@ -1546,6 +1622,10 @@ async function createPullRequest() {
   const delivery = state.delivery;
   const readiness = delivery?.pr_readiness;
   const draft = delivery?.pull_request;
+  if (!state.deliveryRepository || repositoryKey(state.deliveryRepository) !== repositoryKey()) {
+    setStatus("Generate a delivery draft for the current repository selection.");
+    return;
+  }
   if (!readiness?.ready || !draft?.title || !draft?.body) {
     setStatus("Generate a ready PR draft before creating a pull request.");
     return;
@@ -1557,12 +1637,13 @@ async function createPullRequest() {
   setStatus("Creating pull request...");
   try {
     const data = await postJson("/api/github/pr/create", {
-      ...buildRepositoryPayload(),
+      ...state.deliveryRepository,
       confirm_create: true,
       title: draft.title,
       body: draft.body,
       base_branch: readiness.base_branch,
     });
+    if (!data) return;
     if (data.error) {
       if (data.pr_readiness) {
         $("prReadinessContent").innerHTML = renderPrReadiness(data.pr_readiness);
@@ -1582,6 +1663,7 @@ async function loadHistory() {
   $("historyContent").innerHTML = item("Loading history...");
   try {
     const data = await getJson(`/api/history?${repositoryQuery()}&limit=20`);
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1597,6 +1679,7 @@ async function loadHistoryDetail(runId) {
   state.historyTrajectory = null;
   try {
     const data = await getJson(`/api/history/run?${repositoryQuery()}&id=${encodeURIComponent(runId)}`);
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1617,6 +1700,7 @@ async function deleteHistoryRun(runId) {
       ...buildRepositoryPayload(),
       id: runId,
     });
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1637,6 +1721,7 @@ async function toggleHistoryPin(runId, pinned) {
       id: runId,
       pinned,
     });
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1655,6 +1740,7 @@ async function clearHistory() {
   setStatus("Clearing history...");
   try {
     const data = await postJson("/api/history/clear", buildRepositoryPayload());
+    if (!data) return;
     if (data.error) {
       throw new Error(data.error);
     }
@@ -1668,14 +1754,28 @@ async function clearHistory() {
 }
 
 function renderReport(report, payload) {
+  const proposal = report.patch_proposal;
+  const reviewKey = JSON.stringify([
+    report.proposal_id || null,
+    (proposal?.file_edits || []).map((edit) => [edit.path, edit.new_content]),
+    editableProposalPaths(proposal),
+    proposal?.proposed_diff || "",
+  ]);
+  if (reviewKey !== state.proposalReviewKey) {
+    const revisedProposal = state.proposalId && state.proposalId === report.proposal_id;
+    state.approvedPaths = revisedProposal ? new Set() : new Set(editableProposalPaths(proposal));
+    state.proposalApplied = false;
+    state.rollbackAvailable = false;
+    state.proposalReviewKey = reviewKey;
+  }
   state.proposalId = report.proposal_id || null;
   const repairInProgress = ["diagnosing", "replanning"].includes(report.task_run?.status);
   state.repairParentId = report.validation_feedback && state.proposalId
     && !report.repair_budget_exhausted && !report.repair_stop_reason && !repairInProgress
     ? state.proposalId : null;
-  state.rollbackAvailable = Boolean(report.rollback_available);
-  state.proposalApplied = false;
-  state.approvedPaths = new Set(editableProposalPaths(report.patch_proposal));
+  if (typeof report.rollback_available === "boolean") {
+    state.rollbackAvailable = report.rollback_available;
+  }
   $("summaryEmpty").classList.add("hidden");
   $("summaryResults").classList.remove("hidden");
   $("runSummary").textContent = report.summary || "Repository analysis complete.";
@@ -1722,6 +1822,7 @@ function renderReport(report, payload) {
   $("repairLoopList").innerHTML = renderRepairLoop(report);
   $("planList").innerHTML = report.plan.map((step) => `<li class="item"><div class="item-title">${escapeHtml(step.title)}</div>${escapeHtml(step.detail)}</li>`).join("");
   $("proposalList").innerHTML = renderMemoryContext(report.memory_context || []) + renderProposals(report.patch_proposal);
+  setApprovalInputsDisabled(state.proposalApplied);
   $("proposalOutput").textContent = JSON.stringify(
     {
       memory_context: report.memory_context,
@@ -1734,9 +1835,11 @@ function renderReport(report, payload) {
   $("proposedDiffOutput").textContent = report.patch_proposal?.proposed_diff || "No proposed diff. Use LLM proposal generation for apply-ready edits.";
   updateApprovalState();
   $("revertProposal").disabled = !state.rollbackAvailable;
-  $("rollbackStatus").textContent = state.proposalId
-    ? "Proposal is stored server-side; rollback becomes available after apply."
-    : "No rollback snapshot available.";
+  $("rollbackStatus").textContent = state.rollbackAvailable
+    ? "Rollback snapshot available for this applied proposal."
+    : state.proposalId
+      ? "Proposal is stored server-side; rollback becomes available after apply."
+      : "No rollback snapshot available.";
   $("validationList").innerHTML = renderValidation(report.validation);
   $("validationFeedbackList").innerHTML = renderValidationFeedback(report.validation_feedback, report);
   if (report.validation_feedback || report.repair_stop_reason || report.repair_budget_exhausted) {
@@ -2271,27 +2374,27 @@ function renderAgentWorkingState(
       <span class="timeline-status">${escapeHtml(agentState.status || "unknown")}</span>
       <span>Iteration ${escapeHtml(agentState.iteration ?? 0)}${resolvedStopReason ? ` | ${escapeHtml(resolvedStopReason)}` : ""}</span>
     </div>
-    <div class="timeline-event">
+    <div class="timeline-event timeline-property">
       <span class="timeline-step">Objective</span>
       <span>${escapeHtml(agentState.objective)}</span>
     </div>
-    <div class="timeline-event">
+    <div class="timeline-event timeline-property">
       <span class="timeline-step">Focus</span>
       <span>${escapeHtml(agentState.focus || "none")}</span>
     </div>
-    <div class="timeline-event">
+    <div class="timeline-event timeline-property">
       <span class="timeline-step">Selected paths</span>
       <span>${escapeHtml(selectedPaths.join(", ") || "none")}</span>
     </div>
-    <div class="timeline-event">
+    <div class="timeline-event timeline-property">
       <span class="timeline-step">Findings</span>
       <span>${escapeHtml(findings.join(" | ") || "none")}</span>
     </div>
-    <div class="timeline-event">
+    <div class="timeline-event timeline-property">
       <span class="timeline-step">Open questions</span>
       <span>${escapeHtml(openQuestions.join(" | ") || "none")}</span>
     </div>
-    <div class="timeline-event">
+    <div class="timeline-event timeline-property">
       <span class="timeline-step">Expected evidence</span>
       <span>${escapeHtml(agentState.expected_evidence || "none")}</span>
     </div>
@@ -2303,11 +2406,11 @@ function renderAgentWorkingState(
     ${planRows}
     ${acceptanceRows}
     ${proposalRows}
-    ${proposedDiff ? `<div class="timeline-event">
+    ${proposedDiff ? `<div class="timeline-event timeline-property">
       <span class="timeline-step">Cumulative virtual diff</span>
       <pre>${escapeHtml(proposedDiff)}</pre>
     </div>` : ""}
-    ${pendingQuestion ? `<div class="timeline-event">
+    ${pendingQuestion ? `<div class="timeline-event timeline-property">
       <span class="timeline-step">Pending question</span>
       <span>${escapeHtml(pendingQuestion)}</span>
     </div>` : ""}
@@ -2697,6 +2800,9 @@ function renderDelivery(data) {
 }
 
 function updateCreatePullRequestState(readiness, draft = state.delivery?.pull_request) {
+  if (state.delivery) {
+    state.delivery.pr_readiness = readiness;
+  }
   $("createPullRequest").disabled = !readiness?.ready || !draft?.title || !draft?.body;
 }
 
@@ -2931,7 +3037,7 @@ function formatTraceUsage(trace) {
 function renderGithub(data) {
   updateRepositorySourceStatus(data.repository_source);
   if (data.error || data.unavailable_reason) {
-    $("githubContent").innerHTML = item(data.error || data.unavailable_reason);
+    $("githubContent").innerHTML = item(escapeHtml(data.error || data.unavailable_reason));
     return;
   }
   const repo = data.repository ? item(`<strong>${escapeHtml(data.repository.owner)}/${escapeHtml(data.repository.repo)}</strong><br>${escapeHtml(data.repository.html_url)}`) : item("Repository unavailable.");
@@ -3088,17 +3194,33 @@ function buildLlmOutputPreview(report) {
 }
 
 async function postJson(url, payload) {
-  const response = await fetch(url, {
+  return requestJson(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return response.json();
 }
 
 async function getJson(url) {
-  const response = await fetch(url);
-  return response.json();
+  return requestJson(url);
+}
+
+async function requestJson(url, options) {
+  const generation = state.repositoryGeneration;
+  const isCurrent = () => url === "/api/llm/test" || generation === state.repositoryGeneration;
+  try {
+    const response = await fetch(url, options);
+    const data = await response.json();
+    // Repository responses from a previous selection must not restore its controls.
+    return isCurrent() ? data : null;
+  } catch (error) {
+    if (!isCurrent()) return null;
+    throw error;
+  }
+}
+
+function repositoryKey(repository = buildRepositoryPayload()) {
+  return JSON.stringify([repository.repo_source, repository.repo, repository.github_url, repository.branch]);
 }
 
 function sourceLabel(metadata) {
