@@ -10,7 +10,7 @@
 
 RepoPilot Agent 是一个在本地运行、以人工审批为先的编程 Agent，可将仓库任务和 GitHub Issue 转换为可审查的代码修改方案。它能够理解仓库结构，使用确定性规则或兼容 OpenAI API 的大模型制定计划，预览精确 Diff，仅应用用户批准的文件，验证修改结果，并将 Git 交付操作保留给用户控制。
 
-[快速开始](#快速开始) | [使用教程](tutorial.md) | [架构设计](architecture.md) | [评测](../evals/README.md) | [贡献指南](../CONTRIBUTING.md)
+[快速开始](#快速开始) | [界面预览](#界面预览) | [使用教程](tutorial.md) | [架构设计](architecture.md) | [评测](../evals/README.md) | [贡献指南](../CONTRIBUTING.md)
 
 ## 核心功能
 
@@ -24,6 +24,28 @@ RepoPilot Agent 是一个在本地运行、以人工审批为先的编程 Agent�
 - 在服务端保存修改方案，并且只应用用户明确批准的文件。
 - 在受管理的 Git Worktree 中执行完整任务，支持修复预算、无进展检测、检查点和精确 action 重启恢复。
 - 读取 GitHub Issue、Pull Request、Review、评论、变更文件以及 CI/Check 状态。
+
+## 界面预览
+
+[查看完整截图集与拍摄说明](screenshots/README.md)。
+
+### 从 GitHub Issue 创建任务
+
+将 GitHub Issue 导入任务输入框，并在同一界面查看仓库的 Issue、Pull Request、评论和变更文件。
+
+![GitHub Issue 已导入任务输入框，右侧展示仓库 Issue、评论和 Pull Request](screenshots/09-github-issue-task.png)
+
+### 精确 Diff 审批
+
+在写入受管理的 Worktree 前，审查具体代码差异和涉及的文件，再决定是否批准。
+
+![待审批的写入操作，包含文件范围和精确代码差异](screenshots/02-exact-write-approval.png)
+
+### Agent 轨迹与回放
+
+查看工具调用、Token 用量和证据覆盖率，并逐条回放执行事件。
+
+![Agent 轨迹界面，展示执行指标、动作序列和事件回放控件](screenshots/04-agent-trajectory.png)
 
 ## 工作流程
 

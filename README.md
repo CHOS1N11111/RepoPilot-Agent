@@ -10,7 +10,7 @@ English | [简体中文](docs/README.zh-CN.md)
 
 RepoPilot Agent is a local, approval-first coding agent that turns repository tasks and GitHub issues into reviewable code-change proposals. It understands repository structure, plans with deterministic rules or an OpenAI-compatible LLM, previews exact diffs, applies only approved files, validates the result, and keeps Git delivery under user control.
 
-[Quick Start](#quick-start) | [Tutorial](docs/tutorial.md) | [Architecture](docs/architecture.md) | [Evaluations](evals/README.md) | [Contributing](CONTRIBUTING.md)
+[Quick Start](#quick-start) | [Screenshots](#screenshots) | [Tutorial](docs/tutorial.md) | [Architecture](docs/architecture.md) | [Evaluations](evals/README.md) | [Contributing](CONTRIBUTING.md)
 
 ## What It Does
 
@@ -20,6 +20,28 @@ RepoPilot Agent is a local, approval-first coding agent that turns repository ta
 - Produces reviewable virtual diffs and performs writes only in managed Git worktrees after exact, expiring human approval.
 - Validates approved changes with bounded repair attempts, checkpoints, no-progress detection, and restart-safe recovery.
 - Reads GitHub issues, pull requests, reviews, comments, changed files, and CI/check status.
+
+## Screenshots
+
+[View all screenshots and capture details](docs/screenshots/README.md).
+
+### GitHub Issues as Tasks
+
+Import a GitHub issue as a task, with repository issues, pull requests, comments, and changed files available in the same view.
+
+![GitHub issue loaded into the task form alongside repository issues, comments, and pull requests](docs/screenshots/09-github-issue-task.png)
+
+### Exact Diff Approval
+
+Review the exact diff and file scope before approving a write to the managed worktree.
+
+![Pending write approval with the affected files and exact code diff](docs/screenshots/02-exact-write-approval.png)
+
+### Agent Trajectory and Replay
+
+Inspect tool calls, token usage, and evidence coverage, then replay individual execution events.
+
+![Agent trajectory showing execution metrics, action sequence, and replay controls](docs/screenshots/04-agent-trajectory.png)
 
 ## Workflow
 
